@@ -1,0 +1,21 @@
+[Unit]
+Description=BYOK Relay Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/byok-relay
+ExecStart=/usr/bin/node src/index.js
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=byok-relay
+
+# Environment — copy .env.example to .env and fill in values
+# The EnvironmentFile directive loads .env automatically
+EnvironmentFile=/home/ubuntu/byok-relay/.env
+
+[Install]
+WantedBy=multi-user.target
