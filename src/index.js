@@ -14,7 +14,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o =>
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-relay-token', 'anthropic-version'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-relay-token', 'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title', 'http-referer'],
   credentials: false,
 }));
 
@@ -138,10 +138,14 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
   // Build the path to forward (everything after /relay/:provider)
   const forwardPath = '/' + (req.params[0] || '');
 
-  // Pass through anthropic-specific headers
+  // Pass through provider-specific and relay headers
   const extraHeaders = {};
-  if (req.headers['anthropic-version']) {
-    extraHeaders['anthropic-version'] = req.headers['anthropic-version'];
+  const passthroughHeaders = [
+    'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
+    'http-referer',
+  ];
+  for (const h of passthroughHeaders) {
+    if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
   try {
