@@ -39,12 +39,16 @@ const PROVIDERS = {
   },
 
   google: {
-    // Gemini API — key is passed as query param, not header
+    // Gemini API — key is passed as query param; ?alt=sse required for SSE streaming
     baseUrl: 'https://generativelanguage.googleapis.com',
     buildHeaders: () => ({ 'Content-Type': 'application/json' }),
     buildUrl: (baseUrl, path, apiKey) => {
+      // Add alt=sse for streaming endpoints, plus the API key
+      const isStreaming = path.includes('stream');
+      const params = new URLSearchParams({ key: apiKey });
+      if (isStreaming) params.set('alt', 'sse');
       const sep = path.includes('?') ? '&' : '?';
-      return `${baseUrl}${path}${sep}key=${apiKey}`;
+      return `${baseUrl}${path}${sep}${params.toString()}`;
     },
   },
 
