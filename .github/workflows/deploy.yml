@@ -18,6 +18,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             set -e
+            export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"
             cd ~/byok-relay
             git pull origin main
             npm ci --omit=dev
