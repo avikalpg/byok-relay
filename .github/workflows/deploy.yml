@@ -1,0 +1,27 @@
+name: Deploy to OCI
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: SSH deploy to OCI instance
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ~/byok-relay
+            git pull origin main
+            npm ci --omit=dev
+            sudo systemctl restart byok-relay
+            sleep 3
+            curl -sf http://localhost:3000/health || (echo "Health check failed" && exit 1)
+            echo "Deployed successfully"
