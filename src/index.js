@@ -5,6 +5,18 @@ const rateLimit = require('express-rate-limit');
 const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
 
+// ── Startup validation ──────────────────────────────────────────────────────
+if (!process.env.ENCRYPTION_SECRET) {
+  console.error('ERROR: ENCRYPTION_SECRET env var is not set.');
+  console.error('Generate one with: openssl rand -hex 32');
+  console.error('Then add it to your .env file or environment.');
+  process.exit(1);
+}
+if (process.env.ENCRYPTION_SECRET.length < 32) {
+  console.error('ERROR: ENCRYPTION_SECRET must be at least 32 characters.');
+  process.exit(1);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
@@ -40,6 +52,15 @@ const relayLimiter = rateLimit({
   message: { error: 'AI request rate limit exceeded (20/min).' },
 });
 
+// Registration rate limit: 10 new users per hour per IP (prevents DB spam)
+const registrationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many registrations from this IP, please try again later.' },
+});
+
 // ── Auth middleware ─────────────────────────────────────────────────────────
 
 function requireToken(req, res, next) {
@@ -67,7 +88,7 @@ app.get('/health', (req, res) => {
  * The token is stored in the user's browser (localStorage).
  * It never contains the API key — the API key is stored server-side.
  */
-app.post('/users', (req, res) => {
+app.post('/users', registrationLimiter, (req, res) => {
   const { app_id } = req.body;
   if (!app_id) return res.status(400).json({ error: 'app_id is required' });
   const { token } = createUser(app_id);
