@@ -85,7 +85,7 @@ x-relay-token: <token>
 Content-Type: application/json
 anthropic-version: 2023-06-01
 
-{ "model": "claude-haiku-3-5", "max_tokens": 1024, "messages": [...], "stream": true }
+{ "model": "claude-3-5-haiku-20241022", "max_tokens": 1024, "messages": [...], "stream": true }
 ```
 Full streaming (SSE) is supported — the response is piped directly from the provider to the browser.
 
@@ -97,6 +97,38 @@ x-relay-base-url: https://openrouter.ai
 Content-Type: application/json
 
 { "model": "...", "messages": [...] }
+```
+
+## Quickstart (60 seconds)
+
+```bash
+# 1. Clone and install
+git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
+
+# 2. Configure
+echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
+echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+
+# 3. Start
+npm start &
+
+# 4. Register a user and get a token
+TOKEN=$(curl -s -X POST http://localhost:3000/users \
+  -H "Content-Type: application/json" \
+  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# 5. Store your Anthropic key
+curl -X POST http://localhost:3000/keys/anthropic \
+  -H "Content-Type: application/json" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"key":"sk-ant-YOUR-KEY-HERE"}'
+
+# 6. Relay a request (streaming)
+curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 ## Setup
@@ -136,7 +168,8 @@ sudo certbot --nginx -d relay.yourdomain.com
 
 - **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
 - **Keys never returned** — the API after initial POST
-- **Rate limiting** — 100 req/min global, 20 AI req/min per token
+- **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
+- **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
 - **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
 
