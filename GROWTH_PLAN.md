@@ -24,15 +24,15 @@ Make byok-relay findable by AI agents and their users.
 | 5 (2026-05-17) | Submit to awesome-llm, awesome-self-hosted GitHub lists | ⏳ Pending | |
 
 ### Phase 2 — Credibility (Week 2)
-Fix the "Michael Seibel gaps" — trust, market size, unfair advantage.
+Improve what visitors and users see in the repo + published content.
 
 | Day | Task | Status | Notes |
 |-----|------|--------|-------|
-| 6 (2026-05-18) | Add SECURITY.md — threat model, encryption details, trust story | ⏳ Pending | Addresses investor concern #2 |
-| 7 (2026-05-19) | Add MARKET.md — bottoms-up TAM/SAM/SOM analysis | ⏳ Pending | Addresses investor concern #1 |
-| 8 (2026-05-20) | Write dev.to article: "The missing backend for Lovable/Bolt apps" | ⏳ Pending | SEO + human discovery |
-| 9 (2026-05-21) | Add INTEGRATIONS.md with Lovable/Bolt/Framer/Vercel code snippets | ⏳ Pending | Distribution advantage |
-| 10 (2026-05-22) | Improve README with traction section + "3 lines of code" hero example | ⏳ Pending | |
+| 6 (2026-05-18) | Expand Security section in README — threat model, encryption details (user-facing, not internal notes) | ⏳ Pending | Trust story for developers evaluating byok-relay |
+| 7 (2026-05-19) | Write dev.to article: "The missing backend for Lovable/Bolt apps" | ⏳ Pending | SEO + human discovery |
+| 8 (2026-05-20) | Add INTEGRATIONS.md with Lovable/Bolt/Framer/Vercel code snippets | ⏳ Pending | Usability + retention |
+| 9 (2026-05-21) | Improve README hero section — sharper 3-line install, clearer "why" | ⏳ Pending | First impression |
+| 10 (2026-05-22) | TAM/SAM/SOM research → discuss with Avi (internal, not in repo) | ⏳ Pending | Workspace-only research |
 
 ### Phase 3 — Distribution (Week 3)
 Get in front of frontend builders where they already are.
@@ -63,11 +63,13 @@ Get in front of frontend builders where they already are.
 
 ## Key Gaps (from Michael Seibel analysis)
 
-1. **Market size not proven** → MARKET.md with bottoms-up TAM (Day 7)
+1. **Market size not proven** → research in workspace (`~/projects/byok-relay-project/`) + discussion with Avi (Day 10)
 2. **Unfair advantage weak** → distribution via Lovable/Bolt/Vercel integrations (Phase 3)
-3. **Trust story missing** → SECURITY.md (Day 6)
-4. **No traction numbers** → add metrics tracking, add traction section to README
+3. **Trust story missing** → expand Security section in README for visitors (Day 6); full threat model as internal workspace doc
+4. **No traction numbers** → metrics tracker running daily; add traction section to README once numbers grow
 5. **Discoverability near-zero** → Phase 1 (this week)
+
+> Internal analysis (market sizing, security threat model, investor prep) lives in `~/projects/byok-relay-project/` — not in this repo.
 
 ---
 
