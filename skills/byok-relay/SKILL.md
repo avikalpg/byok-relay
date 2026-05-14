@@ -1,3 +1,8 @@
+---
+name: byok-relay
+description: Integrate byok-relay into any frontend-only or full-stack AI app where users bring their own API keys (BYOK). Use when a user needs to call OpenAI, Anthropic, Gemini, or other AI APIs from the browser without exposing keys in frontend code.
+---
+
 # byok-relay Skill
 
 ## What this skill does

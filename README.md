@@ -1,5 +1,7 @@
 # byok-relay
 
+[![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
+
 A minimal self-hosted relay server for **Bring Your Own Key (BYOK)** AI web applications.
 
 ## The problem

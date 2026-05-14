@@ -4,3 +4,5 @@ data/
 *.db
 *.db-wal
 *.db-shm
+GROWTH_PLAN.md
+metrics/
