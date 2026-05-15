@@ -204,9 +204,14 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
+// When run directly (node src/index.js or npm start), start the HTTP server.
+// When imported by Vercel's @vercel/node runtime, export the app instead.
+if (require.main === module) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`byok-relay listening on port ${PORT}`);
+    console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
+    console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
+  });
+}
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`byok-relay listening on port ${PORT}`);
-  console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
-  console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
-});
+module.exports = app;
