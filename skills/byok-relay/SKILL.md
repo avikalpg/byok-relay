@@ -42,7 +42,7 @@ npm start
 
 For production: see the systemd + nginx setup in the README.
 
-**Hosted relay available at:** https://relay.myfreetimeinaweek.in (contact avikalpg for access)
+**Hosted relay available at:** https://relay.byokrelay.com (contact avikalpg for access)
 
 ## Integration (client-side code)
 

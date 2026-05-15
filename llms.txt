@@ -39,7 +39,7 @@ Or deploy instantly to your own server — see README for systemd + nginx setup.
 
 ## Hosted version
 
-Production relay: https://relay.myfreetimeinaweek.in
+Production relay: https://relay.byokrelay.com
 
 ## Supported AI providers
 
@@ -76,5 +76,5 @@ Apache 2.0 — free to self-host or build on top of.
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
-- Hosted relay: https://relay.myfreetimeinaweek.in
+- Hosted relay: https://relay.byokrelay.com
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
