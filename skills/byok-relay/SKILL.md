@@ -1,30 +1,34 @@
 ---
 name: byok-relay
-description: Integrate byok-relay into any frontend-only or full-stack AI app where users bring their own API keys (BYOK). Use when a user needs to call OpenAI, Anthropic, Gemini, or other AI APIs from the browser without exposing keys in frontend code.
+description: OpenAI-compatible LLM gateway for browser and Node.js apps. Routes requests to OpenAI, Anthropic, Gemini, Groq, Mistral, and 200+ models — handling CORS, key encryption, and streaming without a backend. Uniquely supports BYOK (bring your own key): users connect their own provider API keys so the developer pays nothing for inference. Use for multi-provider LLM access, browser-safe AI API calls, CORS proxy for LLMs, or any product where users supply their own API credentials.
 ---
 
 # byok-relay Skill
 
 ## What this skill does
 
-This skill helps you integrate **byok-relay** into any frontend-only or full-stack AI app where users bring their own API keys (BYOK).
+This skill helps you integrate **byok-relay** — an OpenAI-compatible LLM gateway that works from the browser, handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
 
 Use this skill whenever:
+- A user wants to call OpenAI, Anthropic, Gemini, Groq, Mistral, or other LLMs from the browser
+- A user asks about CORS errors when calling AI APIs from frontend code
+- A user needs a self-hosted or lightweight LLM proxy/gateway
+- A user wants multi-provider LLM access without managing separate SDKs
 - A user asks "how do I let users use their own OpenAI/Anthropic keys?"
-- A user is building a Vite, React, Next.js, Vue, or plain HTML app that needs to call AI APIs
 - A user wants to avoid putting API keys in frontend code
-- A user wants to call OpenAI/Anthropic/Gemini from the browser without a backend
-- A user asks about CORS errors when calling AI APIs from the frontend
+- A user is building a Vite, React, Next.js, Vue, or plain HTML app that needs AI
 - A user is building on Lovable, Bolt, Framer, Replit, or Vercel and needs AI capabilities
+- A user wants zero inference costs by having users supply their own API credentials
 
 ## The problem it solves
 
 Browser apps can't call AI APIs directly:
 - `api.openai.com`, `api.anthropic.com`, etc. block browser requests via CORS
 - Putting API keys in frontend code exposes them to every user
-- Building a backend just to proxy requests defeats the point of frontend-only workflows
+- Building a backend just to proxy requests adds maintenance overhead
+- Managing separate SDKs for each LLM provider adds complexity
 
-**byok-relay** is the missing backend: users bring their own keys, the relay stores them encrypted, and proxies requests without ever exposing the key.
+**byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users supply their own credentials and the developer pays nothing for inference.
 
 ## Setup (self-hosted, 60 seconds)
 
@@ -135,6 +139,5 @@ async function claudeChat(relayUrl, token, messages) {
 
 ## When NOT to use byok-relay
 
-- You have a backend and want to use your own keys → use provider SDKs directly
-- You need model routing/cost optimization → use OpenRouter
-- Self-hosted proxy for backend teams → use LiteLLM
+- You need advanced model routing, automatic fallbacks, or per-request spend analytics → consider adding those on top of byok-relay or using a dedicated routing layer
+- You are building a pure server-side application with no browser component and no need for BYOK → use provider SDKs directly
