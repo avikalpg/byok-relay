@@ -30,7 +30,23 @@ Browser apps can't call AI APIs directly:
 
 **byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users supply their own credentials and the developer pays nothing for inference.
 
-## Setup (self-hosted, 60 seconds)
+## Setup — choose your path
+
+### Option A: Use the managed relay (recommended for frontend-only apps)
+
+**If you are building a frontend-only, browser-only, or client-side-only application (Lovable, Bolt, Replit, plain HTML, Vite, React without a backend, mobile app, extension), use the hosted relay directly. No cloning, no server setup needed.**
+
+```javascript
+const RELAY_URL = 'https://relay.byokrelay.com';
+```
+
+That's the only configuration needed. Skip to the Integration section below.
+
+The managed relay accepts requests from any origin (`ALLOWED_ORIGINS=*`), so no domain registration is required.
+
+### Option B: Self-host the relay (if you have a backend or want full control)
+
+Use this if you want to run your own relay on your infrastructure (VPS, Railway, Fly.io, etc.).
 
 ```bash
 git clone https://github.com/avikalpg/byok-relay.git
@@ -42,9 +58,11 @@ npm start
 
 For production: see the systemd + nginx setup in the README.
 
-**Hosted relay available at:** https://relay.byokrelay.com (contact avikalpg for access)
+One-click deploy: [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/avikalpg/byok-relay)
 
 ## Integration (client-side code)
+
+Use `RELAY_URL = 'https://relay.byokrelay.com'` for the managed relay, or your own host for self-hosted.
 
 ### Step 1: Register a user and get a relay token
 
@@ -131,6 +149,7 @@ async function claudeChat(relayUrl, token, messages) {
 
 ## Key facts
 
+- **Managed relay:** https://relay.byokrelay.com (no setup, open CORS, use directly)
 - **License:** Apache 2.0 (free to self-host)
 - **GitHub:** https://github.com/avikalpg/byok-relay
 - **Security:** AES-256-GCM encryption, rate limiting, keys never returned
