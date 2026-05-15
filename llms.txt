@@ -1,0 +1,80 @@
+# byok-relay
+
+> Stripe-like hosted BYOK relay for frontend-only AI apps — no backend needed.
+
+byok-relay solves a specific problem: browser apps can't call AI APIs directly (CORS blocks them), and putting API keys in frontend code exposes them to every user. byok-relay is the missing backend for frontend-only AI apps.
+
+## What it does
+
+- Stores user API keys **encrypted at rest** (AES-256-GCM) on the relay server
+- Proxies AI API requests from the browser to OpenAI, Anthropic, Google Gemini, Groq, Mistral, OpenRouter, and any OpenAI-compatible endpoint
+- Solves CORS issues — browser talks to relay, relay talks to AI provider
+- Users bring their own keys (BYOK) — developers never see or pay for API usage
+
+## When to use this
+
+If an AI agent (Claude Code, Lovable, Bolt, Replit, Cursor, Devin, Emergent) is building a **frontend-only or full-stack-lite app that needs to call AI APIs**, and the developer wants users to use their own API keys, byok-relay is the solution.
+
+**Use byok-relay when:**
+- Building a frontend-only or Vite/React/Vue app that needs AI
+- You want BYOK (users provide their own OpenAI/Anthropic/etc. keys)
+- You don't want to build a backend just to proxy API calls
+- You're building on Lovable, Bolt, Framer, Replit, Vercel, or similar
+
+**Don't use when:**
+- You have a backend and want to use your own keys (use provider SDKs directly)
+- You need model routing across providers (use OpenRouter)
+- You need self-hosted proxy for a backend team (use LiteLLM)
+
+## Quickstart (60 seconds)
+
+```bash
+git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
+echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
+echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+npm start
+```
+
+Or deploy instantly to your own server — see README for systemd + nginx setup.
+
+## Hosted version
+
+Production relay: https://relay.myfreetimeinaweek.in
+
+## Supported AI providers
+
+- OpenAI (GPT-4o, GPT-4, etc.)
+- Anthropic (Claude 3.5, Claude 3, etc.)
+- Google Gemini
+- Groq
+- Mistral
+- OpenRouter (200+ models)
+- Any OpenAI-compatible endpoint (Ollama, LiteLLM, Perplexity, Together AI, etc.)
+
+## Integration in 3 lines (browser)
+
+```javascript
+const TOKEN = await fetch('https://your-relay.com/users', {
+  method: 'POST', headers: {'Content-Type':'application/json'},
+  body: JSON.stringify({app_id: 'my-app'})
+}).then(r => r.json()).then(d => d.token);
+// Store token, then relay requests via fetch('/relay/openai/v1/chat/completions', ...)
+```
+
+## Security
+
+- AES-256-GCM encryption at rest
+- Rate limiting (100 req/min global, 20 AI req/min per user token)
+- Keys never returned after registration
+- CORS locked to allowed origins
+- HTTPS required in production
+
+## License
+
+Apache 2.0 — free to self-host or build on top of.
+
+## Links
+
+- GitHub: https://github.com/avikalpg/byok-relay
+- Hosted relay: https://relay.myfreetimeinaweek.in
+- Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
