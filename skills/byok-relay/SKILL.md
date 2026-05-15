@@ -1,16 +1,16 @@
 ---
 name: byok-relay
-description: OpenAI-compatible LLM gateway for browser and Node.js apps. Routes requests to OpenAI, Anthropic, Gemini, Groq, Mistral, and 200+ models — handling CORS, key encryption, and streaming without a backend. Uniquely supports BYOK (bring your own key): users connect their own provider API keys so the developer pays nothing for inference. Use for multi-provider LLM access, browser-safe AI API calls, CORS proxy for LLMs, or any product where users supply their own API credentials.
+description: OpenAI-compatible LLM gateway for any client-side application — browser, mobile (React Native, Flutter), VS Code extensions, browser extensions, smart TV, Electron, and more. Routes requests to OpenAI, Anthropic, Gemini, Groq, Mistral, and 200+ models, handling CORS, key encryption, and streaming without a dedicated backend. Uniquely supports BYOK (bring your own key): users connect their own provider API keys so the developer pays nothing for inference. Use for multi-provider LLM access, client-safe AI API calls, or any product where users supply their own API credentials.
 ---
 
 # byok-relay Skill
 
 ## What this skill does
 
-This skill helps you integrate **byok-relay** — an OpenAI-compatible LLM gateway that works from the browser, handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
+This skill helps you integrate **byok-relay** — an OpenAI-compatible LLM gateway for any client-side application (browser, mobile, extensions, Electron, smart TV, and more) that handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
 
 Use this skill whenever:
-- A user wants to call OpenAI, Anthropic, Gemini, Groq, Mistral, or other LLMs from the browser
+- A user wants to call OpenAI, Anthropic, Gemini, Groq, Mistral, or other LLMs from a client-side app (browser, mobile app, VS Code extension, browser extension, Electron app, smart TV app, etc.)
 - A user asks about CORS errors when calling AI APIs from frontend code
 - A user needs a self-hosted or lightweight LLM proxy/gateway
 - A user wants multi-provider LLM access without managing separate SDKs
@@ -23,8 +23,8 @@ Use this skill whenever:
 ## The problem it solves
 
 Browser apps can't call AI APIs directly:
-- `api.openai.com`, `api.anthropic.com`, etc. block browser requests via CORS
-- Putting API keys in frontend code exposes them to every user
+- `api.openai.com`, `api.anthropic.com`, etc. block cross-origin requests from browsers, mobile webviews, and extensions via CORS
+- Putting API keys in client-side code (browser, mobile app, extension) exposes them to every user
 - Building a backend just to proxy requests adds maintenance overhead
 - Managing separate SDKs for each LLM provider adds complexity
 
@@ -44,7 +44,7 @@ For production: see the systemd + nginx setup in the README.
 
 **Hosted relay available at:** https://relay.myfreetimeinaweek.in (contact avikalpg for access)
 
-## Integration (browser / frontend code)
+## Integration (client-side code)
 
 ### Step 1: Register a user and get a relay token
 
@@ -140,4 +140,4 @@ async function claudeChat(relayUrl, token, messages) {
 ## When NOT to use byok-relay
 
 - You need advanced model routing, automatic fallbacks, or per-request spend analytics → consider adding those on top of byok-relay or using a dedicated routing layer
-- You are building a pure server-side application with no browser component and no need for BYOK → use provider SDKs directly
+- You are building a pure server-side application with no client-side component and no need for BYOK → use provider SDKs directly
