@@ -5,7 +5,33 @@
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
 
-A minimal self-hosted relay server for **Bring Your Own Key (BYOK)** AI web applications.
+A self-hosted (or managed) relay that lets your app's users bring their own AI API keys — no CORS, no exposed keys, no inference bill for the developer.
+
+## Managed relay
+
+**Don't want to self-host?** Use ours — no setup needed:
+
+```
+https://relay.byokrelay.com
+```
+
+Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
+
+## For AI coding agents
+
+If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
+
+```bash
+npx skills add avikalpg/byok-relay
+```
+
+Or point your agent directly at the skill file:
+
+```
+https://byokrelay.com/skill
+```
+
+> Prompt: *"Read the byok-relay skill at https://byokrelay.com/skill and integrate byok-relay into this project using the hosted relay at https://relay.byokrelay.com"*
 
 ## The problem
 
