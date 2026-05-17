@@ -222,6 +222,11 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **No user accounts** — the relay token is the only credential. Anyone who steals a user's localStorage token can use their stored key. Mitigate by scoping tokens to IP or adding optional auth.
 - **Self-hosted** — you're responsible for uptime, security updates, and backups.
 
+## Find us on
+
+- [There's An AI For That](https://theresanaiforthat.com) — *submission in review*
+- [skills.sh](https://skills.sh/avikalpg/byok-relay) — AI coding agent skill registry
+
 ## License
 
 Apache 2.0
