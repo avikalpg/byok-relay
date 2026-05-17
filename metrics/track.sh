@@ -14,22 +14,45 @@ if [ -z "$PAT" ]; then
   exit 1
 fi
 
+if ! command -v python3 &>/dev/null; then
+  echo "ERROR: python3 is required but not installed" >&2
+  exit 1
+fi
+
 # Fetch repo stats
-REPO_DATA=$(curl -s -H "Authorization: Bearer $PAT" \
+REPO_RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $PAT" \
   "https://api.github.com/repos/$REPO")
+REPO_HTTP=$(echo "$REPO_RESPONSE" | tail -n1)
+REPO_DATA=$(echo "$REPO_RESPONSE" | sed '$d')
+if [ "$REPO_HTTP" != "200" ]; then
+  echo "ERROR: GitHub API returned HTTP $REPO_HTTP for repo stats" >&2
+  exit 1
+fi
 
 STARS=$(echo "$REPO_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stargazers_count','?'))")
 FORKS=$(echo "$REPO_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('forks_count','?'))")
 OPEN_ISSUES=$(echo "$REPO_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('open_issues_count','?'))")
 
 # Fetch traffic stats (requires push access)
-VIEWS_DATA=$(curl -s -H "Authorization: Bearer $PAT" \
+VIEWS_RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $PAT" \
   "https://api.github.com/repos/$REPO/traffic/views")
+VIEWS_HTTP=$(echo "$VIEWS_RESPONSE" | tail -n1)
+VIEWS_DATA=$(echo "$VIEWS_RESPONSE" | sed '$d')
+if [ "$VIEWS_HTTP" != "200" ]; then
+  echo "ERROR: GitHub API returned HTTP $VIEWS_HTTP for traffic/views" >&2
+  exit 1
+fi
 VIEWS=$(echo "$VIEWS_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count','?'))")
 UNIQUE_VISITORS=$(echo "$VIEWS_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('uniques','?'))")
 
-CLONES_DATA=$(curl -s -H "Authorization: Bearer $PAT" \
+CLONES_RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $PAT" \
   "https://api.github.com/repos/$REPO/traffic/clones")
+CLONES_HTTP=$(echo "$CLONES_RESPONSE" | tail -n1)
+CLONES_DATA=$(echo "$CLONES_RESPONSE" | sed '$d')
+if [ "$CLONES_HTTP" != "200" ]; then
+  echo "ERROR: GitHub API returned HTTP $CLONES_HTTP for traffic/clones" >&2
+  exit 1
+fi
 CLONES=$(echo "$CLONES_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count','?'))")
 UNIQUE_CLONERS=$(echo "$CLONES_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('uniques','?'))")
 

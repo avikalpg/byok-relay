@@ -29,7 +29,7 @@ Then open http://localhost:5173, enter your Anthropic or OpenAI key, and chat.
 
 Set `VITE_RELAY_URL` in `.env.local`:
 
-```
+```dotenv
 VITE_RELAY_URL=https://relay.byokrelay.com
 ```
 
@@ -45,7 +45,7 @@ The hosted relay at `relay.byokrelay.com` has open CORS — no config needed.
 
 ## Key concept
 
-```
+```text
 Browser (this app)          byok-relay              Anthropic/OpenAI
       │                          │                         │
       ├── POST /users ──────────►│                         │
@@ -60,4 +60,4 @@ Browser (this app)          byok-relay              Anthropic/OpenAI
       │◄── SSE stream ───────────┤◄── SSE stream ──────────┤
 ```
 
-The user's API key **never touches your frontend code**. The relay token (not the key) lives in localStorage.
+The user's API key is entered in the browser and sent to the relay, but it is **not hardcoded in frontend source** and **not persisted in localStorage**. The relay token (not the key) lives in localStorage.

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { ensureToken, storeKey, getToken, clearToken, streamChat } from './relay.js'
+import { ensureToken, storeKey, getToken, clearToken, streamChat, listKeys, deleteKey } from './relay.js'
 
 const PROVIDERS = [
   {
@@ -19,7 +19,7 @@ const PROVIDERS = [
 export default function App() {
   const [provider, setProvider] = useState('anthropic')
   const [apiKey, setApiKey] = useState('')
-  const [keyStored, setKeyStored] = useState(!!getToken())
+  const [keyStored, setKeyStored] = useState(false)
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -27,6 +27,26 @@ export default function App() {
   const bottomRef = useRef(null)
 
   const selectedProvider = PROVIDERS.find((p) => p.id === provider)
+
+  useEffect(() => {
+    let cancelled = false
+    async function hydrateKeyState() {
+      if (!getToken()) {
+        if (!cancelled) setKeyStored(false)
+        return
+      }
+      try {
+        const providers = await listKeys()
+        if (!cancelled) setKeyStored(Array.isArray(providers) && providers.includes(provider))
+      } catch {
+        if (!cancelled) setKeyStored(false)
+      }
+    }
+    hydrateKeyState()
+    return () => {
+      cancelled = true
+    }
+  }, [provider])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -45,11 +65,18 @@ export default function App() {
     }
   }
 
-  function handleReset() {
-    clearToken()
-    setKeyStored(false)
-    setMessages([])
-    setError('')
+  async function handleReset() {
+    try {
+      const providers = await listKeys()
+      if (Array.isArray(providers)) {
+        await Promise.all(providers.map((p) => deleteKey(p)))
+      }
+    } finally {
+      clearToken()
+      setKeyStored(false)
+      setMessages([])
+      setError('')
+    }
   }
 
   async function handleSend(e) {
