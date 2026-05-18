@@ -177,6 +177,21 @@ curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
 ## Setup
 
 ### 1. Install
+
+**Option A — npx (quickest, no install)**
+```bash
+export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+npx byok-relay
+```
+
+**Option B — global install**
+```bash
+npm install -g byok-relay
+export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+byok-relay
+```
+
+**Option C — clone & run**
 ```bash
 git clone https://github.com/avikalpg/byok-relay.git
 cd byok-relay

@@ -2,7 +2,7 @@
 
 **Goal:** Reach 100 GitHub stars and establish byok-relay as the go-to BYOK relay for frontend AI apps.
 
-**Current State (2026-05-17):** 4 ⭐ | 44 views | 253 clones | 0 npm installs
+**Current State (2026-05-18):** 4 ⭐ | 52 views | 283 clones | 0 npm installs (publish-ready)
 
 ---
 
@@ -11,6 +11,7 @@
 | Date       | Stars | Views (14d) | Unique Visitors | Clones (14d) | Unique Cloners | Notes |
 |------------|-------|-------------|-----------------|--------------|----------------|-------|
 | 2026-05-17 | 4     | 44          | 14              | 253          | 124            | Baseline — first GROWTH_PLAN.md |
+| 2026-05-18 | 4     | 52          | 11              | 283          | 138            | npm package prep: bin script, keywords, README install section |
 
 ---
 
@@ -28,7 +29,7 @@
 ### Phase 2: Developer Experience & Examples
 
 - ✅ **Day 5 (2026-05-17):** Create `examples/react-vite/` — working React + Vite integration demo with full README *(done 2026-05-17)*
-- ⏳ **Pending:** Publish package to npm — `npx byok-relay` install path, unlocks npm download metrics
+- ✅ **Day 6 (2026-05-18):** npm package prep — `bin/byok-relay.js` CLI entry, `bin` field in package.json, keywords/metadata, README npx/global-install section. Package is publish-ready; run `npm login && npm publish` with an npm account to go live *(npm auth requires manual login via npmjs.com)*
 - ⏳ **Pending:** Create `examples/vanilla-js/` — plain HTML+JS snippet for lowest-friction demos
 - ⏳ **Pending:** Write CONTRIBUTING.md — lower barrier for community contributions
 - ⏳ **Pending:** Add CHANGELOG.md — professional signal for evaluating the project

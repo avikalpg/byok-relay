@@ -3,10 +3,44 @@
   "version": "1.0.0",
   "description": "BYOK relay server — stores user API keys encrypted and proxies requests to AI providers",
   "main": "src/index.js",
+  "bin": {
+    "byok-relay": "./bin/byok-relay.js"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
   },
+  "keywords": [
+    "byok",
+    "bring-your-own-key",
+    "ai",
+    "relay",
+    "proxy",
+    "openai",
+    "anthropic",
+    "llm",
+    "api-proxy",
+    "frontend-ai",
+    "ai-proxy",
+    "express",
+    "self-hosted"
+  ],
+  "author": "Avikalp Gupta <avikalpgupta@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "dependencies": {
     "better-sqlite3": "^9.4.3",
     "cors": "^2.8.5",
