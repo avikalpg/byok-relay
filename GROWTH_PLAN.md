@@ -12,6 +12,7 @@
 |------------|-------|-------------|-----------------|--------------|----------------|-------|
 | 2026-05-17 | 4     | 44          | 14              | 253          | 124            | Baseline — first GROWTH_PLAN.md |
 | 2026-05-18 | 4     | 52          | 11              | 283          | 138            | npm package prep: bin script, keywords, README install section |
+| 2026-05-19 | 4     | 58          | 9               | 328          | 155            | vanilla-js example: zero-dependency single-file HTML+JS demo |
 
 ---
 
@@ -30,7 +31,7 @@
 
 - ✅ **Day 5 (2026-05-17):** Create `examples/react-vite/` — working React + Vite integration demo with full README *(done 2026-05-17)*
 - ✅ **Day 6 (2026-05-18):** npm package prep — `bin/byok-relay.js` CLI entry, `bin` field in package.json, keywords/metadata, README npx/global-install section. Package is publish-ready; run `npm login && npm publish` with an npm account to go live *(npm auth requires manual login via npmjs.com)*
-- ⏳ **Pending:** Create `examples/vanilla-js/` — plain HTML+JS snippet for lowest-friction demos
+- ✅ **Day 7 (2026-05-19):** Create `examples/vanilla-js/` — zero-dependency single HTML file demo; supports Anthropic + OpenAI, SSE streaming, localStorage token persistence *(done 2026-05-19)*
 - ⏳ **Pending:** Write CONTRIBUTING.md — lower barrier for community contributions
 - ⏳ **Pending:** Add CHANGELOG.md — professional signal for evaluating the project
 
