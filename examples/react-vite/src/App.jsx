@@ -6,13 +6,13 @@ const PROVIDERS = [
     id: 'anthropic',
     label: 'Anthropic',
     placeholder: 'sk-ant-...',
-    defaultModel: 'claude-3-5-haiku-20241022',
+    defaultModel: 'claude-haiku-4-5',
   },
   {
     id: 'openai',
     label: 'OpenAI',
     placeholder: 'sk-...',
-    defaultModel: 'gpt-4o-mini',
+    defaultModel: 'gpt-4.1-mini',
   },
 ]
 
