@@ -198,8 +198,14 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       res.json(data);
     }
   } catch (err) {
+    // SSRF / input validation errors are client mistakes — return 400.
+    // All other relay failures return 502 with a generic message so we don't
+    // leak internal hostnames, IPs, or stack traces to the client.
+    if (err.message && err.message.startsWith('x-relay-base-url')) {
+      return res.status(400).json({ error: err.message });
+    }
     console.error('Relay error:', err);
-    res.status(502).json({ error: 'Failed to reach AI provider', details: err.message });
+    res.status(502).json({ error: 'Failed to reach AI provider' });
   }
 });
 
