@@ -194,8 +194,11 @@ function validateAndNormaliseBaseUrl(raw) {
     }
   }
 
-  // Block localhost by name
-  if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+  // Block localhost by name.
+  // Strip trailing dot first: 'localhost.' parses as-is in Node but still
+  // resolves to 127.0.0.1 on most systems, so normalise before comparing.
+  const hostForNameCheck = hostname.replace(/\.$/, '');
+  if (hostForNameCheck === 'localhost' || hostForNameCheck.endsWith('.localhost')) {
     throw new RelayUrlValidationError('x-relay-base-url must not target localhost');
   }
 
@@ -304,7 +307,7 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
   if (provider === 'openai-compatible') {
     const rawBaseUrl = extraHeaders['x-relay-base-url'];
     if (!rawBaseUrl) {
-      throw new Error('x-relay-base-url header required for openai-compatible provider');
+      throw new RelayUrlValidationError('x-relay-base-url header is required for openai-compatible provider');
     }
     // validateAndNormaliseBaseUrl throws on any policy violation and returns
     // url.origin (scheme + host + port), stripping any path the client embedded.
