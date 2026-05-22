@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/e2e/relay.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
