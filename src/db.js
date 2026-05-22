@@ -1,19 +1,24 @@
 /**
  * SQLite database layer.
  * Schema:
- *   users(id TEXT PK, token TEXT UNIQUE, created_at INTEGER)
+ *   users(id TEXT PK, token_hash TEXT UNIQUE, app_id TEXT, created_at INTEGER)
  *   keys(id TEXT PK, user_id TEXT FK, provider TEXT, encrypted_key TEXT, created_at INTEGER)
  *
  * Keys are encrypted with AES-256-GCM using ENCRYPTION_SECRET from env.
+ *
+ * Relay tokens are NEVER stored in plaintext.  A raw random token is returned
+ * to the caller once at registration time; only its HMAC-SHA256 digest is
+ * persisted.  Lookup hashes the incoming token before querying.
  */
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 const path = require('path');
+const fs = require('fs');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'relay.db');
 
 // Ensure data directory exists
-const fs = require('fs');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 const db = new Database(DB_PATH);
@@ -22,10 +27,12 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+// ── Schema (with migration from legacy `token` column) ─────────────────────
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
-    token TEXT UNIQUE NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL,
     app_id TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );
@@ -41,17 +48,67 @@ db.exec(`
     UNIQUE(user_id, provider)
   );
 
-  CREATE INDEX IF NOT EXISTS idx_users_token ON users(token);
+  CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
   CREATE INDEX IF NOT EXISTS idx_keys_user_provider ON keys(user_id, provider);
 `);
 
+// ── Migration: rename legacy `token` column → `token_hash` and hash values ─
+//
+// SQLite supports RENAME COLUMN since 3.25.0.  We also need to backfill the
+// existing plaintext tokens with their HMAC hashes so existing users are not
+// logged out (they still present the same plaintext token; we hash it on
+// lookup, which will now match the stored hash).
+//
+// The migration is idempotent: it checks for the old column name before
+// acting, and only runs once.
+
+function _migrateTokenColumn() {
+  const cols = db.pragma('table_info(users)').map(c => c.name);
+  if (!cols.includes('token')) return; // already migrated
+
+  // 1. Backfill hash values into a new column
+  db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+
+  const hmacKey = _getHmacKey();
+  const rows = db.prepare('SELECT id, token FROM users').all();
+  const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
+  const backfill = db.transaction(() => {
+    for (const row of rows) {
+      update.run(_hmac(row.token, hmacKey), row.id);
+    }
+  });
+  backfill();
+
+  // 2. Rebuild the table without the old `token` column
+  //    (SQLite does not support DROP COLUMN before 3.35.0)
+  db.exec(`
+    CREATE TABLE users_new (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT UNIQUE NOT NULL,
+      app_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    INSERT INTO users_new (id, token_hash, app_id, created_at)
+      SELECT id, token_hash, app_id, created_at FROM users;
+    DROP TABLE users;
+    ALTER TABLE users_new RENAME TO users;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
+  `);
+}
+
+_migrateTokenColumn();
+
 // ── Encryption helpers ──────────────────────────────────────────────────────
 
+// Derived key is computed once at startup to avoid scrypt DoS on every call.
+let _encryptionKey = null;
 function getEncryptionKey() {
+  if (_encryptionKey) return _encryptionKey;
   const secret = process.env.ENCRYPTION_SECRET;
   if (!secret) throw new Error('ENCRYPTION_SECRET env var is required');
-  // Derive a 32-byte key from the secret
-  return crypto.scryptSync(secret, 'byok-relay-salt', 32);
+  const salt = process.env.ENCRYPTION_SALT || 'byok-relay-salt';
+  _encryptionKey = crypto.scryptSync(secret, salt, 32);
+  return _encryptionKey;
 }
 
 function encryptApiKey(plaintext) {
@@ -78,25 +135,66 @@ function decryptApiKey(encryptedHex, ivHex, authTagHex) {
   return decrypted.toString('utf8');
 }
 
+// ── Token helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Returns the HMAC key used to hash relay tokens.
+ * Uses TOKEN_HMAC_SECRET if set; otherwise falls back to ENCRYPTION_SECRET.
+ * Both are acceptable; a dedicated secret is preferred.
+ */
+function _getHmacKey() {
+  const secret = process.env.TOKEN_HMAC_SECRET || process.env.ENCRYPTION_SECRET;
+  if (!secret) throw new Error('TOKEN_HMAC_SECRET (or ENCRYPTION_SECRET) env var is required');
+  return secret;
+}
+
+/**
+ * Returns the HMAC-SHA256 hex digest of `token` using `key`.
+ */
+function _hmac(token, key) {
+  return crypto.createHmac('sha256', key).update(token).digest('hex');
+}
+
+/**
+ * Hash a plaintext relay token for safe storage.
+ */
+function hashToken(token) {
+  return _hmac(token, _getHmacKey());
+}
+
 // ── User helpers ────────────────────────────────────────────────────────────
 
+/**
+ * Create a new user.
+ *
+ * @returns {{ id: string, token: string }}
+ *   `token` is the **plaintext** random token — returned to the caller ONCE,
+ *   never stored.  Only `token_hash` (HMAC-SHA256) is persisted in the DB.
+ */
 function createUser(appId) {
-  const { v4: uuidv4 } = require('uuid');
   const id = uuidv4();
   const token = crypto.randomBytes(32).toString('hex');
+  const token_hash = hashToken(token);
   const now = Date.now();
-  db.prepare('INSERT INTO users (id, token, app_id, created_at) VALUES (?, ?, ?, ?)').run(id, token, appId, now);
+  db.prepare(
+    'INSERT INTO users (id, token_hash, app_id, created_at) VALUES (?, ?, ?, ?)'
+  ).run(id, token_hash, appId, now);
+  // Return plaintext token to caller — this is the only time it leaves memory.
   return { id, token };
 }
 
+/**
+ * Look up a user by their plaintext relay token.
+ * Hashes the token before querying so plaintext is never compared in SQL.
+ */
 function getUserByToken(token) {
-  return db.prepare('SELECT * FROM users WHERE token = ?').get(token);
+  const token_hash = hashToken(token);
+  return db.prepare('SELECT * FROM users WHERE token_hash = ?').get(token_hash);
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
 
 function upsertKey(userId, provider, plaintextKey) {
-  const { v4: uuidv4 } = require('uuid');
   const { encrypted_key, iv, auth_tag } = encryptApiKey(plaintextKey);
   const now = Date.now();
   db.prepare(`
@@ -120,7 +218,10 @@ function deleteKey(userId, provider) {
 }
 
 function listProviders(userId) {
-  return db.prepare('SELECT provider, created_at FROM keys WHERE user_id = ?').all(userId).map(r => r.provider);
+  return db
+    .prepare('SELECT provider FROM keys WHERE user_id = ?')
+    .all(userId)
+    .map(r => r.provider);
 }
 
 module.exports = { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders };
