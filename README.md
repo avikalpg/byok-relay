@@ -144,8 +144,11 @@ The fastest way to get byok-relay running is via Vercel:
 
 ## Quickstart (60 seconds)
 
+> **Fastest path:** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) && npx byok-relay`
+> For the full walkthrough continue below, or see [Setup options](#setup) for `npm install -g` and clone paths.
+
 ```bash
-# 1. Clone and install
+# 1. Clone and install (or skip this with: npx byok-relay)
 git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
 
 # 2. Configure
@@ -236,6 +239,13 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **You hold the encrypted keys** — users trust your server. If your server is compromised and the `ENCRYPTION_SECRET` leaks, all keys could be decrypted. For higher assurance, replace SQLite with a cloud KMS-backed store.
 - **No user accounts** — the relay token is the only credential. Anyone who steals a user's localStorage token can use their stored key. Mitigate by scoping tokens to IP or adding optional auth.
 - **Self-hosted** — you're responsible for uptime, security updates, and backups.
+
+## Find us on
+
+- [There's An AI For That](https://theresanaiforthat.com) — *submission in review*
+- [skills.sh](https://skills.sh/avikalpg/byok-relay) — AI coding agent skill registry
+- [Awesome LLMOps](https://github.com/tensorchord/Awesome-LLMOps) — *PR in review*
+- [Awesome ChatGPT API](https://github.com/reorx/awesome-chatgpt-api) — *PR in review*
 
 ## License
 

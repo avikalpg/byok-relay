@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/e2e/relay.test.js"
   },
   "keywords": [
     "byok",
@@ -23,7 +24,22 @@
     "frontend-ai",
     "ai-proxy",
     "express",
-    "self-hosted"
+    "self-hosted",
+    "managed-relay",
+    "ai-gateway",
+    "no-backend",
+    "frontend-only",
+    "react",
+    "react-native",
+    "vite",
+    "vue",
+    "nextjs",
+    "api-key-storage",
+    "user-api-keys",
+    "cors-proxy",
+    "key-management",
+    "serverless-ai",
+    "no-server"
   ],
   "author": "Avikalp Gupta <avikalpgupta@gmail.com>",
   "repository": {
@@ -37,6 +53,7 @@
   "files": [
     "bin/",
     "src/",
+    "deploy/",
     "README.md",
     "LICENSE",
     ".env.example"

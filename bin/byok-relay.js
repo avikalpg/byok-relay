@@ -52,8 +52,22 @@ if (args.includes('--version')) {
 
 // Forward --port flag to PORT env var
 const portIdx = args.indexOf('--port');
-if (portIdx !== -1 && args[portIdx + 1]) {
-  process.env.PORT = args[portIdx + 1];
+if (portIdx !== -1) {
+  const portVal = args[portIdx + 1];
+  if (!portVal || isNaN(Number(portVal)) || Number(portVal) <= 0) {
+    console.error('Error: --port requires a numeric argument, e.g. --port 8080');
+    process.exit(1);
+  }
+  process.env.PORT = portVal;
+}
+
+// Warn on unknown flags so typos don't go unnoticed
+const knownFlags = new Set(['--help', '-h', '--version', '--port']);
+const unknownArgs = args.filter((a, i) =>
+  a.startsWith('-') && !knownFlags.has(a) && args[i - 1] !== '--port'
+);
+if (unknownArgs.length) {
+  console.warn(`Warning: unknown option(s): ${unknownArgs.join(', ')}. Run --help for usage.`);
 }
 
 // Bootstrap the server
