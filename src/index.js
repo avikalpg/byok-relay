@@ -201,7 +201,7 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     // SSRF / input validation errors are client mistakes — return 400.
     // All other relay failures return 502 with a generic message so we don't
     // leak internal hostnames, IPs, or stack traces to the client.
-    if (err.message && err.message.startsWith('x-relay-base-url')) {
+    if (err.code === 'INVALID_RELAY_BASE_URL') {
       return res.status(400).json({ error: err.message });
     }
     console.error('Relay error:', err);

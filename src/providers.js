@@ -65,41 +65,138 @@ function isBlockedIp(ipStr) {
   return BLOCKED_CIDRS.some(({ baseInt, mask }) => ((ipInt & mask) >>> 0) === baseInt);
 }
 
+// ── IPv6 blocked ranges ──────────────────────────────────────────────────────
+// Covers loopback (::1), link-local (fe80::/10), unique-local (fc00::/7),
+// and IPv4-mapped addresses (::ffff:x.x.x.x /96) which can resolve to
+// private IPv4 ranges including IMDS at ::ffff:169.254.169.254.
+
+const BLOCKED_IPV6 = [
+  { prefix: 0x00000000000000000000000000000001n,
+    mask:   0xffffffffffffffffffffffffffffffffn },  // ::1  loopback
+  { prefix: 0xfe800000000000000000000000000000n,
+    mask:   0xffc00000000000000000000000000000n },  // fe80::/10  link-local
+  { prefix: 0xfc000000000000000000000000000000n,
+    mask:   0xfe000000000000000000000000000000n },  // fc00::/7   unique-local
+  { prefix: 0x00000000000000000000ffff00000000n,
+    mask:   0xffffffffffffffffffffffff00000000n },  // ::ffff:0:0/96  IPv4-mapped
+];
+
+/**
+ * Parse a colon-separated IPv6 address string (without surrounding brackets)
+ * into a 128-bit BigInt.  Returns null on any parse error.
+ */
+function ipv6ToBigInt(addr) {
+  try {
+    let expandedAddr = addr;
+
+    // Handle mixed IPv4 tail (e.g. ::ffff:192.168.1.1)
+    if (addr.includes('.')) {
+      const lastColon = addr.lastIndexOf(':');
+      const ipv4Parts = addr.slice(lastColon + 1).split('.').map(Number);
+      if (ipv4Parts.length !== 4 || ipv4Parts.some(n => isNaN(n) || n < 0 || n > 255)) return null;
+      const hex = ipv4Parts.map(n => n.toString(16).padStart(2, '0')).join('');
+      expandedAddr = addr.slice(0, lastColon + 1) + hex.slice(0, 4) + ':' + hex.slice(4);
+    }
+
+    // Expand '::' shorthand
+    let parts;
+    if (expandedAddr.includes('::')) {
+      const [left, right] = expandedAddr.split('::');
+      const leftParts  = left  ? left.split(':')  : [];
+      const rightParts = right ? right.split(':') : [];
+      const missing    = 8 - leftParts.length - rightParts.length;
+      if (missing < 0) return null;
+      parts = [...leftParts, ...Array(missing).fill('0'), ...rightParts];
+    } else {
+      parts = expandedAddr.split(':');
+    }
+
+    if (parts.length !== 8) return null;
+    return parts.reduce((acc, p) => {
+      if (acc === null) return null;
+      const v = parseInt(p || '0', 16);
+      if (isNaN(v) || v < 0 || v > 0xffff) return null;
+      return (acc << 16n) | BigInt(v);
+    }, 0n);
+  } catch {
+    return null;
+  }
+}
+
+/** Return true if an IPv6 address string (without brackets) is in a blocked range. */
+function isBlockedIpv6(addr) {
+  const addrInt = ipv6ToBigInt(addr);
+  if (addrInt === null) return false;
+  return BLOCKED_IPV6.some(({ prefix, mask }) => (addrInt & mask) === prefix);
+}
+
+/**
+ * Structured error thrown for client-supplied URL policy violations.
+ * Caught in index.js and returned as HTTP 400 — the client's input is
+ * at fault, not a server-side relay failure (which would be 502).
+ */
+class RelayUrlValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'RelayUrlValidationError';
+    this.code = 'INVALID_RELAY_BASE_URL';
+  }
+}
+
 /**
  * Validate that a client-supplied base URL is safe to use as an upstream
- * target.  Throws with a descriptive message on any policy violation.
+ * target.  Throws RelayUrlValidationError on any policy violation.
  *
  * Rules enforced:
  *  1. Must be a valid URL.
  *  2. Must use HTTPS.
- *  3. Hostname must not be a raw IP address that falls in a blocked range.
- *  4. Normalized to `url.origin` only — any path, credentials, or query
- *     string supplied by the client is stripped before the URL is used.
+ *  3. IPv4 hostname must not fall in a private/reserved CIDR range.
+ *  4. IPv6 hostname must not fall in a blocked range (::1, fe80::/10,
+ *     fc00::/7, ::ffff:0:0/96).
+ *  5. 'localhost' (and *.localhost) is blocked by name.
+ *  6. Normalised to url.origin — path/credentials/query stripped to
+ *     prevent path-injection.
  */
 function validateAndNormaliseBaseUrl(raw) {
   let parsed;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new Error('x-relay-base-url must be a valid URL');
+    throw new RelayUrlValidationError('x-relay-base-url must be a valid URL');
   }
 
   if (parsed.protocol !== 'https:') {
-    throw new Error('x-relay-base-url must use HTTPS');
+    throw new RelayUrlValidationError('x-relay-base-url must use HTTPS');
   }
 
   const hostname = parsed.hostname;
 
-  // Block raw IPv4 addresses in private / link-local ranges
+  // Block raw IPv4 addresses in private / link-local / reserved ranges
   if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
     if (isBlockedIp(hostname)) {
-      throw new Error('x-relay-base-url must not target a private or reserved IP address');
+      throw new RelayUrlValidationError(
+        'x-relay-base-url must not target a private or reserved IP address',
+      );
+    }
+  }
+
+  // Block IPv6 literals.  WHATWG URL preserves brackets in hostname
+  // (e.g. new URL('https://[::1]').hostname === '[::1]'), so strip them
+  // before passing to the parser.
+  const ipv6Bare = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+  if (ipv6Bare.includes(':')) {
+    if (isBlockedIpv6(ipv6Bare)) {
+      throw new RelayUrlValidationError(
+        'x-relay-base-url must not target a private or reserved IP address',
+      );
     }
   }
 
   // Block localhost by name
   if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
-    throw new Error('x-relay-base-url must not target localhost');
+    throw new RelayUrlValidationError('x-relay-base-url must not target localhost');
   }
 
   // Return only the origin (scheme + host + port) — strip any path the
