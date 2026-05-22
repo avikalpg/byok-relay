@@ -70,5 +70,9 @@ if (unknownArgs.length) {
   console.warn(`Warning: unknown option(s): ${unknownArgs.join(', ')}. Run --help for usage.`);
 }
 
-// Bootstrap the server
-require('../src/index.js');
+// Bootstrap the server.
+// require.main here is bin/byok-relay.js, not src/index.js, so the
+// require.main === module guard in src/index.js would not fire on its own.
+// We call startServer() explicitly to start listening.
+const { startServer } = require('../src/index.js');
+startServer();

@@ -182,15 +182,23 @@ curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
 ### 1. Install
 
 **Option A — npx (quickest, no install)**
+
+`npx byok-relay` launches a **standalone relay server process** — you run it alongside your existing app. It is not an embedded library; it listens on a port that your frontend calls. Set env vars in your shell before running.
+
 ```bash
 export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+export ALLOWED_ORIGINS=https://your-app.example.com  # or * for dev
 npx byok-relay
 ```
 
 **Option B — global install**
+
+Same standalone server as Option A, available as a persistent command.
+
 ```bash
 npm install -g byok-relay
 export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+export ALLOWED_ORIGINS=https://your-app.example.com
 byok-relay
 ```
 
@@ -201,7 +209,7 @@ cd byok-relay
 npm install
 ```
 
-### 2. Configure
+### 2. Configure *(Option C only — A and B use env vars directly, as shown above)*
 ```bash
 cp .env.example .env
 # Set ENCRYPTION_SECRET (generate: openssl rand -hex 32)

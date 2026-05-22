@@ -210,14 +210,25 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
-// When run directly (node src/index.js or npm start), start the HTTP server.
-// When imported by Vercel's @vercel/node runtime, export the app instead.
-if (require.main === module) {
-  app.listen(PORT, '0.0.0.0', () => {
+
+/**
+ * Start the HTTP server and return the server instance.
+ * Called by the CLI bin (npx byok-relay) and when run directly.
+ * Not called when imported by Vercel's @vercel/node runtime.
+ */
+function startServer() {
+  return app.listen(PORT, '0.0.0.0', () => {
     console.log(`byok-relay listening on port ${PORT}`);
     console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
     console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
   });
 }
 
+// When run directly (node src/index.js or npm start), start immediately.
+// When imported (Vercel runtime, CLI bin, tests), let the caller decide.
+if (require.main === module) {
+  startServer();
+}
+
 module.exports = app;
+module.exports.startServer = startServer;
