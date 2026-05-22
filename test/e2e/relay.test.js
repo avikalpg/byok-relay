@@ -185,8 +185,14 @@ describe('byok-relay — example product end-to-end', () => {
   });
 
   after(async () => {
-    relayProc.kill('SIGTERM');
-    await new Promise((r) => relayProc.on('exit', r));
+    // Guard against already-exited process: register the listener BEFORE kill
+    // so we never miss the exit event, and skip the whole thing if the process
+    // already terminated (exitCode / signalCode are set once it has).
+    if (relayProc && relayProc.exitCode == null && relayProc.signalCode == null) {
+      const exited = new Promise((r) => relayProc.once('exit', r));
+      relayProc.kill('SIGTERM');
+      await exited;
+    }
 
     await mock.stop();
 
@@ -311,6 +317,37 @@ describe('byok-relay — example product end-to-end', () => {
       mock.requests[0].authorization,
       `Bearer ${FAKE_API_KEY}`,
       'relay must forward the stored API key — not a value the client supplied directly',
+    );
+  });
+
+  it('POST /relay — ignores hostile client-supplied Authorization header', async () => {
+    // A malicious (or confused) client that sends their own Authorization header
+    // must not be able to override the key the relay forwards to the AI provider.
+    mock.clearRequests();
+
+    const HOSTILE_KEY = 'Bearer sk-hostile-attacker-key-9999999999';
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hostile test' }] },
+      {
+        'x-relay-token':    relayToken,
+        'x-relay-base-url': `http://127.0.0.1:${mockPort}`,
+        'Authorization':    HOSTILE_KEY,   // ← attacker-supplied, must be ignored
+      },
+    );
+
+    assert.equal(r.status, 200);
+    assert.equal(mock.requests.length, 1);
+    assert.notEqual(
+      mock.requests[0].authorization,
+      HOSTILE_KEY,
+      'relay must never forward a client-supplied Authorization header to the AI provider',
+    );
+    assert.equal(
+      mock.requests[0].authorization,
+      `Bearer ${FAKE_API_KEY}`,
+      'relay must use the stored key regardless of what Authorization header the client sends',
     );
   });
 

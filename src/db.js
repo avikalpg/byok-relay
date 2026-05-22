@@ -48,9 +48,11 @@ db.exec(`
     UNIQUE(user_id, provider)
   );
 
-  CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
   CREATE INDEX IF NOT EXISTS idx_keys_user_provider ON keys(user_id, provider);
 `);
+// NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
+// On a legacy DB the users table still has 'token', not 'token_hash', so
+// creating the index here would throw "no such column: token_hash".
 
 // ── Migration: rename legacy `token` column → `token_hash` and hash values ─
 //
@@ -64,39 +66,53 @@ db.exec(`
 
 function _migrateTokenColumn() {
   const cols = db.pragma('table_info(users)').map(c => c.name);
-  if (!cols.includes('token')) return; // already migrated
+  if (!cols.includes('token')) return; // no legacy column — already migrated
 
-  // 1. Backfill hash values into a new column
-  db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+  // Idempotent: if a previous run crashed after ALTER TABLE but before the
+  // table rebuild, token_hash already exists.  Skip the ALTER in that case.
+  const alreadyHasTokenHash = cols.includes('token_hash');
 
-  const hmacKey = _getHmacKey();
-  const rows = db.prepare('SELECT id, token FROM users').all();
-  const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
-  const backfill = db.transaction(() => {
+  // Wrap everything (DDL + DML + rebuild) in a single transaction so that a
+  // crash mid-migration leaves the DB unchanged and the next startup retries.
+  const migrate = db.transaction(() => {
+    // 1. Add the new column (skip if it was added by a prior interrupted run)
+    if (!alreadyHasTokenHash) {
+      db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+    }
+
+    // 2. Backfill — only rows whose token_hash is still NULL (idempotent)
+    const hmacKey = _getHmacKey();
+    const rows = db.prepare('SELECT id, token FROM users WHERE token_hash IS NULL').all();
+    const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
     for (const row of rows) {
       update.run(_hmac(row.token, hmacKey), row.id);
     }
-  });
-  backfill();
 
-  // 2. Rebuild the table without the old `token` column
-  //    (SQLite does not support DROP COLUMN before 3.35.0)
-  db.exec(`
-    CREATE TABLE users_new (
-      id TEXT PRIMARY KEY,
-      token_hash TEXT UNIQUE NOT NULL,
-      app_id TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-    INSERT INTO users_new (id, token_hash, app_id, created_at)
-      SELECT id, token_hash, app_id, created_at FROM users;
-    DROP TABLE users;
-    ALTER TABLE users_new RENAME TO users;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
-  `);
+    // 3. Rebuild the table without the old `token` column
+    //    (SQLite does not support DROP COLUMN before 3.35.0)
+    db.exec(`
+      CREATE TABLE users_new (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT UNIQUE NOT NULL,
+        app_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO users_new (id, token_hash, app_id, created_at)
+        SELECT id, token_hash, app_id, created_at FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+    `);
+  });
+
+  migrate();
 }
 
 _migrateTokenColumn();
+
+// Create the token_hash index AFTER migration so it works on both
+// fresh installs (table was just created with token_hash) and legacy
+// installs (migration just renamed the column).
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);');
 
 // ── Encryption helpers ──────────────────────────────────────────────────────
 
