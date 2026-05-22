@@ -226,6 +226,8 @@ sudo certbot --nginx -d relay.yourdomain.com
 
 - [There's An AI For That](https://theresanaiforthat.com) — *submission in review*
 - [skills.sh](https://skills.sh/avikalpg/byok-relay) — AI coding agent skill registry
+- [Awesome LLMOps](https://github.com/tensorchord/Awesome-LLMOps) — *PR in review*
+- [Awesome ChatGPT API](https://github.com/reorx/awesome-chatgpt-api) — *PR in review*
 
 ## License
 
