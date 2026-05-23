@@ -16,6 +16,11 @@ if (process.env.ENCRYPTION_SECRET.length < 32) {
   console.error('ERROR: ENCRYPTION_SECRET must be at least 32 characters.');
   process.exit(1);
 }
+if (!process.env.APP_SECRET) {
+  console.warn('WARNING: APP_SECRET is not set. POST /users is open — anyone can register.');
+  console.warn('Set APP_SECRET to restrict registration to authorised callers only.');
+  console.warn('Generate one with: openssl rand -hex 32');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -63,6 +68,26 @@ const registrationLimiter = rateLimit({
 
 // ── Auth middleware ─────────────────────────────────────────────────────────
 
+/**
+ * requireAppSecret — guards POST /users when APP_SECRET is configured.
+ * If APP_SECRET env var is set, the caller must supply:
+ *   Authorization: Bearer <APP_SECRET>
+ * If APP_SECRET is not set, the route is open (dev/single-user mode).
+ */
+function requireAppSecret(req, res, next) {
+  const appSecret = process.env.APP_SECRET;
+  if (!appSecret) return next(); // open registration — operator has been warned at startup
+
+  const authHeader = req.headers['authorization'] || '';
+  const [scheme, token] = authHeader.split(' ');
+  if (scheme !== 'Bearer' || !token || token !== appSecret) {
+    return res.status(401).json({
+      error: 'Unauthorized: valid Authorization: Bearer <APP_SECRET> header required to register.',
+    });
+  }
+  next();
+}
+
 function requireToken(req, res, next) {
   const token = req.headers['x-relay-token'];
   if (!token) return res.status(401).json({ error: 'x-relay-token header required' });
@@ -88,7 +113,7 @@ app.get('/health', (req, res) => {
  * The token is stored in the user's browser (localStorage).
  * It never contains the API key — the API key is stored server-side.
  */
-app.post('/users', registrationLimiter, (req, res) => {
+app.post('/users', registrationLimiter, requireAppSecret, (req, res) => {
   const { app_id } = req.body;
   if (!app_id) return res.status(400).json({ error: 'app_id is required' });
   const { token } = createUser(app_id);

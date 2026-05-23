@@ -211,6 +211,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 
 - **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
 - **Keys never returned** — the API after initial POST
+- **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
 - **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
