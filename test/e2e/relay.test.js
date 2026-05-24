@@ -408,4 +408,59 @@ describe('byok-relay — example product end-to-end', () => {
       );
     });
   }
+
+  // ── 10. Path traversal allowlist ──────────────────────────────────────
+  // These tests verify that non-inference paths are blocked even with a valid
+  // relay token. A stolen token must not be usable to reach fine-tuning, file
+  // upload, billing, or model management endpoints.
+
+  const PATH_TRAVERSAL_CASES = [
+    // OpenAI non-inference paths
+    ['openai', '/v1/fine-tuning/jobs',                    403],
+    ['openai', '/v1/files',                               403],
+    ['openai', '/v1/billing/usage',                       403],
+    ['openai', '/v1/models/gpt-4/delete',                 403],
+    ['openai', '/v1/organization/members',                403],
+    // OpenAI allowed inference paths
+    ['openai', '/v1/chat/completions',                    null], // null = any non-403 (provider forwards ok)
+    ['openai', '/v1/embeddings',                          null],
+    // Anthropic non-inference paths
+    ['anthropic', '/v1/models',                           403],
+    ['anthropic', '/v1/organizations',                    403],
+    // Anthropic allowed
+    ['anthropic', '/v1/messages',                         null],
+    // Groq non-inference
+    ['groq', '/openai/v1/models/delete',                  403],
+    ['groq', '/openai/v1/organizations',                  403],
+    // Groq allowed
+    ['groq', '/openai/v1/chat/completions',               null],
+  ];
+
+  for (const [provider, path, expectedStatus] of PATH_TRAVERSAL_CASES) {
+    if (expectedStatus === 403) {
+      it(`Path traversal blocked — ${provider} ${path}`, async () => {
+        const r = await request(
+          relayPort, 'POST', `/relay/${provider}${path}`,
+          { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'test' }] },
+          { 'x-relay-token': relayToken },
+        );
+        assert.equal(
+          r.status, 403,
+          `Expected 403 for path "${path}" on provider "${provider}", got ${r.status}. Path allowlist may be missing.`,
+        );
+      });
+    } else {
+      it(`Path traversal allowed — ${provider} ${path} is not blocked`, async () => {
+        const r = await request(
+          relayPort, 'POST', `/relay/${provider}${path}`,
+          { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'test' }] },
+          { 'x-relay-token': relayToken },
+        );
+        assert.notEqual(
+          r.status, 403,
+          `Expected non-403 for allowed path "${path}" on provider "${provider}", got 403.`,
+        );
+      });
+    }
+  }
 });

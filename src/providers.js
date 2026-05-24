@@ -207,9 +207,44 @@ function validateAndNormaliseBaseUrl(raw) {
   return parsed.origin;
 }
 
+// ── Path traversal allowlist ────────────────────────────────────────────────
+// Each provider defines the path prefixes that are permitted to be forwarded.
+// Any path not matching an allowed prefix is rejected with 403.
+// This prevents a stolen relay token from being used to access non-inference
+// endpoints (fine-tuning, file uploads, billing, model deletion, etc.).
+//
+// Rules:
+// - Paths are matched as prefixes (startsWith), case-sensitive.
+// - A trailing '*' is symbolic only — matching is always prefix-based.
+// - For 'openai-compatible', a broad inference set covers the common case;
+//   callers that need more paths should use named providers.
+
+/**
+ * Check whether a request path is allowed for the given provider.
+ * Returns true if allowed, false if it should be blocked.
+ *
+ * @param {string} provider - Provider name from PROVIDERS
+ * @param {string} path - Forward path starting with '/'
+ */
+function isPathAllowed(provider, path) {
+  const config = PROVIDERS[provider];
+  if (!config) return false;
+
+  // If provider defines no allowedPaths, default to deny
+  const allowed = config.allowedPaths;
+  if (!allowed || allowed.length === 0) return false;
+
+  return allowed.some(prefix => path === prefix || path.startsWith(prefix + '/') || path.startsWith(prefix + '?'));
+}
+
 const PROVIDERS = {
   anthropic: {
     baseUrl: 'https://api.anthropic.com',
+    // Allowed inference paths for Anthropic
+    allowedPaths: [
+      '/v1/messages',
+      '/v1/complete',
+    ],
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
@@ -224,6 +259,13 @@ const PROVIDERS = {
 
   openai: {
     baseUrl: 'https://api.openai.com',
+    // Allowed inference paths for OpenAI
+    allowedPaths: [
+      '/v1/chat/completions',
+      '/v1/completions',
+      '/v1/embeddings',
+      '/v1/responses',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -233,6 +275,12 @@ const PROVIDERS = {
   google: {
     // Gemini API — key is passed as query param; ?alt=sse required for SSE streaming
     baseUrl: 'https://generativelanguage.googleapis.com',
+    // Allowed inference paths for Google Gemini
+    // Paths are like /v1beta/models/{model}:generateContent
+    allowedPaths: [
+      '/v1beta/models',
+      '/v1/models',
+    ],
     buildHeaders: () => ({ 'Content-Type': 'application/json' }),
     buildUrl: (baseUrl, path, apiKey) => {
       // Add alt=sse for streaming endpoints, plus the API key
@@ -246,6 +294,12 @@ const PROVIDERS = {
 
   groq: {
     baseUrl: 'https://api.groq.com',
+    // Allowed inference paths for Groq
+    allowedPaths: [
+      '/openai/v1/chat/completions',
+      '/openai/v1/completions',
+      '/openai/v1/embeddings',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -254,6 +308,12 @@ const PROVIDERS = {
 
   openrouter: {
     baseUrl: 'https://openrouter.ai',
+    // Allowed inference paths for OpenRouter
+    allowedPaths: [
+      '/api/v1/chat/completions',
+      '/api/v1/completions',
+      '/api/v1/embeddings',
+    ],
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -265,6 +325,13 @@ const PROVIDERS = {
 
   mistral: {
     baseUrl: 'https://api.mistral.ai',
+    // Allowed inference paths for Mistral
+    allowedPaths: [
+      '/v1/chat/completions',
+      '/v1/completions',
+      '/v1/embeddings',
+      '/v1/fim/completions',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -278,6 +345,21 @@ const PROVIDERS = {
    */
   'openai-compatible': {
     baseUrl: null, // determined per-request from x-relay-base-url header
+    // Allowed inference paths for generic OpenAI-compatible endpoints
+    // Covers the most common inference APIs; non-inference paths are blocked.
+    allowedPaths: [
+      '/v1/chat/completions',
+      '/v1/completions',
+      '/v1/embeddings',
+      '/v1/messages',
+      '/v1/responses',
+      '/api/v1/chat/completions',
+      '/api/v1/completions',
+      '/api/v1/embeddings',
+      '/openai/v1/chat/completions',
+      '/openai/v1/completions',
+      '/openai/v1/embeddings',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -332,4 +414,4 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
 
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
-module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl };
+module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl, isPathAllowed };
