@@ -81,14 +81,17 @@ jobs:
       
       - name: Generate changelog
         id: changelog
+        env:
+          USER_CHANGELOG: ${{ github.event.inputs.changelog }}
         run: |
-          if [ -n "${{ github.event.inputs.changelog }}" ]; then
-            CHANGELOG="${{ github.event.inputs.changelog }}"
+          # Use env var (not direct interpolation) to avoid shell injection
+          if [ -n "$USER_CHANGELOG" ]; then
+            CHANGELOG="$USER_CHANGELOG"
           else
-            # Auto-generate from commit messages
-            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            # Auto-generate from commit messages; scope to skill-specific tags only
+            LAST_TAG=$(git describe --tags --abbrev=0 --match 'skill-v*' 2>/dev/null || echo "")
             if [ -n "$LAST_TAG" ]; then
-              CHANGELOG=$(git log $LAST_TAG..HEAD --oneline --no-merges -- skills/byok-relay/ | sed 's/^[a-f0-9]* /- /' | head -10)
+              CHANGELOG=$(git log "$LAST_TAG"..HEAD --oneline --no-merges -- skills/byok-relay/ | sed 's/^[a-f0-9]* /- /' | head -10)
             else
               CHANGELOG="Auto-publish from main branch"
             fi
@@ -125,10 +128,15 @@ jobs:
           git push origin "skill-v${{ steps.new_version.outputs.version }}"
       
       - name: Trigger website deployment
-        if: secrets.VERCEL_DEPLOY_HOOK_URL != ''
+        env:
+          VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
         run: |
+          if [ -z "$VERCEL_DEPLOY_HOOK_URL" ]; then
+            echo "⏭️  Skipping Vercel deploy (VERCEL_DEPLOY_HOOK_URL not set)"
+            exit 0
+          fi
           echo "🚀 Triggering Vercel website redeploy to sync updated skill..."
-          curl -X POST "${{ secrets.VERCEL_DEPLOY_HOOK_URL }}" \
+          curl -X POST "$VERCEL_DEPLOY_HOOK_URL" \
             -H "Content-Type: application/json" \
             -d '{"ref": "main", "version": "${{ steps.new_version.outputs.version }}"}' || true
           echo "✅ Deploy hook triggered (website will fetch latest skill on build)"
