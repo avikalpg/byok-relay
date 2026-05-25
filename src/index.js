@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -14,6 +15,10 @@ if (!process.env.ENCRYPTION_SECRET) {
 }
 if (process.env.ENCRYPTION_SECRET.length < 32) {
   console.error('ERROR: ENCRYPTION_SECRET must be at least 32 characters.');
+  process.exit(1);
+}
+if (process.env.APP_SECRET && process.env.APP_SECRET.includes(' ')) {
+  console.error('ERROR: APP_SECRET must not contain spaces. Generate a safe value with: openssl rand -hex 32');
   process.exit(1);
 }
 if (!process.env.APP_SECRET) {
@@ -80,7 +85,14 @@ function requireAppSecret(req, res, next) {
 
   const authHeader = req.headers['authorization'] || '';
   const [scheme, token] = authHeader.split(' ');
-  if (scheme !== 'Bearer' || !token || token !== appSecret) {
+
+  const validScheme = scheme === 'Bearer';
+  const validToken =
+    token &&
+    token.length === appSecret.length &&
+    crypto.timingSafeEqual(Buffer.from(token), Buffer.from(appSecret));
+
+  if (!validScheme || !validToken) {
     return res.status(401).json({
       error: 'Unauthorized: valid Authorization: Bearer <APP_SECRET> header required to register.',
     });
@@ -114,7 +126,7 @@ app.get('/health', (req, res) => {
  * The token is stored in the user's browser (localStorage).
  * It never contains the API key — the API key is stored server-side.
  */
-app.post('/users', registrationLimiter, requireAppSecret, (req, res) => {
+app.post('/users', requireAppSecret, registrationLimiter, (req, res) => {
   const { app_id } = req.body;
   if (!app_id) return res.status(400).json({ error: 'app_id is required' });
   const { token } = createUser(app_id);
