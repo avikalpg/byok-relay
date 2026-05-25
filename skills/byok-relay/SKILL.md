@@ -7,7 +7,7 @@ description: "OpenAI-compatible LLM gateway for any client-side application (bro
 
 ## What this skill does
 
-This skill helps you integrate **byok-relay** — an OpenAI-compatible LLM gateway for any client-side application (browser, mobile, extensions, Electron, smart TV, and more) that handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
+This skill helps you integrate **byok-relay** - an OpenAI-compatible LLM gateway for any client-side application (browser, mobile, extensions, Electron, smart TV, and more) that handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
 
 Use this skill whenever:
 - A user wants to call OpenAI, Anthropic, Gemini, Groq, Mistral, or other LLMs from a client-side app (browser, mobile app, VS Code extension, browser extension, Electron app, smart TV app, etc.)
@@ -32,13 +32,13 @@ Browser apps can't call AI APIs directly:
 
 **byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users (or their organization) supply their own credentials and the developer pays nothing for inference.
 
-### Two BYOK patterns — both supported
+### Two BYOK patterns - both supported
 
 **Individuals / prosumers:** Each user registers their own personal API key. Common for developer tools, research UIs, AI power-user products.
 
-**Teams / B2B (company-managed key):** A company admin registers one shared company API key once. Every team member gets a relay token that routes through that key. The developer doesn’t touch the key — it belongs to the customer’s organization. This is the standard enterprise BYOK pattern: one key per company, not one key per employee.
+**Teams / B2B (company-managed key):** A company admin registers one shared company API key via `POST /keys/:provider` (e.g. `/keys/openai`). In the current implementation, keys are stored per relay-token (user); to share a key across team members, the admin can share their relay token or register the same company key under each member's account. Org-level key sharing (one stored key → multiple relay tokens) is on the roadmap. The developer doesn't touch the key — it belongs to the customer's organization.
 
-## Setup — choose your path
+## Setup - choose your path
 
 ### Option A: Use the managed relay (recommended for frontend-only apps)
 

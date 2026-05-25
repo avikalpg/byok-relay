@@ -227,11 +227,13 @@ sudo certbot --nginx -d relay.yourdomain.com
 "Bring your own key" sounds like every employee brings a personal API key. That's one use case, but **the more common B2B pattern is a company-managed key**:
 
 1. Your customer's IT admin creates one API key with their provider (OpenAI, Anthropic, etc.)
-2. They register that key with your relay once via `POST /keys`
-3. Every team member gets a relay token scoped to that shared key
+2. They register that key with your relay once via `POST /keys/:provider` (e.g. `POST /keys/openai`)
+3. Every team member gets their own relay token; the admin registers the shared company key under their account
 4. Usage, billing, and key rotation are all managed by the customer's organization
 
-This is the standard enterprise model: one key per company, not one key per employee. byok-relay supports both patterns out of the box.
+> **Note:** In the current implementation, keys are stored per relay-token (user). For a true "one shared company key" model, the admin should register the company API key and then share their relay token with the team, or you can build a thin wrapper that maps multiple relay tokens to a single stored key. Org-level key sharing is on the roadmap.
+
+byok-relay supports both the individual and company-managed patterns today.
 
 ## Trade-offs
 
