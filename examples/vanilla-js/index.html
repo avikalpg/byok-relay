@@ -120,8 +120,8 @@
   <h1>⚡ byok-relay — Vanilla JS Demo</h1>
   <p>
     Bring Your Own Key, no backend needed ·
-    <a href="https://github.com/avikalpg/byok-relay" target="_blank">GitHub</a> ·
-    <a href="https://byokrelay.com" target="_blank">Docs</a>
+    <a href="https://github.com/avikalpg/byok-relay" target="_blank" rel="noopener noreferrer">GitHub</a> ·
+    <a href="https://byokrelay.com" target="_blank" rel="noopener noreferrer">Docs</a>
   </p>
 </header>
 
@@ -178,6 +178,18 @@
 <script>
 // ─── Config ─────────────────────────────────────────────────────────────────
 const TOKEN_KEY  = 'byok_relay_token'
+const RELAY_TIMEOUT_MS = 30_000  // 30 s timeout for relay API calls
+
+// ─── Fetch with timeout ───────────────────────────────────────────────────────
+async function fetchWithTimeout(url, options = {}, timeoutMs = RELAY_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
 const MODELS = {
   anthropic: 'claude-3-5-haiku-20241022',
   openai:    'gpt-4o-mini',
@@ -236,7 +248,7 @@ function updateTokenMeta() {
 // ─── Registration ─────────────────────────────────────────────────────────────
 async function ensureToken() {
   if (relayToken) return relayToken
-  const res = await fetch(`${relayUrl()}/users`, {
+  const res = await fetchWithTimeout(`${relayUrl()}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: 'vanilla-js-example' }),
@@ -258,7 +270,7 @@ storeKeyBtn.addEventListener('click', async () => {
   setStatus('warn', 'Connecting…')
   try {
     const token = await ensureToken()
-    const res = await fetch(`${relayUrl()}/keys/${provider()}`, {
+    const res = await fetchWithTimeout(`${relayUrl()}/keys/${provider()}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -345,7 +357,7 @@ async function sendMessage() {
       })
     }
 
-    const res = await fetch(url, { method: 'POST', headers, body })
+    const res = await fetchWithTimeout(url, { method: 'POST', headers, body })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
       throw new Error(err.error || `HTTP ${res.status}`)

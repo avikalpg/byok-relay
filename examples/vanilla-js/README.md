@@ -16,8 +16,16 @@ A **single HTML file** that lets users bring their own Anthropic or OpenAI API k
 Just open `index.html` in your browser. The file defaults to `https://relay.byokrelay.com` so no local server is needed.
 
 ```bash
+# macOS
 open examples/vanilla-js/index.html
-# or double-click index.html in your file manager
+
+# Linux
+xdg-open examples/vanilla-js/index.html
+
+# Windows
+start examples/vanilla-js/index.html
+
+# or just double-click index.html in your file manager
 ```
 
 **Option B — Local relay:**

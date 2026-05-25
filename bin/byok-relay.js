@@ -52,8 +52,14 @@ if (args.includes('--version')) {
 
 // Forward --port flag to PORT env var
 const portIdx = args.indexOf('--port');
-if (portIdx !== -1 && args[portIdx + 1]) {
-  process.env.PORT = args[portIdx + 1];
+if (portIdx !== -1) {
+  const portVal = args[portIdx + 1];
+  const portNum = Number(portVal);
+  if (!portVal || !Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+    console.error('Error: --port requires a valid port number between 1 and 65535, e.g. --port 8080');
+    process.exit(1);
+  }
+  process.env.PORT = portVal;
 }
 
 // Bootstrap the server

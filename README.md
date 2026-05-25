@@ -184,12 +184,16 @@ export ENCRYPTION_SECRET=$(openssl rand -hex 32)
 npx byok-relay
 ```
 
+> ⚠️ **Persistence:** `ENCRYPTION_SECRET` set via `export` is ephemeral (session only). If you restart the server without the same secret, it cannot decrypt previously stored keys and all users will need to re-register their keys. Save it to a file (e.g. `.env`) or your shell profile for persistence.
+
 **Option B — global install**
 ```bash
 npm install -g byok-relay
 export ENCRYPTION_SECRET=$(openssl rand -hex 32)
 byok-relay
 ```
+
+> ⚠️ **Persistence:** Same caveat as Option A — store `ENCRYPTION_SECRET` somewhere durable (e.g. a `.env` file or your shell's `.bashrc`/`.zshrc`) so restarts don't invalidate existing stored keys.
 
 **Option C — clone & run**
 ```bash
