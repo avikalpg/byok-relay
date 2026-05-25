@@ -7,7 +7,7 @@
 
 **Your users already have AI keys. byok-relay lets them use those keys — straight from your frontend, with no CORS issues and no keys in your code.**
 
-Built for developers building prosumer tools and B2B AI products on top of a frontend-only stack. Your users bring their own OpenAI, Anthropic, or Gemini keys. The relay stores them encrypted server-side and proxies requests. You build the product; they pay for their own AI usage.
+Built for developers building prosumer tools and B2B AI products. Whether you're running a frontend-only app or have a full backend, byok-relay handles the BYOK plumbing — encrypted key storage, secure relay, multi-provider support — in minutes, not days. Your users bring their own OpenAI, Anthropic, or Gemini keys; you build the product; they pay for their own AI usage.
 
 ## Managed relay
 
@@ -238,7 +238,7 @@ Two patterns, one integration:
 
 **Prosumer / individual** — each user registers their own API key once. They use their own credits; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
 
-**Team / B2B** — a company admin registers the org's shared API key. Every team member gets a relay token that routes through that key. Billing, usage, and key rotation are managed inside the customer's organisation — not by you.
+**Team / B2B** — a company admin registers the org's shared API key once. The relay token lives in your app's backend; all team members access AI through your app, which routes requests automatically. Billing, usage, and key rotation are managed inside the customer's organisation — not by you.
 
 byok-relay handles both patterns today.
 
