@@ -70,30 +70,35 @@ function _migrateTokenColumn() {
   db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
 
   const hmacKey = _getHmacKey();
-  const rows = db.prepare('SELECT id, token FROM users').all();
-  const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
-  const backfill = db.transaction(() => {
+
+  // Wrap backfill + table rebuild in one transaction so a crash mid-way
+  // cannot leave the database without a `users` table.
+  const migrate = db.transaction(() => {
+    // 1. Backfill hash values into the new column
+    const rows = db.prepare('SELECT id, token FROM users').all();
+    const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
     for (const row of rows) {
       update.run(_hmac(row.token, hmacKey), row.id);
     }
-  });
-  backfill();
 
-  // 2. Rebuild the table without the old `token` column
-  //    (SQLite does not support DROP COLUMN before 3.35.0)
-  db.exec(`
-    CREATE TABLE users_new (
-      id TEXT PRIMARY KEY,
-      token_hash TEXT UNIQUE NOT NULL,
-      app_id TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-    INSERT INTO users_new (id, token_hash, app_id, created_at)
-      SELECT id, token_hash, app_id, created_at FROM users;
-    DROP TABLE users;
-    ALTER TABLE users_new RENAME TO users;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
-  `);
+    // 2. Rebuild the table without the old `token` column
+    //    (SQLite does not support DROP COLUMN before 3.35.0)
+    //    All three statements run atomically — no window where `users` is absent.
+    db.exec(`
+      CREATE TABLE users_new (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT UNIQUE NOT NULL,
+        app_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO users_new (id, token_hash, app_id, created_at)
+        SELECT id, token_hash, app_id, created_at FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
+    `);
+  });
+  migrate();
 }
 
 _migrateTokenColumn();
