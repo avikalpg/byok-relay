@@ -5,7 +5,7 @@
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
 
-A self-hosted (or managed) relay that lets your app's users bring their own AI API keys — no CORS, no exposed keys, no inference bill for the developer.
+A self-hosted (or managed) relay that removes inference costs from the developer's bill. Your users — whether individuals with personal keys or company admins managing a shared key — supply the API credentials. You build the product; they pay their own provider.
 
 ## Managed relay
 
@@ -41,7 +41,13 @@ Browser apps can't call AI APIs directly:
 
 The common workaround — a backend proxy — means the *app developer* holds the keys. That's a trust problem. Users have to trust you not to misuse or leak their keys.
 
-**byok-relay solves this differently:** users bring their own keys, the relay stores them encrypted on *your* server, and proxies requests without ever returning the key. The user's key travels over the wire exactly once — when they register it.
+**byok-relay solves this differently:**
+
+**Individuals / prosumers** — each user registers their own API key. They pay for their own usage; you pay nothing for inference. Works great for developer tools, research UIs, or any product where users already have API accounts.
+
+**Teams / B2B** — a company admin registers the company's shared API key once. Every team member gets a relay token that routes through that same key. The developer (you) doesn't touch the key; it belongs to the customer's organization.
+
+In both cases, the relay stores keys encrypted on *your* server and proxies requests without ever returning the key. The API key travels over the wire exactly once — when it's first registered.
 
 ## How it works
 
@@ -215,6 +221,17 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
 - **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
+
+## "BYOK" — what it actually means
+
+"Bring your own key" sounds like every employee brings a personal API key. That's one use case, but **the more common B2B pattern is a company-managed key**:
+
+1. Your customer's IT admin creates one API key with their provider (OpenAI, Anthropic, etc.)
+2. They register that key with your relay once via `POST /keys`
+3. Every team member gets a relay token scoped to that shared key
+4. Usage, billing, and key rotation are all managed by the customer's organization
+
+This is the standard enterprise model: one key per company, not one key per employee. byok-relay supports both patterns out of the box.
 
 ## Trade-offs
 

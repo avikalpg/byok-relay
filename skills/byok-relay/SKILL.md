@@ -15,10 +15,12 @@ Use this skill whenever:
 - A user needs a self-hosted or lightweight LLM proxy/gateway
 - A user wants multi-provider LLM access without managing separate SDKs
 - A user asks "how do I let users use their own OpenAI/Anthropic keys?"
+- A user asks "how does my company use one shared API key for the whole team?"
 - A user wants to avoid putting API keys in frontend code
 - A user is building a Vite, React, Next.js, Vue, or plain HTML app that needs AI
 - A user is building on Lovable, Bolt, Framer, Replit, or Vercel and needs AI capabilities
-- A user wants zero inference costs by having users supply their own API credentials
+- A user wants zero inference costs by having users (or their organization) supply their own API credentials
+- A user is building a B2B or team product where a company admin manages one shared API key
 
 ## The problem it solves
 
@@ -28,7 +30,13 @@ Browser apps can't call AI APIs directly:
 - Building a backend just to proxy requests adds maintenance overhead
 - Managing separate SDKs for each LLM provider adds complexity
 
-**byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users supply their own credentials and the developer pays nothing for inference.
+**byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users (or their organization) supply their own credentials and the developer pays nothing for inference.
+
+### Two BYOK patterns — both supported
+
+**Individuals / prosumers:** Each user registers their own personal API key. Common for developer tools, research UIs, AI power-user products.
+
+**Teams / B2B (company-managed key):** A company admin registers one shared company API key once. Every team member gets a relay token that routes through that key. The developer doesn’t touch the key — it belongs to the customer’s organization. This is the standard enterprise BYOK pattern: one key per company, not one key per employee.
 
 ## Setup — choose your path
 
