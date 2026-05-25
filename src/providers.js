@@ -14,6 +14,7 @@
  *   the base URL as a header `x-relay-base-url`.
  */
 const fetch = require('node-fetch');
+const nodePath = require('path');
 
 // ── SSRF protection ──────────────────────────────────────────────────────────
 // Blocked IP ranges: RFC-1918 private, loopback, link-local, and cloud IMDS
@@ -165,14 +166,29 @@ function validateAndNormaliseBaseUrl(raw) {
     throw new RelayUrlValidationError('x-relay-base-url must be a valid URL');
   }
 
-  if (parsed.protocol !== 'https:') {
-    throw new RelayUrlValidationError('x-relay-base-url must use HTTPS');
+  // Reject embedded credentials (user:password@host) — they're stripped by
+  // parsed.origin but are confusing and should be rejected explicitly.
+  if (parsed.username || parsed.password) {
+    throw new RelayUrlValidationError('x-relay-base-url must not contain embedded credentials');
   }
 
   const hostname = parsed.hostname;
 
-  // Block raw IPv4 addresses in private / link-local / reserved ranges
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+  // In test environments, HTTP to loopback (127.x.x.x) is allowed when the
+  // env var is set. This allows E2E tests to use a local mock server.
+  // Any other HTTP URL is still blocked, even in test mode.
+  const allowInsecureLoopback =
+    process.env.BYOK_RELAY_ALLOW_INSECURE_BASE_URL === 'true' &&
+    /^127\.\d+\.\d+\.\d+$/.test(hostname);
+
+  if (parsed.protocol !== 'https:' && !allowInsecureLoopback) {
+    throw new RelayUrlValidationError('x-relay-base-url must use HTTPS');
+  }
+
+  // Block raw IPv4 addresses in private / link-local / reserved ranges.
+  // (In test mode, loopback is already allowed above, so this will only
+  // reject other private ranges like 10.x.x.x, 192.168.x.x, etc.)
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) && !allowInsecureLoopback) {
     if (isBlockedIp(hostname)) {
       throw new RelayUrlValidationError(
         'x-relay-base-url must not target a private or reserved IP address',
@@ -234,7 +250,12 @@ function isPathAllowed(provider, path) {
   const allowed = config.allowedPaths;
   if (!allowed || allowed.length === 0) return false;
 
-  return allowed.some(prefix => path === prefix || path.startsWith(prefix + '/') || path.startsWith(prefix + '?'));
+  // Normalize the path to collapse dot-segments before prefix matching.
+  // This prevents traversal payloads like '/v1/chat/completions/../files'
+  // from bypassing the allowlist by starting with an allowed prefix.
+  const normalizedPath = nodePath.posix.normalize(path);
+
+  return allowed.some(prefix => normalizedPath === prefix || normalizedPath.startsWith(prefix + '/') || normalizedPath.startsWith(prefix + '?'));
 }
 
 const PROVIDERS = {

@@ -173,6 +173,9 @@ describe('byok-relay — example product end-to-end', () => {
           DB_PATH:           tmpDb,
           ALLOWED_ORIGINS:   '*',
           NODE_ENV:          'test',
+          // Allow HTTP loopback for the mock provider in tests.
+          // In production this env var must NOT be set.
+          BYOK_RELAY_ALLOW_INSECURE_BASE_URL: 'true',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
