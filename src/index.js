@@ -101,7 +101,8 @@ function requireToken(req, res, next) {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ ok: true, version: '1.0.0', providers: SUPPORTED_PROVIDERS });
+  const { version } = require('../package.json');
+  res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
 });
 
 /**

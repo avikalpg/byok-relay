@@ -88,6 +88,16 @@ Content-Type: application/json
 ```
 → `{ "token": "<relay-token>" }` — store in browser localStorage
 
+> **If `APP_SECRET` is set**, the request must include `Authorization: Bearer <secret>`:
+> ```http
+> POST /users
+> Content-Type: application/json
+> Authorization: Bearer <APP_SECRET>
+> 
+> { "app_id": "my-app" }
+> ```
+> Without a valid `Authorization` header, the server returns `401 Unauthorized`.
+
 ### Store an API key
 ```http
 POST /keys/anthropic
