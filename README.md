@@ -5,11 +5,13 @@
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
 
-A self-hosted (or managed) relay that lets your app's users bring their own AI API keys — no CORS, no exposed keys, no inference bill for the developer.
+**Your users already have AI keys. byok-relay lets them use those keys — straight from your frontend, with no CORS issues and no keys in your code.**
+
+Built for developers building prosumer tools and B2B AI products. Whether you're running a frontend-only app or have a full backend, byok-relay handles the BYOK plumbing — encrypted key storage, secure relay, multi-provider support — in minutes, not days. Your users bring their own OpenAI, Anthropic, or Gemini keys; you build the product; they pay for their own AI usage.
 
 ## Managed relay
 
-**Don't want to self-host?** Use ours — no setup needed:
+**Skip the setup — use ours:**
 
 ```
 https://relay.byokrelay.com
@@ -39,9 +41,23 @@ Browser apps can't call AI APIs directly:
 - `api.anthropic.com`, `api.openai.com`, and most AI providers **block browser requests via CORS**
 - Putting API keys in frontend code exposes them to every user
 
-The common workaround — a backend proxy — means the *app developer* holds the keys. That's a trust problem. Users have to trust you not to misuse or leak their keys.
+The common workaround — a backend proxy — means the *app developer* holds the keys. That's a trust problem, and it puts inference costs on your bill permanently.
 
-**byok-relay solves this differently:** users bring their own keys, the relay stores them encrypted on *your* server, and proxies requests without ever returning the key. The user's key travels over the wire exactly once — when they register it.
+**byok-relay solves this differently:** the relay sits between your frontend and the AI provider. Users register their own keys once; every request after that uses their key, billed to their account.
+
+## How it compares
+
+| | byok-relay | OpenRouter | LiteLLM |
+|---|---|---|---|
+| Who holds the API keys | Your users | OpenRouter | Your org |
+| Who pays for AI usage | Your users | You (the dev) | You (the org) |
+| BYOK for end users | ✅ | ❌ | ❌ |
+| Browser-safe (CORS handled) | ✅ | ✅ | ❌ (needs backend) |
+| Self-hosted | ✅ | ❌ | ✅ |
+| Open source | ✅ Apache 2.0 | ❌ | ✅ |
+| Model routing / fallbacks | ❌ | ✅ | ✅ |
+
+Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing + analytics. Use byok-relay when you want users to bring their own keys.
 
 ## How it works
 
@@ -61,7 +77,39 @@ Browser                  byok-relay              AI Provider
   │◄─ streamed response ──────┤◄─ streamed response ──┤
 ```
 
-The `token` (not the API key) is stored in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM.
+The `token` (not the API key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM.
+
+## Quickstart (60 seconds)
+
+```bash
+# 1. Clone and install
+git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
+
+# 2. Configure
+echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
+echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+
+# 3. Start
+npm start &
+
+# 4. Register a user and get a token
+TOKEN=$(curl -s -X POST http://localhost:3000/users \
+  -H "Content-Type: application/json" \
+  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# 5. Store your Anthropic key
+curl -X POST http://localhost:3000/keys/anthropic \
+  -H "Content-Type: application/json" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"key":"sk-ant-YOUR-KEY-HERE"}'
+
+# 6. Relay a request (streaming)
+curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
+```
 
 ## Supported providers
 
@@ -152,38 +200,6 @@ The fastest way to get byok-relay running is via Vercel:
 
 > **Note:** Vercel's serverless environment has an ephemeral filesystem, so SQLite state resets between cold starts. This is fine for demos and prototyping. For production with persistent key storage, deploy to a long-running server (see [Production setup](#production-ubuntu--systemd) below, or use Railway/Render).
 
-## Quickstart (60 seconds)
-
-```bash
-# 1. Clone and install
-git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
-
-# 2. Configure
-echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
-echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
-
-# 3. Start
-npm start &
-
-# 4. Register a user and get a token
-TOKEN=$(curl -s -X POST http://localhost:3000/users \
-  -H "Content-Type: application/json" \
-  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-
-# 5. Store your Anthropic key
-curl -X POST http://localhost:3000/keys/anthropic \
-  -H "Content-Type: application/json" \
-  -H "x-relay-token: $TOKEN" \
-  -d '{"key":"sk-ant-YOUR-KEY-HERE"}'
-
-# 6. Relay a request (streaming)
-curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "x-relay-token: $TOKEN" \
-  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
-```
-
 ## Setup
 
 ### 1. Install
@@ -220,18 +236,28 @@ sudo certbot --nginx -d relay.yourdomain.com
 ## Security
 
 - **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
-- **Keys never returned** — the API after initial POST
+- **Keys never returned** — after the initial POST, the key value is never sent over the wire again
 - **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
 - **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
 - **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
 
+## BYOK — your users pay for what they use
+
+Two patterns, one integration:
+
+**Prosumer / individual** — each user registers their own API key once. They use their own credits; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
+
+**Team / B2B** — a company admin registers the org's shared API key once. The relay token lives in your app's backend; all team members access AI through your app, which routes requests automatically. Billing, usage, and key rotation are managed inside the customer's organisation — not by you.
+
+byok-relay handles both patterns today.
+
 ## Trade-offs
 
-- **You hold the encrypted keys** — users trust your server. If your server is compromised and the `ENCRYPTION_SECRET` leaks, all keys could be decrypted. For higher assurance, replace SQLite with a cloud KMS-backed store.
-- **No user accounts** — the relay token is the only credential. Anyone who steals a user's localStorage token can use their stored key. Mitigate by scoping tokens to IP or adding optional auth.
-- **Self-hosted** — you're responsible for uptime, security updates, and backups.
+- **You hold the encrypted keys** — users trust your server. Mitigate with a cloud KMS-backed store for higher assurance.
+- **No built-in user accounts** — the relay token is the only credential. Scope tokens to IP or add your own auth layer for production.
+- **Self-hosted** — you're responsible for uptime, security updates, and backups. Or use [relay.byokrelay.com](https://relay.byokrelay.com) and skip all of that.
 
 ## Find us on
 
@@ -243,3 +269,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 ## License
 
 Apache 2.0
+
+---
+
+**Ready to integrate?** → Use `npx skills add avikalpg/byok-relay` or point your coding agent at [byokrelay.com/skill](https://byokrelay.com/skill)
