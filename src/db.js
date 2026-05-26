@@ -48,9 +48,11 @@ db.exec(`
     UNIQUE(user_id, provider)
   );
 
-  CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
   CREATE INDEX IF NOT EXISTS idx_keys_user_provider ON keys(user_id, provider);
 `);
+// NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() below,
+// because on legacy databases the token_hash column doesn't exist yet at this
+// point and SQLite would throw "no such column: token_hash".
 
 // ── Migration: rename legacy `token` column → `token_hash` and hash values ─
 //
@@ -105,6 +107,10 @@ function _migrateTokenColumn() {
 }
 
 _migrateTokenColumn();
+
+// Create the token_hash index here — after migration — so token_hash is
+// guaranteed to exist on both fresh installs and legacy databases.
+db.exec('CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);');
 
 // ── Encryption helpers ──────────────────────────────────────────────────────
 
