@@ -66,15 +66,18 @@ function _migrateTokenColumn() {
   const cols = db.pragma('table_info(users)').map(c => c.name);
   if (!cols.includes('token')) return; // already migrated
 
-  // 1. Backfill hash values into a new column
-  db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+  // Guard against a crash between the ALTER TABLE and migrate() completing:
+  // if token_hash column already exists, skip the ALTER TABLE.
+  if (!cols.includes('token_hash')) {
+    db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+  }
 
   const hmacKey = _getHmacKey();
 
   // Wrap backfill + table rebuild in one transaction so a crash mid-way
   // cannot leave the database without a `users` table.
   const migrate = db.transaction(() => {
-    // 1. Backfill hash values into the new column
+    // Backfill hash values into the new column
     const rows = db.prepare('SELECT id, token FROM users').all();
     const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
     for (const row of rows) {
@@ -115,6 +118,10 @@ function getEncryptionKey() {
   _encryptionKey = crypto.scryptSync(secret, salt, 32);
   return _encryptionKey;
 }
+
+// Warm the cache eagerly at module load (dotenv is guaranteed to have run
+// before this module is imported — see src/index.js).
+getEncryptionKey();
 
 function encryptApiKey(plaintext) {
   const key = getEncryptionKey();
@@ -194,7 +201,9 @@ function createUser(appId) {
  */
 function getUserByToken(token) {
   const token_hash = hashToken(token);
-  return db.prepare('SELECT * FROM users WHERE token_hash = ?').get(token_hash);
+  return db
+    .prepare('SELECT id, app_id, created_at FROM users WHERE token_hash = ?')
+    .get(token_hash);
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
