@@ -1,20 +1,16 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-# Use a slim Node image. better-sqlite3 needs a native build; the official
-# node:*-slim image has the required build tools available via apt.
-FROM node:20-slim AS deps
+FROM node:24-slim AS deps
 
 WORKDIR /app
 
-# Install build tools for native modules (better-sqlite3 compiles from source)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ \
-    && rm -rf /var/lib/apt/lists/*
-
+# better-sqlite3 v12 ships prebuilt binaries for Node 24 (linux-x64/arm64),
+# so no native build tools are needed — prebuild-install downloads the right
+# binary automatically and skips compilation entirely.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM node:20-slim AS runtime
+FROM node:24-slim AS runtime
 
 # Create a non-root user for the process
 RUN groupadd --gid 1001 relay && \
