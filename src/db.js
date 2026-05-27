@@ -110,7 +110,7 @@ _migrateTokenColumn();
 
 // Create the token_hash index here — after migration — so token_hash is
 // guaranteed to exist on both fresh installs and legacy databases.
-db.exec('CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);');
 
 // ── Encryption helpers ──────────────────────────────────────────────────────
 
