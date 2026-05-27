@@ -26,6 +26,15 @@ if (!process.env.APP_SECRET) {
   console.warn('Set APP_SECRET to restrict registration to authorised callers only.');
   console.warn('Generate one with: openssl rand -hex 32');
 }
+if (process.env.TOKEN_HMAC_SECRET && process.env.TOKEN_HMAC_SECRET.length < 32) {
+  console.error('ERROR: TOKEN_HMAC_SECRET must be at least 32 characters.');
+  process.exit(1);
+}
+if (!process.env.TOKEN_HMAC_SECRET) {
+  console.warn('WARNING: TOKEN_HMAC_SECRET is not set. Falling back to ENCRYPTION_SECRET for token hashing.');
+  console.warn('Set TOKEN_HMAC_SECRET to use a dedicated key per best practice.');
+  console.warn('Generate one with: openssl rand -hex 32');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
