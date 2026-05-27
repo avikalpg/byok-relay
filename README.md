@@ -191,6 +191,30 @@ Content-Type: application/json
 
 ## Deploy in one click
 
+### Docker (recommended for self-hosters)
+
+```bash
+# 1. Copy and fill in the env template
+cp .env.example .env
+# Set ENCRYPTION_SECRET (required): openssl rand -hex 32
+# Set ALLOWED_ORIGINS to your frontend domain(s)
+# Set APP_SECRET (strongly recommended): openssl rand -hex 32
+
+# 2. Start the relay
+docker compose up -d
+
+# 3. Check it's healthy
+docker compose ps
+curl http://localhost:3000/health
+```
+
+SQLite data persists in `./data/relay.db` between restarts and rebuilds.
+Back up that file; it holds all encrypted API keys.
+
+> **Note:** When you update the image, run `docker compose pull && docker compose up -d` — the `./data` volume is preserved.
+
+### Vercel (prototyping only)
+
 The fastest way to get byok-relay running is via Vercel:
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS,APP_SECRET&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)

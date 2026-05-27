@@ -1,0 +1,47 @@
+services:
+  relay:
+    build: .
+    image: byok-relay:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      # SQLite database lives outside the container so it persists across
+      # restarts and image rebuilds. Back up ./data/relay.db regularly.
+      - ./data:/app/data
+    environment:
+      # ── Required ────────────────────────────────────────────────────────────
+      # Generate with: openssl rand -hex 32
+      ENCRYPTION_SECRET: ${ENCRYPTION_SECRET:?ENCRYPTION_SECRET is required — run: openssl rand -hex 32}
+
+      # ── Recommended ─────────────────────────────────────────────────────────
+      # Separate HMAC key for hashing relay tokens at rest.
+      # Generate with: openssl rand -hex 32
+      TOKEN_HMAC_SECRET: ${TOKEN_HMAC_SECRET:-}
+
+      # Salt for the API key encryption KDF.
+      # Generate with: openssl rand -hex 32
+      ENCRYPTION_SALT: ${ENCRYPTION_SALT:-}
+
+      # Gate POST /users with a shared secret (strongly recommended in production).
+      # Generate with: openssl rand -hex 32
+      APP_SECRET: ${APP_SECRET:-}
+
+      # ── Networking ──────────────────────────────────────────────────────────
+      # Comma-separated list of allowed CORS origins.
+      # Example: https://myapp.example.com,http://localhost:3000
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+
+      # ── Database path ────────────────────────────────────────────────────────
+      # Points inside the mounted volume — do not change unless you also
+      # change the volume mapping above.
+      DB_PATH: /app/data/relay.db
+
+      PORT: "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e",
+             "require('http').get('http://localhost:3000/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
