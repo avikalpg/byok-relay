@@ -3,37 +3,32 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
+const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, logRequest, getStatsForUser, getStatsForApp } = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
+const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
-  console.error('ERROR: ENCRYPTION_SECRET env var is not set.');
-  console.error('Generate one with: openssl rand -hex 32');
-  console.error('Then add it to your .env file or environment.');
+  logger.error('ENCRYPTION_SECRET env var is not set. Generate one with: openssl rand -hex 32');
   process.exit(1);
 }
 if (process.env.ENCRYPTION_SECRET.length < 32) {
-  console.error('ERROR: ENCRYPTION_SECRET must be at least 32 characters.');
+  logger.error('ENCRYPTION_SECRET must be at least 32 characters.');
   process.exit(1);
 }
 if (process.env.APP_SECRET && process.env.APP_SECRET.includes(' ')) {
-  console.error('ERROR: APP_SECRET must not contain spaces. Generate a safe value with: openssl rand -hex 32');
+  logger.error('APP_SECRET must not contain spaces. Generate a safe value with: openssl rand -hex 32');
   process.exit(1);
 }
 if (!process.env.APP_SECRET) {
-  console.warn('WARNING: APP_SECRET is not set. POST /users is open — anyone can register.');
-  console.warn('Set APP_SECRET to restrict registration to authorised callers only.');
-  console.warn('Generate one with: openssl rand -hex 32');
+  logger.warn('APP_SECRET is not set — POST /users is open. Set APP_SECRET to restrict registration.');
 }
 if (process.env.TOKEN_HMAC_SECRET && process.env.TOKEN_HMAC_SECRET.length < 32) {
-  console.error('ERROR: TOKEN_HMAC_SECRET must be at least 32 characters.');
+  logger.error('TOKEN_HMAC_SECRET must be at least 32 characters.');
   process.exit(1);
 }
 if (!process.env.TOKEN_HMAC_SECRET) {
-  console.warn('WARNING: TOKEN_HMAC_SECRET is not set. Falling back to ENCRYPTION_SECRET for token hashing.');
-  console.warn('Set TOKEN_HMAC_SECRET to use a dedicated key per best practice.');
-  console.warn('Generate one with: openssl rand -hex 32');
+  logger.warn('TOKEN_HMAC_SECRET is not set — falling back to ENCRYPTION_SECRET for token hashing.');
 }
 
 const app = express();
@@ -50,6 +45,9 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '1mb' }));
+
+// Structured HTTP request logging (must come after express.json so body is parsed)
+app.use(httpLogger);
 
 // Global rate limit: 100 requests per minute per IP
 const globalLimiter = rateLimit({
@@ -182,6 +180,32 @@ app.get('/keys', requireToken, (req, res) => {
 });
 
 /**
+ * GET /stats
+ * Return per-user request statistics for the authenticated relay token.
+ * Headers: x-relay-token
+ *
+ * Response:
+ *   { total, last_7d, last_30d, error_count, error_rate, providers, top_models, last_request }
+ */
+app.get('/stats', requireToken, (req, res) => {
+  const stats = getStatsForUser(req.user.id);
+  res.json(stats);
+});
+
+/**
+ * GET /stats/:app_id
+ * Return aggregate statistics for all users of a given app_id.
+ * Requires APP_SECRET — operator-level endpoint.
+ *
+ * Response:
+ *   { app_id, user_count, total, last_7d, last_30d, error_count, error_rate, providers, top_models }
+ */
+app.get('/stats/:app_id', requireAppSecret, (req, res) => {
+  const stats = getStatsForApp(req.params.app_id);
+  res.json(stats);
+});
+
+/**
  * POST /relay/:provider/*
  * Forward a request to the AI provider using the user's stored API key.
  * Headers: x-relay-token
@@ -216,6 +240,9 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
+  const model = req.body?.model || null;
+  const relayStart = Date.now();
+
   try {
     const providerResponse = await forwardRequest(
       provider,
@@ -234,6 +261,35 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     const isStream = req.body?.stream === true ||
       (contentType && contentType.includes('text/event-stream'));
 
+    const latency_ms = Date.now() - relayStart;
+
+    // Structured relay log
+    req.log.info({
+      event: 'relay_request',
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status: providerResponse.status,
+      latency_ms,
+      streaming: isStream,
+    }, 'relay');
+
+    // Persist to request_logs for /stats
+    try {
+      logRequest({
+        user_id: req.user.id,
+        app_id: req.user.app_id,
+        provider,
+        model,
+        status: providerResponse.status,
+        latency_ms,
+      });
+    } catch (logErr) {
+      // Never let logging failure affect the response
+      req.log.warn({ err: logErr }, 'request log write failed');
+    }
+
     if (isStream) {
       // Pipe the SSE stream directly to the client
       res.setHeader('Content-Type', 'text/event-stream');
@@ -251,7 +307,11 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     if (err.code === 'INVALID_RELAY_BASE_URL') {
       return res.status(400).json({ error: err.message });
     }
-    console.error('Relay error:', err);
+    const latency_ms = Date.now() - relayStart;
+    req.log.error({ err, event: 'relay_error', user_id: req.user.id, app_id: req.user.app_id, provider, model, latency_ms }, 'relay error');
+    try {
+      logRequest({ user_id: req.user.id, app_id: req.user.app_id, provider, model, status: 502, latency_ms });
+    } catch (_) {}
     res.status(502).json({ error: 'Failed to reach AI provider' });
   }
 });
@@ -261,9 +321,7 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
 // When imported by Vercel's @vercel/node runtime, export the app instead.
 if (require.main === module) {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`byok-relay listening on port ${PORT}`);
-    console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
-    console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
+    logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
   });
 }
 
