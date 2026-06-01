@@ -114,6 +114,8 @@ curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
 
 ## Supported providers
 
+### LLM providers
+
 | Provider | Name | Notes |
 |---|---|---|
 | Anthropic | `anthropic` | Claude models, SSE streaming |
@@ -123,6 +125,44 @@ curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
 | OpenRouter | `openrouter` | 200+ models via one API |
 | Mistral | `mistral` | Mistral models |
 | Any OpenAI-compatible | `openai-compatible` | Pass `x-relay-base-url` header — covers LiteLLM, Ollama, Perplexity, Together AI, and any other OpenAI-compatible endpoint |
+
+### Non-LLM inference providers (audio, image, multimodal)
+
+byok-relay supports non-LLM APIs that return binary responses (audio, images) or accept raw audio uploads. The same BYOK model applies: your users bring their own key; byok-relay handles auth headers and binary pass-through.
+
+| Provider | Name | Key scheme | Use cases |
+|---|---|---|---|
+| ElevenLabs | `elevenlabs` | `xi-api-key` header | Text-to-speech (TTS), speech-to-speech, voice generation |
+| HuggingFace | `huggingface` | Bearer token | NLP, image generation, audio models (Inference API) |
+| Deepgram | `deepgram` | `Token` scheme | Speech-to-text (STT), text-to-speech |
+
+**Binary response handling:** Audio and image responses are piped through byte-for-byte — no JSON parsing. The relay preserves `Content-Type`, `Content-Length`, and `Content-Disposition` headers so the client receives the raw audio/image buffer directly.
+
+**Raw audio uploads (Deepgram STT):** When sending audio to `/v1/listen`, set `Content-Type` to the audio MIME type (e.g. `audio/wav`, `audio/mpeg`). The relay detects non-JSON content types and passes the raw binary body through to the provider without re-encoding.
+
+#### ElevenLabs example — text-to-speech
+
+```http
+POST /relay/elevenlabs/v1/text-to-speech/{voice_id}
+x-relay-token: <your-token>
+Content-Type: application/json
+
+{ "text": "Hello from byok-relay!", "model_id": "eleven_monolingual_v1" }
+```
+
+Response: `audio/mpeg` binary stream.
+
+#### Deepgram example — speech-to-text
+
+```http
+POST /relay/deepgram/v1/listen?model=nova-2
+x-relay-token: <your-token>
+Content-Type: audio/wav
+
+<raw audio bytes>
+```
+
+Response: JSON transcript from Deepgram.
 
 Adding a new built-in provider is ~5 lines in `src/providers.js`.
 

@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, logRequest, getStatsForUser, getStatsForApp } = require('./db');
-const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
+const { forwardRequest, getProviderMeta, isPathAllowed, SUPPORTED_PROVIDERS } = require('./providers');
 const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -40,11 +40,29 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o =>
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-relay-token', 'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title', 'http-referer'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-relay-token', 'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title', 'http-referer', 'xi-api-key'],
   credentials: false,
 }));
 
-app.use(express.json({ limit: '1mb' }));
+app.use((req, res, next) => {
+  // For relay routes targeting providers that accept raw binary bodies (e.g. Deepgram STT),
+  // skip JSON parsing when the Content-Type is not application/json so that the raw Buffer
+  // is preserved for pass-through. All other routes use express.json as normal.
+  const provider = req.params && req.params.provider;
+  const ct = req.headers['content-type'] || '';
+  if (req.path.startsWith('/relay/') && !ct.includes('application/json')) {
+    // Collect raw body as Buffer; will be passed to forwardRequest as-is.
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      req.rawBodyBuffer = chunks.length ? Buffer.concat(chunks) : null;
+      next();
+    });
+    req.on('error', next);
+  } else {
+    express.json({ limit: '10mb' })(req, res, next);
+  }
+});
 
 // Structured HTTP request logging (must come after express.json so body is parsed)
 app.use(httpLogger);
@@ -220,6 +238,16 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
+  // Build the forwarded path early so we can check it BEFORE key decryption.
+  // This prevents a token holder from probing provider account structure via
+  // paths that are not in the allowlist (fine-tuning, billing, model deletion, etc.)
+  const forwardPath = '/' + (req.params[0] || '');
+  if (!isPathAllowed(provider, forwardPath)) {
+    return res.status(403).json({
+      error: `Path not permitted for provider "${provider}". Only inference endpoints are allowed.`,
+    });
+  }
+
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
     return res.status(400).json({
@@ -227,18 +255,21 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     });
   }
 
-  // Build the path to forward (everything after /relay/:provider)
-  const forwardPath = '/' + (req.params[0] || '');
-
   // Pass through provider-specific and relay headers
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer',
+    'http-referer', 'content-type',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
+
+  // Determine body to forward: raw Buffer for binary-upload providers, else parsed JSON.
+  const { rawBody: providerWantsRawBody } = getProviderMeta(provider);
+  const relayBody = (providerWantsRawBody && req.rawBodyBuffer)
+    ? req.rawBodyBuffer
+    : req.body;
 
   const model = req.body?.model || null;
   const relayStart = Date.now();
@@ -248,7 +279,7 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       provider,
       forwardPath,
       req.method,
-      req.body,
+      relayBody,
       apiKey,
       extraHeaders,
     );
@@ -290,15 +321,44 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       req.log.warn({ err: logErr }, 'request log write failed');
     }
 
+    // Determine how to return the response body.
+    // Binary providers (audio, image) or binary content-type responses are
+    // piped through directly. JSON providers are parsed and re-serialised.
+    // SSE streams are piped with SSE headers.
+    const { binaryResponse: providerIsBinary } = getProviderMeta(provider);
+    const isBinary = providerIsBinary ||
+      (contentType && (
+        contentType.startsWith('audio/') ||
+        contentType.startsWith('image/') ||
+        contentType.startsWith('video/') ||
+        contentType === 'application/octet-stream'
+      ));
+
     if (isStream) {
       // Pipe the SSE stream directly to the client
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
       providerResponse.body.pipe(res);
+    } else if (isBinary) {
+      // Binary response (audio, image, video) — pipe bytes through without parsing.
+      // Content-Type is already set above from providerResponse headers.
+      const contentLength = providerResponse.headers.get('content-length');
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      const contentDisp = providerResponse.headers.get('content-disposition');
+      if (contentDisp) res.setHeader('Content-Disposition', contentDisp);
+      providerResponse.body.pipe(res);
     } else {
-      const data = await providerResponse.json();
-      res.json(data);
+      // JSON response: check Content-Type before calling .json() to avoid
+      // throwing on HTML error pages (e.g. Cloudflare 502).
+      if (contentType && !contentType.includes('application/json')) {
+        const text = await providerResponse.text();
+        res.setHeader('Content-Type', contentType);
+        res.send(text);
+      } else {
+        const data = await providerResponse.json();
+        res.json(data);
+      }
     }
   } catch (err) {
     // SSRF / input validation errors are client mistakes — return 400.

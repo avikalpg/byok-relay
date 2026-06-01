@@ -1,7 +1,7 @@
 /**
  * Provider-specific request forwarding.
  *
- * Built-in providers: anthropic, openai, google, groq
+ * Built-in providers: anthropic, openai, google, groq, elevenlabs, huggingface, deepgram
  *
  * Generic OpenAI-compatible passthrough:
  *   Any provider registered as `openai-compatible:<base-url>` will be forwarded
@@ -9,6 +9,13 @@
  *   OpenRouter, LiteLLM, Groq, Mistral, Ollama, etc.
  *
  * Adding a new built-in provider: add an entry to PROVIDERS below.
+ *   - allowedPaths: array of permitted path prefixes (string match). Required.
+ *   - binaryResponse: true if provider may return non-JSON binary responses
+ *     (audio, images). The relay will stream binary responses to the client
+ *     without calling .json().
+ *   - rawBody: true if the provider may receive raw binary request bodies
+ *     (e.g. audio file uploads). The relay will pass the raw buffer through
+ *     instead of JSON-serialising req.body.
  * Adding a custom OpenAI-compatible endpoint: no code change needed —
  *   the user stores their key under a name like `openrouter` and passes
  *   the base URL as a header `x-relay-base-url`.
@@ -210,6 +217,7 @@ function validateAndNormaliseBaseUrl(raw) {
 const PROVIDERS = {
   anthropic: {
     baseUrl: 'https://api.anthropic.com',
+    allowedPaths: ['/v1/messages', '/v1/complete'],
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
@@ -224,6 +232,7 @@ const PROVIDERS = {
 
   openai: {
     baseUrl: 'https://api.openai.com',
+    allowedPaths: ['/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/responses'],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -233,6 +242,7 @@ const PROVIDERS = {
   google: {
     // Gemini API — key is passed as query param; ?alt=sse required for SSE streaming
     baseUrl: 'https://generativelanguage.googleapis.com',
+    allowedPaths: ['/v1beta/models/', '/v1/models/'],
     buildHeaders: () => ({ 'Content-Type': 'application/json' }),
     buildUrl: (baseUrl, path, apiKey) => {
       // Add alt=sse for streaming endpoints, plus the API key
@@ -246,6 +256,7 @@ const PROVIDERS = {
 
   groq: {
     baseUrl: 'https://api.groq.com',
+    allowedPaths: ['/openai/v1/chat/completions', '/openai/v1/completions', '/openai/v1/embeddings'],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -254,6 +265,7 @@ const PROVIDERS = {
 
   openrouter: {
     baseUrl: 'https://openrouter.ai',
+    allowedPaths: ['/api/v1/chat/completions', '/api/v1/completions', '/api/v1/embeddings'],
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -265,9 +277,71 @@ const PROVIDERS = {
 
   mistral: {
     baseUrl: 'https://api.mistral.ai',
+    allowedPaths: ['/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/fim/completions'],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
+    }),
+  },
+
+  /**
+   * ElevenLabs — text-to-speech, speech-to-speech, sound generation.
+   * API key: xi-api-key header.
+   * TTS responses are binary audio (mp3/pcm/ulaw). STT requests may send raw audio.
+   * Docs: https://elevenlabs.io/docs/api-reference
+   */
+  elevenlabs: {
+    baseUrl: 'https://api.elevenlabs.io',
+    allowedPaths: [
+      '/v1/text-to-speech/',
+      '/v1/speech-to-speech/',
+      '/v1/sound-generation',
+      '/v1/audio-isolation',
+      '/v1/voice-generation',
+      '/v1/voices',
+    ],
+    binaryResponse: true,  // TTS returns audio/mpeg or audio/pcm
+    buildHeaders: (apiKey, extraHeaders = {}) => ({
+      'xi-api-key': apiKey,
+      // Content-Type is forwarded from the caller; default to JSON for TTS
+      'Content-Type': extraHeaders['content-type'] || 'application/json',
+    }),
+  },
+
+  /**
+   * HuggingFace Inference API — NLP, image, audio, multimodal models.
+   * API key: Bearer token.
+   * Response varies: JSON for NLP/classification, binary for image/audio generation.
+   * Docs: https://huggingface.co/docs/api-inference/index
+   */
+  huggingface: {
+    baseUrl: 'https://api-inference.huggingface.co',
+    allowedPaths: ['/models/'],
+    binaryResponse: true,  // image/audio models return binary; relay detects Content-Type
+    buildHeaders: (apiKey, extraHeaders = {}) => ({
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': extraHeaders['content-type'] || 'application/json',
+    }),
+  },
+
+  /**
+   * Deepgram — speech-to-text (transcription) and text-to-speech.
+   * API key: Token scheme (not Bearer).
+   * /v1/listen accepts audio binary body; /v1/speak returns audio binary.
+   * Docs: https://developers.deepgram.com/reference
+   */
+  deepgram: {
+    baseUrl: 'https://api.deepgram.com',
+    allowedPaths: [
+      '/v1/listen',
+      '/v1/speak',
+      '/v1/read',
+    ],
+    binaryResponse: true,  // /v1/speak returns audio/mpeg
+    rawBody: true,         // /v1/listen may receive raw audio binary upload
+    buildHeaders: (apiKey, extraHeaders = {}) => ({
+      'Authorization': `Token ${apiKey}`,
+      'Content-Type': extraHeaders['content-type'] || 'application/json',
     }),
   },
 
@@ -278,6 +352,11 @@ const PROVIDERS = {
    */
   'openai-compatible': {
     baseUrl: null, // determined per-request from x-relay-base-url header
+    allowedPaths: [
+      '/v1/chat/completions', '/v1/completions', '/v1/embeddings',
+      '/api/v1/chat/completions', '/api/v1/completions', '/api/v1/embeddings',
+      '/openai/v1/chat/completions', '/openai/v1/completions',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -286,13 +365,33 @@ const PROVIDERS = {
 };
 
 /**
+ * Return true if `path` starts with any allowed prefix for `provider`.
+ * Applies path.posix.normalize() to neutralise dot-segment traversal before
+ * matching (e.g. '/v1/messages/../files' normalises to '/v1/files' which is
+ * then correctly blocked).
+ *
+ * Providers without an allowedPaths array pass all paths.
+ *
+ * @param {string} provider
+ * @param {string} path
+ * @returns {boolean}
+ */
+function isPathAllowed(provider, path) {
+  const config = PROVIDERS[provider];
+  if (!config || !config.allowedPaths) return true; // no allowlist → allow all
+  const { posix } = require('path');
+  const normalised = posix.normalize(path);
+  return config.allowedPaths.some(prefix => normalised.startsWith(prefix));
+}
+
+/**
  * Forward a request to the AI provider.
  * Returns a node-fetch Response (streaming-capable).
  *
  * @param {string} provider - Provider name from PROVIDERS
  * @param {string} path - URL path to forward (e.g. /v1/messages)
  * @param {string} method - HTTP method
- * @param {object} body - Request body
+ * @param {object|Buffer|null} body - Parsed JSON body, raw Buffer, or null
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
  */
@@ -321,15 +420,42 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     ? config.buildUrl(baseUrl, path, apiKey)
     : `${baseUrl}${path}`;
 
+  // Determine the request body to forward.
+  // - If body is already a Buffer (raw binary, e.g. audio upload), pass through.
+  // - If there is no body or method is GET, send nothing.
+  // - Otherwise JSON-serialise the parsed body object.
+  let fetchBody;
+  if (method === 'GET' || body === null || body === undefined) {
+    fetchBody = undefined;
+  } else if (Buffer.isBuffer(body)) {
+    fetchBody = body; // raw binary pass-through (e.g. Deepgram STT audio)
+  } else {
+    fetchBody = JSON.stringify(body);
+  }
+
   const response = await fetch(url, {
     method,
     headers,
-    body: method !== 'GET' ? JSON.stringify(body) : undefined,
+    body: fetchBody,
   });
 
   return response;
 }
 
+/**
+ * Return provider config metadata flags used by the relay handler.
+ *
+ * @param {string} provider
+ * @returns {{ binaryResponse: boolean, rawBody: boolean }}
+ */
+function getProviderMeta(provider) {
+  const config = PROVIDERS[provider] || {};
+  return {
+    binaryResponse: config.binaryResponse === true,
+    rawBody: config.rawBody === true,
+  };
+}
+
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
-module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl };
+module.exports = { forwardRequest, getProviderMeta, isPathAllowed, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl };
