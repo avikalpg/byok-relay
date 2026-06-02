@@ -339,6 +339,29 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+
+      // If the upstream provider drops the connection mid-stream, emit an error
+      // event on the SSE channel and close cleanly rather than crashing the process.
+      providerResponse.body.on('error', (streamErr) => {
+        req.log.warn(
+          { err: streamErr, event: 'stream_pipe_error', user_id: req.user.id, app_id: req.user.app_id, provider },
+          'upstream SSE stream error'
+        );
+        if (!res.writableEnded) {
+          // Send a terminal SSE error event so the client knows the stream died.
+          res.write('event: error\ndata: {"error":"Stream interrupted by provider"}\n\n');
+          res.end();
+        }
+      });
+
+      // If the client disconnects before the stream finishes, destroy the
+      // upstream connection so we don't keep consuming provider bandwidth.
+      res.on('close', () => {
+        if (providerResponse.body && !providerResponse.body.destroyed) {
+          providerResponse.body.destroy();
+        }
+      });
+
       providerResponse.body.pipe(res);
     } else if (isBinary) {
       // Binary response (audio, image, video) — pipe bytes through without parsing.
@@ -347,6 +370,22 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       if (contentLength) res.setHeader('Content-Length', contentLength);
       const contentDisp = providerResponse.headers.get('content-disposition');
       if (contentDisp) res.setHeader('Content-Disposition', contentDisp);
+
+      // Same safety net for binary pipes: log + end cleanly on upstream error,
+      // and destroy upstream on client disconnect.
+      providerResponse.body.on('error', (binaryErr) => {
+        req.log.warn(
+          { err: binaryErr, event: 'binary_pipe_error', user_id: req.user.id, app_id: req.user.app_id, provider },
+          'upstream binary stream error'
+        );
+        if (!res.writableEnded) res.end();
+      });
+      res.on('close', () => {
+        if (providerResponse.body && !providerResponse.body.destroyed) {
+          providerResponse.body.destroy();
+        }
+      });
+
       providerResponse.body.pipe(res);
     } else {
       // JSON response: check Content-Type before calling .json() to avoid
@@ -380,8 +419,29 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
 // When run directly (node src/index.js or npm start), start the HTTP server.
 // When imported by Vercel's @vercel/node runtime, export the app instead.
 if (require.main === module) {
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
+  });
+
+  // Graceful shutdown on SIGTERM (Docker stop, systemd, Kubernetes rolling deploy).
+  // server.close() stops accepting new connections and waits for in-flight
+  // requests to finish. Force-exits after 30 s in case a streaming request
+  // never completes (e.g. a runaway SSE connection).
+  process.on('SIGTERM', () => {
+    logger.info('SIGTERM received — starting graceful shutdown');
+    server.close((err) => {
+      if (err) {
+        logger.error({ err }, 'error during graceful shutdown');
+        process.exit(1);
+      }
+      logger.info('server closed cleanly');
+      process.exit(0);
+    });
+    const forceExit = setTimeout(() => {
+      logger.warn('graceful shutdown timed out after 30 s — forcing exit');
+      process.exit(1);
+    }, 30_000);
+    forceExit.unref(); // Don't prevent Node from exiting if nothing else is pending.
   });
 }
 
