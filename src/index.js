@@ -2,6 +2,7 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
@@ -41,6 +42,9 @@ const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
 
 // ── Middleware ──────────────────────────────────────────────────────────────
+
+// Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
+app.use(helmet());
 
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
@@ -246,11 +250,16 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     }
   } catch (err) {
     // SSRF / input validation errors are client mistakes — return 400.
-    // All other relay failures return 502 with a generic message so we don't
-    // leak internal hostnames, IPs, or stack traces to the client.
     if (err.code === 'INVALID_RELAY_BASE_URL') {
       return res.status(400).json({ error: err.message });
     }
+    // Upstream timeout — the provider accepted the connection but never responded.
+    if (err.name === 'AbortError') {
+      console.error('Relay timeout: upstream provider did not respond within 30s');
+      return res.status(504).json({ error: 'AI provider timed out (30 s). Please retry.' });
+    }
+    // All other relay failures return 502 with a generic message so we don't
+    // leak internal hostnames, IPs, or stack traces to the client.
     console.error('Relay error:', err);
     res.status(502).json({ error: 'Failed to reach AI provider' });
   }

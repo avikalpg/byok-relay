@@ -296,16 +296,42 @@ const PROVIDERS = {
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
  */
+/**
+ * Strip CRLF and null bytes from a header value to prevent header injection.
+ * Returns the sanitised string.
+ */
+function sanitiseHeaderValue(value) {
+  if (typeof value !== 'string') return value;
+  // Remove CR (\r), LF (\n), and null (\0) — the classic header injection chars.
+  return value.replace(/[\r\n\0]/g, '');
+}
+
+/**
+ * Return a copy of extraHeaders with all values sanitised against CRLF injection.
+ */
+function sanitiseHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    out[k] = sanitiseHeaderValue(v);
+  }
+  return out;
+}
+
 async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}) {
   const config = PROVIDERS[provider];
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
   let baseUrl = config.baseUrl;
 
+  // Sanitise all passthrough header values before they touch any downstream call.
+  // Prevents CRLF injection: a \r\n in a header value can inject arbitrary
+  // headers into the outbound request to the AI provider.
+  const safeExtraHeaders = sanitiseHeaders(extraHeaders);
+
   // For openai-compatible, the base URL comes from the request header.
   // Validate and normalise it to prevent SSRF attacks.
   if (provider === 'openai-compatible') {
-    const rawBaseUrl = extraHeaders['x-relay-base-url'];
+    const rawBaseUrl = safeExtraHeaders['x-relay-base-url'];
     if (!rawBaseUrl) {
       throw new RelayUrlValidationError('x-relay-base-url header is required for openai-compatible provider');
     }
@@ -314,18 +340,32 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     baseUrl = validateAndNormaliseBaseUrl(rawBaseUrl);
   }
 
-  const headers = config.buildHeaders(apiKey, extraHeaders);
+  const headers = config.buildHeaders(apiKey, safeExtraHeaders);
 
   // Some providers (Google) put the key in the URL
   const url = config.buildUrl
     ? config.buildUrl(baseUrl, path, apiKey)
     : `${baseUrl}${path}`;
 
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: method !== 'GET' ? JSON.stringify(body) : undefined,
-  });
+  // Hard 30-second timeout on every upstream provider request.
+  // Without this, a provider that accepts the TCP connection but never sends
+  // a response (or an SSRF target that hangs) holds the connection open
+  // forever, exhausting the server's connection pool under concurrent load.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: method !== 'GET' ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } finally {
+    // Always clear the timeout — whether the fetch succeeded, threw, or aborted.
+    clearTimeout(timeoutId);
+  }
 
   return response;
 }
