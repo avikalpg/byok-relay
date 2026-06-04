@@ -34,7 +34,8 @@ db.exec(`
     id TEXT PRIMARY KEY,
     token_hash TEXT UNIQUE NOT NULL,
     app_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS keys (
@@ -108,9 +109,32 @@ function _migrateTokenColumn() {
 
 _migrateTokenColumn();
 
+// ── Migration: add expires_at column (token TTL) ────────────────────────────
+//
+// Existing rows get expires_at = NULL, meaning "no expiry" (backward-compat).
+// New rows always get an explicit expires_at timestamp.
+function _migrateAddExpiresAt() {
+  const cols = db.pragma('table_info(users)').map(c => c.name);
+  if (cols.includes('expires_at')) return; // already present
+  db.exec('ALTER TABLE users ADD COLUMN expires_at INTEGER');
+}
+_migrateAddExpiresAt();
+
 // Create the token_hash index here — after migration — so token_hash is
 // guaranteed to exist on both fresh installs and legacy databases.
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);');
+
+// ── Token TTL ───────────────────────────────────────────────────────────────
+
+/**
+ * Default token lifetime: 90 days.  Override with TOKEN_EXPIRY_DAYS env var.
+ * Set to 0 to disable expiry entirely (not recommended for production).
+ */
+const TOKEN_EXPIRY_DAYS = parseInt(process.env.TOKEN_EXPIRY_DAYS, 10);
+const TOKEN_EXPIRY_MS =
+  (!Number.isNaN(TOKEN_EXPIRY_DAYS) && TOKEN_EXPIRY_DAYS > 0)
+    ? TOKEN_EXPIRY_DAYS * 86400 * 1000
+    : 90 * 86400 * 1000; // default 90 days
 
 // ── Encryption helpers ──────────────────────────────────────────────────────
 
@@ -194,11 +218,12 @@ function createUser(appId) {
   const token = crypto.randomBytes(32).toString('hex');
   const token_hash = hashToken(token);
   const now = Date.now();
+  const expires_at = now + TOKEN_EXPIRY_MS;
   db.prepare(
-    'INSERT INTO users (id, token_hash, app_id, created_at) VALUES (?, ?, ?, ?)'
-  ).run(id, token_hash, appId, now);
+    'INSERT INTO users (id, token_hash, app_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(id, token_hash, appId, now, expires_at);
   // Return plaintext token to caller — this is the only time it leaves memory.
-  return { id, token };
+  return { id, token, expires_at };
 }
 
 /**
@@ -207,9 +232,31 @@ function createUser(appId) {
  */
 function getUserByToken(token) {
   const token_hash = hashToken(token);
-  return db
-    .prepare('SELECT id, app_id, created_at FROM users WHERE token_hash = ?')
+  const row = db
+    .prepare('SELECT id, app_id, created_at, expires_at FROM users WHERE token_hash = ?')
     .get(token_hash);
+  if (!row) return null;
+  // NULL expires_at = legacy token with no TTL (backward-compatible).
+  if (row.expires_at !== null && row.expires_at < Date.now()) return null;
+  return row;
+}
+
+/**
+ * Immediately revoke a relay token by setting its expiry to the past.
+ * Stored keys remain in the database but become inaccessible.
+ * To delete keys too, call deleteUser().
+ */
+function revokeToken(userId) {
+  db.prepare('UPDATE users SET expires_at = ? WHERE id = ?').run(Date.now() - 1, userId);
+}
+
+/**
+ * Delete a user account and all their stored keys.
+ * Keys are cascade-deleted by the ON DELETE CASCADE foreign-key constraint.
+ * Use for GDPR erasure (Art. 17) or full account teardown.
+ */
+function deleteUser(userId) {
+  db.prepare('DELETE FROM users WHERE id = ?').run(userId);
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
@@ -244,4 +291,7 @@ function listProviders(userId) {
     .map(r => r.provider);
 }
 
-module.exports = { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders };
+module.exports = {
+  createUser, getUserByToken, revokeToken, deleteUser,
+  upsertKey, getDecryptedKey, deleteKey, listProviders,
+};

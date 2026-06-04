@@ -135,7 +135,9 @@ Content-Type: application/json
 
 { "app_id": "my-app" }
 ```
-→ `{ "token": "<relay-token>" }` — store in browser localStorage
+→ `{ "token": "<relay-token>", "expires_at": 1234567890000 }` — store in browser localStorage
+
+Tokens expire after **90 days** by default (configurable via `TOKEN_EXPIRY_DAYS` env var).
 
 > **If `APP_SECRET` is set**, the request must include `Authorization: Bearer <secret>`:
 > ```http
@@ -167,6 +169,20 @@ x-relay-token: <token>
 DELETE /keys/anthropic
 x-relay-token: <token>
 ```
+
+### Revoke a relay token
+```http
+POST /tokens/revoke
+x-relay-token: <token>
+```
+Immediately invalidates the token. Stored keys remain in the database but are no longer accessible. To regain access, register a new token (`POST /users`) and re-enter your keys.
+
+### Delete account (GDPR erasure)
+```http
+DELETE /users
+x-relay-token: <token>
+```
+Permanently deletes the user account **and all associated API keys**. This action is irreversible.
 
 ### Relay a request
 ```http
@@ -239,6 +255,8 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
 - **Keys never returned** — after the initial POST, the key value is never sent over the wire again
 - **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
+- **Token expiry** — relay tokens expire after 90 days by default. Override with `TOKEN_EXPIRY_DAYS` env var. Users can also call `POST /tokens/revoke` to invalidate a stolen token immediately.
+- **Account erasure** — `DELETE /users` permanently removes the account and all stored keys (GDPR Art. 17).
 - **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production

@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
+const { createUser, getUserByToken, revokeToken, deleteUser, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -138,8 +138,8 @@ app.get('/health', (req, res) => {
 app.post('/users', requireAppSecret, registrationLimiter, (req, res) => {
   const { app_id } = req.body;
   if (!app_id) return res.status(400).json({ error: 'app_id is required' });
-  const { token } = createUser(app_id);
-  res.json({ token });
+  const { token, expires_at } = createUser(app_id);
+  res.json({ token, expires_at });
 });
 
 /**
@@ -159,6 +159,34 @@ app.post('/keys/:provider', requireToken, (req, res) => {
   }
   upsertKey(req.user.id, provider, key.trim());
   res.json({ ok: true, provider });
+});
+
+/**
+ * POST /tokens/revoke
+ * Immediately invalidate the current relay token.
+ * All stored keys remain in the database but become inaccessible — the token
+ * will return 401 on every subsequent request.  To fully erase the account
+ * (keys included), use DELETE /users.
+ * Headers: x-relay-token
+ */
+app.post('/tokens/revoke', requireToken, (req, res) => {
+  revokeToken(req.user.id);
+  res.json({
+    ok: true,
+    message: 'Token revoked. Stored keys remain but are no longer accessible. ' +
+             'Register a new token (POST /users) to re-enter your keys.',
+  });
+});
+
+/**
+ * DELETE /users
+ * Delete the current user account and ALL associated API keys.
+ * Satisfies GDPR Art. 17 (right to erasure).  This action is irreversible.
+ * Headers: x-relay-token
+ */
+app.delete('/users', requireToken, (req, res) => {
+  deleteUser(req.user.id);
+  res.json({ ok: true, message: 'Account and all stored keys deleted.' });
 });
 
 /**
