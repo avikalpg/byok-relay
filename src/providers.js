@@ -332,4 +332,78 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
 
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
-module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl };
+// ── Per-provider API key format validation ──────────────────────────────────
+//
+// Each entry has:
+//   test(key)  → true if the key looks valid
+//   hint       → human-readable error shown when the test fails
+//
+// Design notes:
+//   - Well-known prefix-based formats (OpenAI, Anthropic, Groq, OpenRouter)
+//     are validated strictly: a key that doesn't start with the expected
+//     prefix is almost certainly a copy/paste mistake.
+//   - Less-constrained formats (Google, Mistral) use a length / pattern check
+//     that's permissive enough not to break on provider-side format changes.
+//   - `openai-compatible` is intentionally absent — the user controls the
+//     provider and may use any auth scheme.
+//
+// When a new provider is added to PROVIDERS, add a corresponding entry here
+// (or explicitly omit it to inherit the default min-length check in index.js).
+
+const PROVIDER_KEY_VALIDATORS = {
+  openai: {
+    // Legacy (sk-...), project (sk-proj-...), service-account (sk-svcacct-...)
+    // Explicitly reject sk-ant-... (Anthropic) — a common copy/paste mistake.
+    test: (k) => /^sk-[A-Za-z0-9_-]/.test(k) && !/^sk-ant-/.test(k),
+    hint: 'OpenAI keys start with "sk-" (e.g. sk-..., sk-proj-..., sk-svcacct-...). ' +
+          'Keys starting with "sk-ant-" belong to Anthropic, not OpenAI.',
+  },
+  anthropic: {
+    test: (k) => /^sk-ant-[A-Za-z0-9_-]/.test(k),
+    hint: 'Anthropic keys start with "sk-ant-" (e.g. sk-ant-api03-...)',
+  },
+  google: {
+    // Gemini API keys: AIza + 35 alphanumeric chars = 39 chars total.
+    // Longer strings (service-account JSON, OAuth tokens) are also accepted.
+    test: (k) => /^AIza[A-Za-z0-9_-]{35}$/.test(k) || k.length > 50,
+    hint: 'Google AI keys start with "AIza" and are 39 characters (e.g. AIzaSy...)',
+  },
+  groq: {
+    test: (k) => /^gsk_[A-Za-z0-9_-]{10,}/.test(k),
+    hint: 'Groq keys start with "gsk_" (e.g. gsk_...)',
+  },
+  openrouter: {
+    test: (k) => /^sk-or-[A-Za-z0-9_-]/.test(k),
+    hint: 'OpenRouter keys start with "sk-or-" (e.g. sk-or-v1-...)',
+  },
+  mistral: {
+    // Mistral uses random alphanumeric strings with no enforced prefix.
+    // Validate only that it's at least 32 characters to catch obvious mistakes.
+    test: (k) => k.length >= 32,
+    hint: 'Mistral API keys are at least 32 characters long',
+  },
+  // openai-compatible: any string passes; provider is user-defined.
+};
+
+/**
+ * Validate that a plaintext API key looks correct for the given provider.
+ *
+ * @param {string} provider  - Provider name from SUPPORTED_PROVIDERS
+ * @param {string} key       - Trimmed plaintext API key
+ * @returns {{ valid: boolean, hint: string | null }}
+ *   `valid: true` + `hint: null`  → format looks correct
+ *   `valid: false` + `hint: '…'` → format looks wrong; hint explains expected format
+ */
+function validateProviderKeyFormat(provider, key) {
+  const validator = PROVIDER_KEY_VALIDATORS[provider];
+  if (!validator) {
+    // No specific validator for this provider — accept any non-empty key.
+    return { valid: true, hint: null };
+  }
+  if (validator.test(key)) {
+    return { valid: true, hint: null };
+  }
+  return { valid: false, hint: validator.hint };
+}
+
+module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl, validateProviderKeyFormat };

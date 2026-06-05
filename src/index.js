@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { createUser, getUserByToken, revokeToken, deleteUser, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
-const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
+const { forwardRequest, SUPPORTED_PROVIDERS, validateProviderKeyFormat } = require('./providers');
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
@@ -155,9 +155,16 @@ app.post('/keys/:provider', requireToken, (req, res) => {
   }
   const { key } = req.body;
   if (!key || typeof key !== 'string' || key.trim().length < 10) {
-    return res.status(400).json({ error: 'A valid API key is required' });
+    return res.status(400).json({ error: 'A valid API key is required (minimum 10 characters)' });
   }
-  upsertKey(req.user.id, provider, key.trim());
+  const trimmedKey = key.trim();
+  const formatCheck = validateProviderKeyFormat(provider, trimmedKey);
+  if (!formatCheck.valid) {
+    return res.status(400).json({
+      error: `API key format looks wrong for provider "${provider}". ${formatCheck.hint}. Double-check the key and try again.`,
+    });
+  }
+  upsertKey(req.user.id, provider, trimmedKey);
   res.json({ ok: true, provider });
 });
 
