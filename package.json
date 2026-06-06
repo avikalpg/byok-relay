@@ -1,6 +1,6 @@
 {
   "name": "byok-relay",
-  "version": "1.0.1",
+  "version": "1.5.0",
   "description": "BYOK relay server — stores user API keys encrypted and proxies requests to AI providers",
   "main": "src/index.js",
   "scripts": {
@@ -13,7 +13,9 @@
     "dotenv": "^16.4.5",
     "express": "^4.18.3",
     "express-rate-limit": "^7.2.0",
+    "ioredis": "^5.11.1",
     "node-fetch": "^2.7.0",
+    "rate-limit-redis": "^5.0.0",
     "uuid": "^9.0.1"
   },
   "engines": {

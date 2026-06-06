@@ -239,7 +239,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
 - **Keys never returned** — after the initial POST, the key value is never sent over the wire again
 - **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
-- **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
+- **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Set `REDIS_URL` for persistent limits across Vercel cold-starts and multi-process deployments (in-memory works fine for single-process self-hosted)
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
 - **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
