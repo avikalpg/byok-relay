@@ -240,6 +240,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **Keys never returned** — after the initial POST, the key value is never sent over the wire again
 - **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
 - **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Set `REDIS_URL` for persistent limits across Vercel cold-starts and multi-process deployments (in-memory works fine for single-process self-hosted)
+- **SSRF and DNS rebinding protection** — the `openai-compatible` provider validates `x-relay-base-url` against private/reserved CIDR ranges (RFC-1918, link-local, IMDS, IPv6 loopback, IPv4-mapped IPv6). A custom DNS lookup hook also validates the *resolved* IP at connect time, blocking DNS rebinding techniques such as `127.0.0.1.nip.io` that pass hostname validation but resolve to a blocked address.
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
 - **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)

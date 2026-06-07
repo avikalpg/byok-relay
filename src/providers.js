@@ -13,6 +13,9 @@
  *   the user stores their key under a name like `openrouter` and passes
  *   the base URL as a header `x-relay-base-url`.
  */
+const dns   = require('dns');
+const http  = require('http');
+const https = require('https');
 const fetch = require('node-fetch');
 
 // ── SSRF protection ──────────────────────────────────────────────────────────
@@ -128,6 +131,57 @@ function isBlockedIpv6(addr) {
   const addrInt = ipv6ToBigInt(addr);
   if (addrInt === null) return false;
   return BLOCKED_IPV6.some(({ prefix, mask }) => (addrInt & mask) === prefix);
+}
+
+// ── DNS rebinding defence ─────────────────────────────────────────────────
+// A hostname like `127.0.0.1.nip.io` or `169.254.169.254.nip.io` passes
+// URL-level validation (it is not a bare private IP), but DNS resolves it
+// to a blocked address.  By hooking `dns.lookup` inside a custom Agent we
+// validate the *resolved* IP at connect time — after DNS, before TCP.
+//
+// Note: keepAlive is intentionally off on these agents so every new request
+// performs a fresh DNS lookup and re-validates the resolved address.  A
+// long-lived keepAlive connection could theoretically bypass the check on
+// subsequent requests if the DNS mapping changed between lookups.
+
+/**
+ * Custom lookup function that blocks resolution to private/reserved ranges.
+ * Signature matches the `lookup` option expected by http.Agent / https.Agent.
+ */
+function ssrfSafeLookup(hostname, options, callback) {
+  dns.lookup(hostname, options, (err, address, family) => {
+    if (err) return callback(err);
+
+    if (family === 4 && isBlockedIp(address)) {
+      const e = new Error(
+        `DNS rebinding blocked: ${hostname} resolved to private/reserved address ${address}`,
+      );
+      e.code = 'ECONNREFUSED';
+      return callback(e);
+    }
+    if (family === 6 && isBlockedIpv6(address)) {
+      const e = new Error(
+        `DNS rebinding blocked: ${hostname} resolved to private/reserved IPv6 address ${address}`,
+      );
+      e.code = 'ECONNREFUSED';
+      return callback(e);
+    }
+
+    callback(null, address, family);
+  });
+}
+
+// Pre-built SSRF-safe agents.  One instance per protocol, reused across
+// requests.  keepAlive: false ensures every request gets a fresh DNS lookup.
+const SSRF_SAFE_HTTPS_AGENT = new https.Agent({ lookup: ssrfSafeLookup, keepAlive: false });
+const SSRF_SAFE_HTTP_AGENT  = new http.Agent({ lookup: ssrfSafeLookup, keepAlive: false });
+
+/**
+ * Agent selector for node-fetch v2.  node-fetch accepts `agent` as a
+ * function `(parsedURL) => http.Agent` called once per request.
+ */
+function ssrfSafeAgent(parsedUrl) {
+  return parsedUrl.protocol === 'https:' ? SSRF_SAFE_HTTPS_AGENT : SSRF_SAFE_HTTP_AGENT;
 }
 
 /**
@@ -325,6 +379,10 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     method,
     headers,
     body: method !== 'GET' ? JSON.stringify(body) : undefined,
+    // ssrfSafeAgent validates the *resolved* IP at connect time, blocking
+    // DNS rebinding attacks that would otherwise bypass the URL-level IP
+    // blocklist (e.g. 127.0.0.1.nip.io → 127.0.0.1).
+    agent: ssrfSafeAgent,
   });
 
   return response;
