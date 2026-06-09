@@ -3,6 +3,9 @@
   "version": "1.0.1",
   "description": "BYOK relay server — stores user API keys encrypted and proxies requests to AI providers",
   "main": "src/index.js",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
