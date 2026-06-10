@@ -244,4 +244,27 @@ function listProviders(userId) {
     .map(r => r.provider);
 }
 
-module.exports = { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders };
+/**
+ * Atomically rotate a stored API key for a provider.
+ *
+ * The caller is expected to have already verified the new key against the
+ * provider before calling this function.  The operation is a single
+ * `INSERT ... ON CONFLICT DO UPDATE` so it cannot leave the user without
+ * a key even if the process crashes mid-flight.
+ *
+ * @param {string} userId        - Owner user id
+ * @param {string} provider      - Provider name
+ * @param {string} newPlaintext  - New plaintext API key (already verified)
+ * @returns {{ rotated: boolean }}
+ *   `rotated: true`  → an existing key was replaced
+ *   `rotated: false` → no prior key existed; new key was stored (first-time set)
+ */
+function rotateKey(userId, provider, newPlaintext) {
+  const hadKey = !!db
+    .prepare('SELECT id FROM keys WHERE user_id = ? AND provider = ?')
+    .get(userId, provider);
+  upsertKey(userId, provider, newPlaintext);
+  return { rotated: hadKey };
+}
+
+module.exports = { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, rotateKey };

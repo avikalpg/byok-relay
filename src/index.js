@@ -3,8 +3,8 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
-const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
+const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, rotateKey } = require('./db');
+const { forwardRequest, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey } = require('./providers');
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
@@ -159,6 +159,56 @@ app.post('/keys/:provider', requireToken, (req, res) => {
   }
   upsertKey(req.user.id, provider, key.trim());
   res.json({ ok: true, provider });
+});
+
+/**
+ * POST /keys/:provider/rotate
+ * Rotate an API key atomically: verify the new key against the provider,
+ * then replace the old stored key in a single DB operation.
+ *
+ * Headers: x-relay-token
+ * Body:    { key: string }
+ *
+ * Returns:
+ *   200 { ok: true, provider, rotated: true }  — existing key replaced
+ *   200 { ok: true, provider, rotated: false } — no prior key; new key stored
+ *   400 { error: '...' }                       — missing / malformed key
+ *   422 { error: '...', hint: '...' }          — key rejected by provider
+ */
+app.post('/keys/:provider/rotate', requireToken, async (req, res) => {
+  const { provider } = req.params;
+  if (!SUPPORTED_PROVIDERS.includes(provider)) {
+    return res.status(400).json({ error: `Unsupported provider. Supported: ${SUPPORTED_PROVIDERS.join(', ')}` });
+  }
+
+  const { key } = req.body;
+  if (!key || typeof key !== 'string' || key.trim().length < 10) {
+    return res.status(400).json({ error: 'A valid API key is required (minimum 10 characters)' });
+  }
+  const trimmedKey = key.trim();
+
+  // 1. Validate key format.
+  const { valid, hint } = validateProviderKeyFormat(provider, trimmedKey);
+  if (!valid) {
+    return res.status(400).json({
+      error: `API key format looks wrong for provider “${provider}”. ${hint}`,
+      hint,
+    });
+  }
+
+  // 2. Verify the new key against the live provider endpoint.
+  //    This happens BEFORE touching the DB so a bad key never replaces a good one.
+  const verification = await verifyProviderKey(provider, trimmedKey);
+  if (!verification.ok) {
+    const detail = verification.message ? ` (${verification.message.slice(0, 120)})` : '';
+    return res.status(422).json({
+      error: `New key was rejected by ${provider}${detail}. Your existing key was not changed.`,
+    });
+  }
+
+  // 3. Atomically replace the old key with the verified new key.
+  const { rotated } = rotateKey(req.user.id, provider, trimmedKey);
+  return res.json({ ok: true, provider, rotated });
 });
 
 /**

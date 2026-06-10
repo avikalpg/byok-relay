@@ -1,6 +1,6 @@
 {
   "name": "byok-relay",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "BYOK relay server — stores user API keys encrypted and proxies requests to AI providers",
   "main": "src/index.js",
   "workspaces": [

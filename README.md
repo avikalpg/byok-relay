@@ -193,6 +193,20 @@ GET /keys
 x-relay-token: <token>
 ```
 
+### Rotate a key (atomic: verify new → replace old)
+```http
+POST /keys/anthropic/rotate
+x-relay-token: <token>
+Content-Type: application/json
+
+{ "key": "sk-ant-api03-..." }
+```
+The relay validates the new key's format, pings the provider with a lightweight read-only request to confirm the key is accepted, then atomically replaces the stored key in a single DB write.
+
+The old key is **never touched** if the new key fails validation or is rejected by the provider — safe to call on a live deployment.
+
+Returns `{ ok: true, provider, rotated: true }` if an existing key was replaced, or `{ ok: true, provider, rotated: false }` if no prior key existed.
+
 ### Delete a key
 ```http
 DELETE /keys/anthropic
