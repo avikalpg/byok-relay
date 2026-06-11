@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
+const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, dbHealthCheck } = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -121,9 +121,83 @@ function requireToken(req, res, next) {
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // Health check
-app.get('/health', (req, res) => {
+//
+// GET /health          — liveness probe: DB + config checks
+// GET /health?deep=1   — readiness probe: also pings one provider's models
+//                        endpoint (requires a valid relay token + provider key)
+//
+// Returns HTTP 200 when all critical checks pass, 503 otherwise.
+// Non-critical warnings appear in the `warnings` array but do NOT affect the
+// HTTP status so load-balancers continue routing to the instance.
+app.get('/health', async (req, res) => {
   const { version } = require('../package.json');
-  res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
+  const checks   = {};
+  const warnings = [];
+  let healthy    = true;
+
+  // ── 1. DB connectivity ─────────────────────────────────────────────────
+  try {
+    const { userCount, keyCount } = dbHealthCheck();
+    checks.db = { ok: true, userCount, keyCount };
+  } catch (err) {
+    checks.db = { ok: false, error: 'Database unreachable' };
+    healthy   = false;
+    // Log detail server-side only — never leak internal error text to clients
+    console.error('[health] DB check failed:', err.message);
+  }
+
+  // ── 2. Encryption key presence ────────────────────────────────────────
+  const encSecret  = process.env.ENCRYPTION_SECRET || '';
+  const hmacSecret = process.env.TOKEN_HMAC_SECRET || '';
+  const encOk      = encSecret.length >= 32;
+  const hmacOk     = hmacSecret.length >= 32;
+  checks.config = { ok: encOk, encryption_key_set: encOk };
+  if (!encOk) {
+    healthy = false;
+    console.error('[health] ENCRYPTION_SECRET missing or too short');
+  }
+  if (!hmacOk) {
+    warnings.push('TOKEN_HMAC_SECRET not set — falling back to ENCRYPTION_SECRET for token hashing');
+  }
+
+  // ── 3. APP_SECRET gate status (informational) ─────────────────────────
+  checks.config.registration_gated = !!process.env.APP_SECRET;
+
+  // ── 4. Deep probe: live provider ping (opt-in via ?deep=1) ───────────
+  // This is a readiness-style check. Only run when the caller explicitly
+  // requests it (e.g. a post-deploy smoke test, not a per-request liveness
+  // probe from a load balancer).
+  if (req.query.deep) {
+    const provider = String(req.query.provider || 'openai');
+    if (SUPPORTED_PROVIDERS.includes(provider)) {
+      try {
+        const { pingProvider } = require('./providers');
+        const pingResult = await pingProvider(provider);
+        checks.upstream = { ok: pingResult.ok, provider, statusCode: pingResult.statusCode };
+        if (!pingResult.ok) {
+          warnings.push(`Provider ${provider} returned ${pingResult.statusCode} — may be a key issue or provider outage`);
+        }
+      } catch (err) {
+        checks.upstream = { ok: false, provider, error: 'Ping failed' };
+        warnings.push(`Provider ${provider} unreachable: ${err.message}`);
+        console.error('[health] upstream ping failed:', err.message);
+      }
+    } else {
+      checks.upstream = { ok: false, error: `Unknown provider '${provider}'` };
+    }
+  }
+
+  const body = {
+    ok:        healthy,
+    version,
+    uptime:    Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    providers: SUPPORTED_PROVIDERS,
+    checks,
+    ...(warnings.length ? { warnings } : {}),
+  };
+
+  res.status(healthy ? 200 : 503).json(body);
 });
 
 /**

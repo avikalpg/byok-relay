@@ -128,6 +128,36 @@ Adding a new built-in provider is ~5 lines in `src/providers.js`.
 
 ## API
 
+### Health check
+```http
+GET /health
+```
+Returns `HTTP 200` when the relay is healthy, `HTTP 503` when a critical check fails.
+
+```json
+{
+  "ok": true,
+  "version": "1.2.0",
+  "uptime": 3600,
+  "timestamp": "2026-06-11T03:00:00.000Z",
+  "providers": ["openai", "anthropic", ...],
+  "checks": {
+    "db":     { "ok": true, "userCount": 12, "keyCount": 15 },
+    "config": { "ok": true, "encryption_key_set": true, "registration_gated": true }
+  }
+}
+```
+
+**Deep / readiness probe** — also pings a provider's models endpoint to verify network reachability:
+```http
+GET /health?deep=1&provider=openai
+```
+Adds `checks.upstream: { ok, provider, statusCode }` to the response. Use this for post-deploy smoke tests, not per-request liveness probes (it makes an outbound network call).
+
+Use `/health` as your **liveness probe** and `/health?deep=1` as your **readiness probe** in K8s / docker-compose healthchecks.
+
+---
+
 ### Register a user
 ```http
 POST /users
