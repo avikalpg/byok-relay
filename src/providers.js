@@ -292,11 +292,12 @@ const PROVIDERS = {
  * @param {string} provider - Provider name from PROVIDERS
  * @param {string} path - URL path to forward (e.g. /v1/messages)
  * @param {string} method - HTTP method
- * @param {object} body - Request body
+ * @param {Buffer|object} body - Raw Buffer (pass-through) or parsed object (will be JSON-stringified)
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
+ * @param {string} [contentType='application/json'] - Original request Content-Type; forwarded as-is for raw bodies
  */
-async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}) {
+async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}, contentType = 'application/json') {
   const config = PROVIDERS[provider];
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
@@ -314,17 +315,33 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     baseUrl = validateAndNormaliseBaseUrl(rawBaseUrl);
   }
 
-  const headers = config.buildHeaders(apiKey, extraHeaders);
+  // Build provider-specific auth headers, then override Content-Type with the
+  // original incoming type.  For JSON bodies this is 'application/json'
+  // (unchanged), but for multipart/form-data or audio uploads the provider
+  // needs the real Content-Type (including the multipart boundary).
+  const headers = { ...config.buildHeaders(apiKey, extraHeaders), 'Content-Type': contentType };
 
   // Some providers (Google) put the key in the URL
   const url = config.buildUrl
     ? config.buildUrl(baseUrl, path, apiKey)
     : `${baseUrl}${path}`;
 
+  // Raw Buffer bodies (multipart/form-data, audio, binary) are forwarded as-is.
+  // Object bodies (parsed JSON) are re-serialised.  This is the only place
+  // body serialisation happens — guard it carefully.
+  let serialisedBody;
+  if (method === 'GET') {
+    serialisedBody = undefined;
+  } else if (Buffer.isBuffer(body)) {
+    serialisedBody = body;
+  } else {
+    serialisedBody = JSON.stringify(body);
+  }
+
   const response = await fetch(url, {
     method,
     headers,
-    body: method !== 'GET' ? JSON.stringify(body) : undefined,
+    body: serialisedBody,
   });
 
   return response;

@@ -49,6 +49,21 @@ app.use(cors({
   credentials: false,
 }));
 
+// ── Body parsing ─────────────────────────────────────────────────────────────
+// Relay routes (/relay/*) must not go through express.json() because:
+//  1. Vision requests embed base64 images (a single 1 MP photo ≈ 1.4 MB) and
+//     the default 1 MB limit silently kills them.
+//  2. Audio/file upload endpoints (Whisper, ElevenLabs STT, OpenAI /files)
+//     send multipart/form-data or raw binary — JSON parsing destroys them.
+//
+// Solution: capture the raw body as a Buffer for /relay/* (50 MB ceiling,
+// enough for multiple high-res images or short audio clips).  The global
+// express.json() parser runs only for non-relay routes (registration, key
+// management, stats, health, etc.) where 1 MB is more than enough.
+//
+// In the relay handler we peek into JSON bodies to extract the `stream` flag
+// without re-parsing the full payload on the forward path.
+app.use(/^\/relay(\/.*)$/, express.raw({ type: '*/*', limit: '50mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // Global rate limit: 100 requests per minute per IP
@@ -216,14 +231,31 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
+  // The body was captured as a raw Buffer by express.raw() (registered before
+  // the global express.json() so the stream is not consumed twice).  We peek
+  // into JSON bodies to extract the `stream: true` flag without re-parsing
+  // the entire payload on the forward path.
+  const rawBody = req.body; // Buffer from express.raw()
+  const incomingContentType = (req.headers['content-type'] || 'application/json').split(';')[0].trim();
+  let streamHint = false;
+  if (incomingContentType === 'application/json' && Buffer.isBuffer(rawBody) && rawBody.length > 0) {
+    try {
+      const parsed = JSON.parse(rawBody.toString('utf8'));
+      streamHint = parsed?.stream === true;
+    } catch {
+      // malformed JSON — forward raw; provider will reject with a proper error
+    }
+  }
+
   try {
     const providerResponse = await forwardRequest(
       provider,
       forwardPath,
       req.method,
-      req.body,
+      rawBody,
       apiKey,
       extraHeaders,
+      req.headers['content-type'] || 'application/json',
     );
 
     // Forward status and relevant headers
@@ -231,7 +263,10 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     const contentType = providerResponse.headers.get('content-type');
     if (contentType) res.setHeader('Content-Type', contentType);
 
-    const isStream = req.body?.stream === true ||
+    // Streaming: honour request-side hint (stream:true in JSON) OR provider
+    // signalling via SSE content-type on the response.  Checking the upstream
+    // response type is more reliable than re-parsing the request body.
+    const isStream = streamHint ||
       (contentType && contentType.includes('text/event-stream'));
 
     if (isStream) {
