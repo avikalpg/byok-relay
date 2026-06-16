@@ -191,6 +191,18 @@ Content-Type: application/json
 { "model": "...", "messages": [...] }
 ```
 
+### Discover allowed models
+```http
+GET /models
+```
+Returns the configured model allowlist (or `{ restricted: false }` if `ALLOWED_MODELS` is not set).
+
+If `ALLOWED_MODELS` is configured and a relay request includes a `model` field not on the list, the relay returns:
+```json
+HTTP 403
+{ "error": "Model \"gpt-4o\" is not permitted on this relay.", "allowed_models": ["gpt-4o-mini", "claude-haiku*"] }
+```
+
 ## Deploy in one click
 
 The fastest way to get byok-relay running is via Vercel:
@@ -243,6 +255,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
 - **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
+- **Model allowlist** — set `ALLOWED_MODELS` to a comma-separated list of permitted model names (supports `*` wildcards, e.g. `gpt-4o-mini,claude-haiku*`). If unset, all models the user's API key can access are permitted. Use `GET /models` to discover the active allowlist. Prevents users from requesting expensive models in team deployments.
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
 - **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
 

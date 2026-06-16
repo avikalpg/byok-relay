@@ -36,6 +36,46 @@ if (!process.env.TOKEN_HMAC_SECRET) {
   console.warn('Generate one with: openssl rand -hex 32');
 }
 
+// ── Model allowlist ─────────────────────────────────────────────────────────
+// Parse ALLOWED_MODELS at startup. Supports exact names and glob-style
+// wildcards using '*' (e.g. "gpt-4o*" matches "gpt-4o-mini", "gpt-4o-2024-11-20").
+// Empty / unset = all models permitted (open relay).
+
+/** @type {string[]} */
+const ALLOWED_MODELS_RAW = process.env.ALLOWED_MODELS
+  ? process.env.ALLOWED_MODELS.split(',').map(m => m.trim()).filter(Boolean)
+  : [];
+
+/**
+ * Convert a pattern (may contain '*') into a RegExp.
+ * '*' matches any sequence of non-empty characters.
+ */
+function patternToRegex(pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.+');
+  return new RegExp('^' + escaped + '$', 'i');
+}
+
+const ALLOWED_MODEL_REGEXES = ALLOWED_MODELS_RAW.map(patternToRegex);
+
+/**
+ * Return true if modelName is permitted under the configured allowlist.
+ * If no allowlist is configured (ALLOWED_MODELS_RAW is empty) all models pass.
+ * @param {string|undefined} modelName
+ */
+function isModelAllowed(modelName) {
+  if (ALLOWED_MODEL_REGEXES.length === 0) return true; // no restriction
+  if (!modelName || typeof modelName !== 'string') return true; // can't inspect → pass through
+  return ALLOWED_MODEL_REGEXES.some(re => re.test(modelName));
+}
+
+if (ALLOWED_MODELS_RAW.length > 0) {
+  console.log(`Model allowlist active: ${ALLOWED_MODELS_RAW.join(', ')}`);
+} else {
+  console.warn('WARNING: ALLOWED_MODELS is not set. All models are permitted.');
+  console.warn('Set ALLOWED_MODELS to restrict which AI models users can request.');
+  console.warn('Example: ALLOWED_MODELS=gpt-4o-mini,claude-haiku*,gemini-2.0-flash*');
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
@@ -123,7 +163,21 @@ function requireToken(req, res, next) {
 // Health check
 app.get('/health', (req, res) => {
   const { version } = require('../package.json');
-  res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
+  const payload = { ok: true, version, providers: SUPPORTED_PROVIDERS };
+  if (ALLOWED_MODELS_RAW.length > 0) payload.allowed_models = ALLOWED_MODELS_RAW;
+  res.json(payload);
+});
+
+/**
+ * GET /models
+ * Returns the list of models permitted on this relay.
+ * If ALLOWED_MODELS is not configured, returns { restricted: false }.
+ */
+app.get('/models', (req, res) => {
+  if (ALLOWED_MODELS_RAW.length === 0) {
+    return res.json({ restricted: false, message: 'All models are permitted on this relay.' });
+  }
+  res.json({ restricted: true, allowed_models: ALLOWED_MODELS_RAW });
 });
 
 /**
@@ -196,6 +250,17 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
+  // ── Model allowlist check ───────────────────────────────────────
+  // req.body is the parsed JSON object (express.json middleware).
+  // Extract the model name if present; reject early if it is not on the allowlist.
+  const requestedModel = req.body && typeof req.body === 'object' ? req.body.model : undefined;
+  if (!isModelAllowed(requestedModel)) {
+    return res.status(403).json({
+      error: `Model "${requestedModel}" is not permitted on this relay.`,
+      allowed_models: ALLOWED_MODELS_RAW,
+    });
+  }
+
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
     return res.status(400).json({
@@ -264,6 +329,11 @@ if (require.main === module) {
     console.log(`byok-relay listening on port ${PORT}`);
     console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
     console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
+    if (ALLOWED_MODELS_RAW.length > 0) {
+      console.log(`Model allowlist: ${ALLOWED_MODELS_RAW.join(', ')}`);
+    } else {
+      console.log('Model allowlist: unrestricted (all models permitted)');
+    }
   });
 }
 
