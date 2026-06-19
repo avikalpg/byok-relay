@@ -5,19 +5,29 @@
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS,APP_SECRET&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
 
-**Your users already have AI keys. byok-relay lets them use those keys — straight from your frontend, with no CORS issues and no keys in your code.**
+> **Your users bring their own AI keys. byok-relay lets them use those keys straight from the browser — CORS handled, keys never in your code, costs on their bill.**
 
-Built for developers building prosumer tools and B2B AI products. Whether you're running a frontend-only app or have a full backend, byok-relay handles the BYOK plumbing — encrypted key storage, secure relay, multi-provider support — in minutes, not days. Your users bring their own OpenAI, Anthropic, or Gemini keys; you build the product; they pay for their own AI usage.
+Browser apps can't call `api.openai.com` or `api.anthropic.com` directly — CORS blocks them. The usual fix (a backend proxy) puts your users' keys — and your users' AI costs — on your tab. byok-relay flips this: each user gets a secure token; they store their own key; they pay for their own inference. You build the product.
 
-## Managed relay
+## Get started
 
-**Skip the setup — use ours:**
+**Option A — Use our relay (zero setup):**
 
 ```
 https://relay.byokrelay.com
 ```
 
-Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
+Free. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
+
+**Option B — Self-host in 3 commands:**
+
+```bash
+git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay
+echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
+docker compose up -d   # relay running at http://localhost:3000
+```
+
+Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickstart →](#quickstart-60-seconds)
 
 ## For AI coding agents
 
@@ -34,30 +44,6 @@ https://byokrelay.com/skill
 ```
 
 > Prompt: *"Read the byok-relay skill at https://byokrelay.com/skill and integrate byok-relay into this project using the hosted relay at https://relay.byokrelay.com"*
-
-## The problem
-
-Browser apps can't call AI APIs directly:
-- `api.anthropic.com`, `api.openai.com`, and most AI providers **block browser requests via CORS**
-- Putting API keys in frontend code exposes them to every user
-
-The common workaround — a backend proxy — means the *app developer* holds the keys. That's a trust problem, and it puts inference costs on your bill permanently.
-
-**byok-relay solves this differently:** the relay sits between your frontend and the AI provider. Users register their own keys once; every request after that uses their key, billed to their account.
-
-## How it compares
-
-| | byok-relay | OpenRouter | LiteLLM |
-|---|---|---|---|
-| Who holds the API keys | Your users | OpenRouter | Your org |
-| Who pays for AI usage | Your users | You (the dev) | You (the org) |
-| BYOK for end users | ✅ | ❌ | ❌ |
-| Browser-safe (CORS handled) | ✅ | ✅ | ❌ (needs backend) |
-| Self-hosted | ✅ | ❌ | ✅ |
-| Open source | ✅ Apache 2.0 | ❌ | ✅ |
-| Model routing / fallbacks | ❌ | ✅ | ✅ |
-
-Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing + analytics. Use byok-relay when you want users to bring their own keys.
 
 ## How it works
 
@@ -77,7 +63,21 @@ Browser                  byok-relay              AI Provider
   │◄─ streamed response ──────┤◄─ streamed response ──┤
 ```
 
-The `token` (not the API key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM.
+The **token** (not the key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM. Users register once; every request uses their key, billed to their account.
+
+## How it compares
+
+| | byok-relay | OpenRouter | LiteLLM |
+|---|---|---|---|
+| Who holds the API keys | Your users | OpenRouter | Your org |
+| Who pays for AI usage | Your users | You (the dev) | You (the org) |
+| BYOK for end users | ✅ | ❌ | ❌ |
+| Browser-safe (CORS handled) | ✅ | ✅ | ❌ (needs backend) |
+| Self-hosted | ✅ | ❌ | ✅ |
+| Open source | ✅ Apache 2.0 | ❌ | ✅ |
+| Model routing / fallbacks | ❌ | ✅ | ✅ |
+
+Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing + analytics. Use byok-relay when you want **users to bring their own keys**.
 
 ## Quickstart (60 seconds)
 
