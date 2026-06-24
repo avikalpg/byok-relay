@@ -1,12 +1,40 @@
 {
   "name": "byok-relay",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "BYOK relay server — stores user API keys encrypted and proxies requests to AI providers",
   "main": "src/index.js",
+  "bin": {
+    "byok-relay": "./bin/byok-relay.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "prepublishOnly": "node -e \"require('./src/db.js')\" 2>/dev/null || true"
   },
+  "keywords": [
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "cors",
+    "relay",
+    "proxy",
+    "api-key",
+    "self-hosted",
+    "no-backend",
+    "frontend",
+    "lovable",
+    "bolt",
+    "framer"
+  ],
   "dependencies": {
     "better-sqlite3": "^9.4.3",
     "cors": "^2.8.5",
@@ -19,5 +47,13 @@
   "engines": {
     "node": ">=18"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  }
 }
