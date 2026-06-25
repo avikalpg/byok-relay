@@ -118,12 +118,39 @@ function requireToken(req, res, next) {
   next();
 }
 
+// ── Attestation metadata (resolved once at startup) ────────────────────────
+const { version: PKG_VERSION } = require('../package.json');
+const REPO_URL = 'https://github.com/avikalpg/byok-relay';
+const COMMIT_SHA = process.env.COMMIT_SHA || null;
+const BUILD_TIME = process.env.BUILD_TIME || new Date().toISOString();
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // Health check
 app.get('/health', (req, res) => {
-  const { version } = require('../package.json');
-  res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
+  res.json({ ok: true, version: PKG_VERSION, commit: COMMIT_SHA, providers: SUPPORTED_PROVIDERS });
+});
+
+/**
+ * GET /version
+ * Returns the running version, git commit SHA, build timestamp, and repo URL.
+ * Allows users of the managed relay (relay.byokrelay.com) to verify that the
+ * running code matches a specific public commit on GitHub.
+ *
+ * Compare the returned `commit` with the tagged release at:
+ *   https://github.com/avikalpg/byok-relay/releases
+ * or verify file hashes in the release attestation asset.
+ */
+app.get('/version', (req, res) => {
+  res.json({
+    version: PKG_VERSION,
+    commit: COMMIT_SHA,
+    buildTime: BUILD_TIME,
+    repoUrl: REPO_URL,
+    attestationUrl: COMMIT_SHA
+      ? `${REPO_URL}/releases/tag/v${PKG_VERSION}`
+      : null,
+  });
 });
 
 /**
