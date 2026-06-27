@@ -3,6 +3,7 @@
 **Website:** [byokrelay.com](https://byokrelay.com) | **Hosted relay:** [relay.byokrelay.com](https://relay.byokrelay.com)
 
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/avikalpg/byok-relay?quickstart=1)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS,APP_SECRET&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
 
 **Your users already have AI keys. byok-relay lets them use those keys — straight from your frontend, with no CORS issues and no keys in your code.**
@@ -78,6 +79,16 @@ Browser                  byok-relay              AI Provider
 ```
 
 The `token` (not the API key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM.
+
+## Try it instantly
+
+No install needed — open byok-relay in a fully configured dev environment in your browser:
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/avikalpg/byok-relay?quickstart=1)
+
+Dependencies are installed and a dev `.env` is pre-configured. Just run `npm start` and the API is live on port 3000.
+
+---
 
 ## Quickstart (60 seconds)
 
