@@ -73,8 +73,18 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 
 Apache 2.0 — free to self-host or build on top of.
 
+## API Reference
+
+Full OpenAPI 3.0 specification available at runtime:
+- JSON: https://relay.byokrelay.com/openapi.json
+- YAML: https://relay.byokrelay.com/openapi.yaml
+- Source: https://github.com/avikalpg/byok-relay/blob/main/openapi.json
+
+Import into Postman, Insomnia, or any OpenAPI-aware tool. AI coding agents can fetch `/openapi.json` to read the full API surface programmatically.
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
 - Hosted relay: https://relay.byokrelay.com
+- OpenAPI spec: https://relay.byokrelay.com/openapi.json
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues

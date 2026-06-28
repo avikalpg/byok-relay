@@ -1,5 +1,7 @@
 require('dotenv').config();
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -124,6 +126,37 @@ function requireToken(req, res, next) {
 app.get('/health', (req, res) => {
   const { version } = require('../package.json');
   res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
+});
+
+// OpenAPI spec endpoints — served for agent/tool discovery
+// AI coding agents, Postman, Insomnia, and similar tools can import these.
+const OPENAPI_JSON_PATH = path.join(__dirname, '..', 'openapi.json');
+
+app.get('/openapi.json', (req, res) => {
+  try {
+    // Clear require cache so hot-reloads pick up spec changes in dev
+    delete require.cache[OPENAPI_JSON_PATH];
+    const spec = require(OPENAPI_JSON_PATH);
+    res.json(spec);
+  } catch {
+    res.status(404).json({ error: 'OpenAPI spec not found' });
+  }
+});
+
+app.get('/openapi.yaml', (req, res) => {
+  // Convert JSON spec to YAML on the fly via JSON.stringify indented,
+  // then serve as text/yaml for tools that prefer YAML.
+  try {
+    delete require.cache[OPENAPI_JSON_PATH];
+    const spec = require(OPENAPI_JSON_PATH);
+    // Simple JSON-to-YAML via js-yaml dump
+    const yaml = require('js-yaml');
+    const yamlStr = yaml.dump(spec, { lineWidth: 120, noRefs: true });
+    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+    res.send(yamlStr);
+  } catch {
+    res.status(404).json({ error: 'OpenAPI spec not found' });
+  }
 });
 
 /**
