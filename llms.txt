@@ -82,9 +82,35 @@ Full OpenAPI 3.0 specification available at runtime:
 
 Import into Postman, Insomnia, or any OpenAPI-aware tool. AI coding agents can fetch `/openapi.json` to read the full API surface programmatically.
 
+## MCP Server (Claude Desktop / Claude Code / Cursor)
+
+byok-relay ships an official MCP server (`@byok-relay/mcp`) so AI assistants can relay requests through users' own API keys directly from the chat interface.
+
+Install in Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "byok-relay": {
+      "command": "npx",
+      "args": ["-y", "@byok-relay/mcp"],
+      "env": {
+        "RELAY_URL": "https://relay.byokrelay.com",
+        "RELAY_TOKEN": "<your-relay-token>"
+      }
+    }
+  }
+}
+```
+
+Available MCP tools: `byok_relay_health`, `byok_relay_register`, `byok_relay_store_key`, `byok_relay_request`, `byok_relay_chat`, `byok_relay_stats`.
+
+See `packages/mcp/README.md` for full setup guide.
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
 - Hosted relay: https://relay.byokrelay.com
 - OpenAPI spec: https://relay.byokrelay.com/openapi.json
+- MCP server: https://www.npmjs.com/package/@byok-relay/mcp
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
