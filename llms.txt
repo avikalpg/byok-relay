@@ -69,6 +69,55 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 - CORS locked to allowed origins
 - HTTPS required in production
 
+## React hooks — @byok-relay/react
+
+For React apps (Lovable, Bolt.new, Vite, Next.js, Remix), use the official hooks package:
+
+```bash
+npm install @byok-relay/react
+```
+
+```jsx
+import { useChat, useStreamingChat, useByokRelay } from '@byok-relay/react';
+
+// Non-streaming chat
+const { messages, sendMessage, isLoading } = useChat({
+  appId: 'my-app',
+  provider: 'openai',   // or 'anthropic', 'groq', 'mistral', 'openrouter'
+  model: 'gpt-4o',
+  // relayUrl defaults to https://relay.byokrelay.com
+});
+
+// Streaming chat (SSE)
+const { messages, sendMessage, streamingContent, isStreaming } = useStreamingChat({
+  appId: 'my-app', provider: 'anthropic', model: 'claude-3-5-sonnet-20241022'
+});
+
+// Key management UI
+const { storeKey, isRegistered } = useByokRelay({ appId: 'my-app' });
+await storeKey('openai', userApiKey);
+```
+
+Hooks: `useByokRelay` (token + key CRUD), `useChat`, `useStreamingChat`, `useRelayHealth`.
+npm: https://www.npmjs.com/package/@byok-relay/react
+
+## MCP Server — @byok-relay/mcp
+
+For Claude Desktop, Claude Code, Cursor, Windsurf:
+
+```bash
+npx -y @byok-relay/mcp
+```
+
+Tools: `byok_relay_health`, `byok_relay_register`, `byok_relay_store_key`, `byok_relay_request`, `byok_relay_chat`, `byok_relay_stats`.
+npm: https://www.npmjs.com/package/@byok-relay/mcp
+
+## OpenAPI spec
+
+Machine-readable API spec (for agents/tools/code-gen):
+- JSON: https://relay.byokrelay.com/openapi.json
+- YAML: https://relay.byokrelay.com/openapi.yaml
+
 ## License
 
 Apache 2.0 — free to self-host or build on top of.
