@@ -1,0 +1,50 @@
+{
+  "name": "@byok-relay/vue",
+  "version": "1.0.0",
+  "description": "Vue 3 composables for byok-relay — drop-in BYOK AI in any Vue or Nuxt app",
+  "keywords": [
+    "byok",
+    "ai",
+    "vue",
+    "vue3",
+    "composables",
+    "nuxt",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "frontend",
+    "lovable",
+    "bolt",
+    "no-backend",
+    "api-key",
+    "self-hosted"
+  ],
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/composables.test.js"
+  },
+  "peerDependencies": {
+    "vue": ">=3.0.0"
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/vue"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "MIT",
+  "author": "avikalpg"
+}
