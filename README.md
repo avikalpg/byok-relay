@@ -19,6 +19,31 @@ https://relay.byokrelay.com
 
 Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
 
+## Svelte stores
+
+```bash
+npm install @byok-relay/svelte
+```
+
+```svelte
+<script>
+  import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/svelte';
+  import { onMount } from 'svelte';
+
+  const relay = createByokRelayStore({ appId: 'myapp' });
+  const chat  = createStreamingChatStore({ appId: 'myapp', provider: 'openai' });
+
+  onMount(() => relay.register());
+</script>
+
+{#if $chat.isStreaming}
+  <p>{$chat.streamingContent}<span>▋</span></p>
+  <button on:click={chat.stopStreaming}>Stop</button>
+{/if}
+```
+
+Four stores: `createByokRelayStore` · `createChatStore` · `createStreamingChatStore` · `createRelayHealthStore`. SvelteKit SSR-safe. See [`packages/svelte`](./packages/svelte).
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
