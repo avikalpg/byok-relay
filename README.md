@@ -46,7 +46,38 @@ function App() {
 }
 ```
 
-Also available: [`@byok-relay/react`](https://npmjs.com/package/@byok-relay/react), [`@byok-relay/vue`](https://npmjs.com/package/@byok-relay/vue), [`@byok-relay/svelte`](https://npmjs.com/package/@byok-relay/svelte)
+Also available: [`@byok-relay/react`](https://npmjs.com/package/@byok-relay/react), [`@byok-relay/vue`](https://npmjs.com/package/@byok-relay/vue), [`@byok-relay/svelte`](https://npmjs.com/package/@byok-relay/svelte), [`@byok-relay/angular`](https://npmjs.com/package/@byok-relay/angular)
+
+## Angular injectable services
+
+```bash
+npm install @byok-relay/angular
+```
+
+```typescript
+import { Component, inject } from '@angular/core';
+import { ByokRelayService, ChatService, provideByokRelay } from '@byok-relay/angular';
+
+// app.config.ts
+export const appConfig = {
+  providers: [provideByokRelay({ relayUrl: 'https://relay.byokrelay.com' })],
+};
+
+// chat.component.ts
+@Component({ template: `
+  <div *ngFor="let m of chat.messages()">{{ m.role }}: {{ m.content }}</div>
+  <button (click)="send('Hello!')">Send</button>
+` })
+export class ChatComponent {
+  relay = inject(ByokRelayService);
+  chat  = inject(ChatService);
+
+  async ngOnInit() { await this.relay.getOrRegister('my-app'); }
+  async send(text: string) { await this.chat.sendMessage(text); }
+}
+```
+
+Signals (Angular 16+), `StreamingChatService` (SSE + AbortController), `RelayHealthService` (polling), and Analog SSR support included. [Full docs →](packages/angular/README.md)
 
 ## For AI coding agents
 
