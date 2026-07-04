@@ -79,6 +79,36 @@ export class ChatComponent {
 
 Signals (Angular 16+), `StreamingChatService` (SSE + AbortController), `RelayHealthService` (polling), and Analog SSR support included. [Full docs →](packages/angular/README.md)
 
+### Vercel AI SDK (`@byok-relay/vercel-ai`)
+
+For Next.js, SvelteKit, Nuxt, or any project using the Vercel AI SDK:
+
+```bash
+npm install @byok-relay/vercel-ai
+```
+
+```ts
+import { createByokRelayProviderSync } from '@byok-relay/vercel-ai';
+import { streamText, generateText, generateObject } from 'ai';
+
+const provider = createByokRelayProviderSync({
+  relayUrl: process.env.BYOK_RELAY_URL!,
+  appId: 'my-app',
+});
+
+// One-time setup: store user's API key
+await provider.storeKey('openai', userApiKey);
+
+// Works with every AI SDK function
+const result = streamText({
+  model: provider.languageModel('openai/gpt-4o'),
+  messages,
+});
+return result.toDataStreamResponse();
+```
+
+Supports `generateText`, `streamText`, `generateObject`, tool calling, vision inputs. Model IDs: `'openai/gpt-4o'`, `'anthropic/claude-3-5-sonnet-20241022'`, `'groq/llama3-70b-8192'`, bare model names (default: OpenAI). [Full docs →](packages/vercel-ai/README.md)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
