@@ -73,6 +73,88 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 
 Apache 2.0 — free to self-host or build on top of.
 
+## SolidJS Signals (`@byok-relay/solid`)
+
+For SolidJS or SolidStart apps, install the signals package:
+
+```bash
+npm install @byok-relay/solid
+```
+
+Four reactive stores with SolidJS's `[getter, setter]` signal contract:
+- `createByokRelayStore(opts)` — token registration + key CRUD + logout (localStorage persistence, SolidStart SSR-safe)
+- `createChatStore(opts)` — stateful message list, non-streaming, openai/anthropic/groq/mistral/openrouter
+- `createStreamingChatStore(opts)` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent()` live signal
+- `createRelayHealthStore(opts)` — polls /health, refetch(), destroy() for onCleanup
+
+npm: https://www.npmjs.com/package/@byok-relay/solid
+
+## Angular Injectable Services (`@byok-relay/angular`)
+
+For Angular 14+ or Analog apps, install the Angular services package:
+
+```bash
+npm install @byok-relay/angular
+```
+
+Four Angular injectable services with optional Angular 16+ signal reactivity:
+- `ByokRelayService` — token registration + key CRUD + logout (localStorage persistence, Analog SSR-safe)
+- `ChatService` — stateful message list, non-streaming, openai/anthropic/groq/mistral/openrouter
+- `StreamingChatService` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent()` live signal
+- `RelayHealthService` — polls /health, `destroy()` for ngOnDestroy cleanup
+
+Setup: `provideByokRelay({ relayUrl: 'https://relay.byokrelay.com' })` in `app.config.ts` providers.
+Services use Angular `signal()` when @angular/core 16+ is detected; plain getter shim otherwise.
+
+npm: https://www.npmjs.com/package/@byok-relay/angular
+
+## Vercel AI SDK Custom Provider (`@byok-relay/vercel-ai`)
+
+For Next.js, SvelteKit, Nuxt, or any app using the Vercel AI SDK (`ai` package), install the adapter:
+
+```bash
+npm install @byok-relay/vercel-ai
+```
+
+Returns a `LanguageModelV1`-compatible provider that works with `generateText`, `streamText`, `generateObject`, and all AI SDK tools:
+
+```ts
+import { createByokRelayProviderSync } from '@byok-relay/vercel-ai';
+import { streamText } from 'ai';
+
+const provider = createByokRelayProviderSync({ relayUrl: 'https://relay.byokrelay.com', appId: 'my-app' });
+
+// Store user's API key once (from a settings form)
+await provider.storeKey('openai', userKey);
+
+// Use with any AI SDK function
+const result = streamText({ model: provider.languageModel('openai/gpt-4o'), messages });
+```
+
+Model ID format: `'provider/model'` (e.g. `'anthropic/claude-3-5-sonnet-20241022'`, `'groq/llama3-70b-8192'`) or bare name for OpenAI.
+Supports: generateText, streamText, generateObject, tool calling, image/vision inputs, streaming.
+Factory: `createByokRelayProviderSync` (sync, lazy register) or `createByokRelayProvider` (async, eager register).
+
+npm: https://www.npmjs.com/package/@byok-relay/vercel-ai
+
+## Preact Hooks (`@byok-relay/preact`)
+
+For Preact apps, Astro component islands, or any Vite/Preact project:
+
+```bash
+npm install @byok-relay/preact
+```
+
+Four hooks — SSR-safe, works with `client:load` Astro islands:
+- `useByokRelay({ relayUrl, appId })` — token registration, key management, logout
+- `useChat({ relayUrl, appId, provider, model, systemPrompt })` — stateful non-streaming chat
+- `useStreamingChat({ relayUrl, appId, provider, model })` — SSE streaming with `streamingContent` live string and `stopStreaming()`
+- `useRelayHealth({ relayUrl, intervalMs, deep })` — polls /health, supports readiness probe
+
+Hook shim: resolves `preact/hooks` at runtime; falls back to `react`; uses an inline shim if neither is installed.
+
+npm: https://www.npmjs.com/package/@byok-relay/preact
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay

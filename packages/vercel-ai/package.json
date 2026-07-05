@@ -1,0 +1,44 @@
+{
+  "name": "@byok-relay/vercel-ai",
+  "version": "1.0.0",
+  "description": "Vercel AI SDK custom provider adapter for byok-relay — use generateText/streamText/generateObject with BYOK AI keys",
+  "main": "src/index.js",
+  "files": [
+    "src/"
+  ],
+  "keywords": [
+    "byok",
+    "ai-sdk",
+    "vercel-ai",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "groq",
+    "relay",
+    "bring-your-own-key",
+    "nextjs",
+    "sveltekit",
+    "nuxt",
+    "streaming"
+  ],
+  "author": "Alokit Innovations",
+  "license": "MIT",
+  "peerDependencies": {
+    "ai": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/vercel-ai"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  }
+}

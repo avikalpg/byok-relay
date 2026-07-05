@@ -19,6 +19,133 @@ https://relay.byokrelay.com
 
 Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
 
+## SolidJS reactive stores
+
+```bash
+npm install @byok-relay/solid
+```
+
+```jsx
+import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/solid';
+
+function App() {
+  const relay = createByokRelayStore({ appId: 'my-app' });
+  const chat  = createStreamingChatStore({ provider: 'openai', model: 'gpt-4o-mini' });
+
+  async function send(text) {
+    if (!relay.token()) await relay.register();
+    await chat.sendMessage(text, relay.token());
+  }
+
+  return (
+    <>
+      <For each={chat.messages()}>{msg => <p>{msg.role}: {msg.content}</p>}</For>
+      <Show when={chat.streamingContent()}><p>assistant: {chat.streamingContent()}▋</p></Show>
+    </>
+  );
+}
+```
+
+Also available: [`@byok-relay/react`](https://npmjs.com/package/@byok-relay/react), [`@byok-relay/vue`](https://npmjs.com/package/@byok-relay/vue), [`@byok-relay/svelte`](https://npmjs.com/package/@byok-relay/svelte), [`@byok-relay/angular`](https://npmjs.com/package/@byok-relay/angular)
+
+## Angular injectable services
+
+```bash
+npm install @byok-relay/angular
+```
+
+```typescript
+import { Component, inject } from '@angular/core';
+import { ByokRelayService, ChatService, provideByokRelay } from '@byok-relay/angular';
+
+// app.config.ts
+export const appConfig = {
+  providers: [provideByokRelay({ relayUrl: 'https://relay.byokrelay.com' })],
+};
+
+// chat.component.ts
+@Component({ template: `
+  <div *ngFor="let m of chat.messages()">{{ m.role }}: {{ m.content }}</div>
+  <button (click)="send('Hello!')">Send</button>
+` })
+export class ChatComponent {
+  relay = inject(ByokRelayService);
+  chat  = inject(ChatService);
+
+  async ngOnInit() { await this.relay.getOrRegister('my-app'); }
+  async send(text: string) { await this.chat.sendMessage(text); }
+}
+```
+
+Signals (Angular 16+), `StreamingChatService` (SSE + AbortController), `RelayHealthService` (polling), and Analog SSR support included. [Full docs →](packages/angular/README.md)
+
+### Preact hooks (`@byok-relay/preact`)
+
+For Preact apps, **Astro component islands**, or any Vite/Preact project:
+
+```bash
+npm install @byok-relay/preact
+```
+
+```jsx
+import { useStreamingChat, useByokRelay } from '@byok-relay/preact';
+
+export function ChatIsland() {
+  const { storeKey } = useByokRelay({
+    relayUrl: import.meta.env.PUBLIC_RELAY_URL,
+    appId: 'astro-app',
+  });
+
+  const { messages, streamingContent, isStreaming, sendMessage, stopStreaming } = useStreamingChat({
+    relayUrl: import.meta.env.PUBLIC_RELAY_URL,
+    appId: 'astro-app',
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+  });
+
+  return (
+    <div>
+      {messages.map((m, i) => <p key={i}><b>{m.role}:</b> {m.content}</p>)}
+      {isStreaming && <p><em>{streamingContent}</em></p>}
+      <button onClick={() => sendMessage('Hello!')}>Send</button>
+      {isStreaming && <button onClick={stopStreaming}>Stop</button>}
+    </div>
+  );
+}
+```
+
+SSR-safe (no `window` access during server render). Works with `client:load`, `client:visible`, and `client:idle` Astro directives. [Full docs →](packages/preact/README.md)
+
+### Vercel AI SDK (`@byok-relay/vercel-ai`)
+
+For Next.js, SvelteKit, Nuxt, or any project using the Vercel AI SDK:
+
+```bash
+npm install @byok-relay/vercel-ai
+```
+
+```ts
+import { createByokRelayProviderSync } from '@byok-relay/vercel-ai';
+import { streamText, generateText, generateObject } from 'ai';
+
+const provider = createByokRelayProviderSync({
+  relayUrl: process.env.BYOK_RELAY_URL!,
+  appId: 'my-app',
+});
+
+// One-time setup: store user's API key
+await provider.storeKey('openai', userApiKey);
+
+// Works with every AI SDK function
+const result = streamText({
+  model: provider.languageModel('openai/gpt-4o'),
+  messages,
+});
+return result.toDataStreamResponse();
+```
+
+Supports `generateText`, `streamText`, `generateObject`, tool calling, vision inputs. Model IDs: `'openai/gpt-4o'`, `'anthropic/claude-3-5-sonnet-20241022'`, `'groq/llama3-70b-8192'`, bare model names (default: OpenAI). [Full docs →](packages/vercel-ai/README.md)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
