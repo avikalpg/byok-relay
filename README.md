@@ -79,6 +79,43 @@ export class ChatComponent {
 
 Signals (Angular 16+), `StreamingChatService` (SSE + AbortController), `RelayHealthService` (polling), and Analog SSR support included. [Full docs →](packages/angular/README.md)
 
+### Preact hooks (`@byok-relay/preact`)
+
+For Preact apps, **Astro component islands**, or any Vite/Preact project:
+
+```bash
+npm install @byok-relay/preact
+```
+
+```jsx
+import { useStreamingChat, useByokRelay } from '@byok-relay/preact';
+
+export function ChatIsland() {
+  const { storeKey } = useByokRelay({
+    relayUrl: import.meta.env.PUBLIC_RELAY_URL,
+    appId: 'astro-app',
+  });
+
+  const { messages, streamingContent, isStreaming, sendMessage, stopStreaming } = useStreamingChat({
+    relayUrl: import.meta.env.PUBLIC_RELAY_URL,
+    appId: 'astro-app',
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+  });
+
+  return (
+    <div>
+      {messages.map((m, i) => <p key={i}><b>{m.role}:</b> {m.content}</p>)}
+      {isStreaming && <p><em>{streamingContent}</em></p>}
+      <button onClick={() => sendMessage('Hello!')}>Send</button>
+      {isStreaming && <button onClick={stopStreaming}>Stop</button>}
+    </div>
+  );
+}
+```
+
+SSR-safe (no `window` access during server render). Works with `client:load`, `client:visible`, and `client:idle` Astro directives. [Full docs →](packages/preact/README.md)
+
 ### Vercel AI SDK (`@byok-relay/vercel-ai`)
 
 For Next.js, SvelteKit, Nuxt, or any project using the Vercel AI SDK:
