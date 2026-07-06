@@ -79,6 +79,39 @@ export class ChatComponent {
 
 Signals (Angular 16+), `StreamingChatService` (SSE + AbortController), `RelayHealthService` (polling), and Analog SSR support included. [Full docs →](packages/angular/README.md)
 
+### Remix / React Router v7 integration (`@byok-relay/remix`)
+
+Loader and action factories that keep `RELAY_URL` server-only, plus React hooks for Remix's hydration model:
+
+```bash
+npm install @byok-relay/remix
+```
+
+```ts
+// app/routes/api.relay.$.tsx  (catch-all route)
+import { createRelayLoader, createRelayAction } from '@byok-relay/remix';
+export const loader = createRelayLoader({ relayUrl: process.env.RELAY_URL });
+export const action = createRelayAction({ relayUrl: process.env.RELAY_URL });
+```
+
+```tsx
+// app/components/AiChat.tsx
+import { useByokRelay, useStreamingChat } from '@byok-relay/remix';
+
+export function AiChat() {
+  const { token } = useByokRelay({ relayUrl: window.ENV.RELAY_URL });
+  const { messages, streamingContent, send, stopStreaming } = useStreamingChat({
+    relayUrl: window.ENV.RELAY_URL,
+    token,
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+  });
+  return <>{/* render messages + streamingContent */}</>;
+}
+```
+
+Also includes `ByokRelayClient` (plain-JS class, works in both loaders and browser scripts) and `useRelayHealth`. Compatible with React Router v7 framework mode. [Full docs →](packages/remix/README.md)
+
 ### Astro SSR integration (`@byok-relay/astro`)
 
 For Astro SSR apps, keep the relay URL private in server env vars:
