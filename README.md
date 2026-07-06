@@ -79,6 +79,39 @@ export class ChatComponent {
 
 Signals (Angular 16+), `StreamingChatService` (SSE + AbortController), `RelayHealthService` (polling), and Analog SSR support included. [Full docs →](packages/angular/README.md)
 
+### Astro SSR integration (`@byok-relay/astro`)
+
+For Astro SSR apps, keep the relay URL private in server env vars:
+
+```bash
+npm install @byok-relay/astro
+```
+
+```ts
+// src/pages/api/relay/[...path].ts
+import { createRelayApiRoute } from '@byok-relay/astro';
+export const prerender = false;
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } = createRelayApiRoute({
+  relayUrl: import.meta.env.RELAY_URL,  // server-only — never in the browser bundle
+});
+```
+
+```astro
+<!-- Any .astro page or component -->
+<script>
+  import { ByokRelayClient } from '@byok-relay/astro';
+  const relay = new ByokRelayClient({ relayUrl: '/api/relay', appId: 'my-app' });
+  await relay.storeKey('openai', userApiKey);
+  const reply = await relay.chat({
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'Hello!' }],
+  });
+</script>
+```
+
+Also includes `createByokRelayMiddleware` for a `src/middleware.ts` proxy, and `ByokRelayClient.streamChat()` with SSE streaming for View Transitions. [Full docs →](packages/astro/README.md)
+
 ### Preact hooks (`@byok-relay/preact`)
 
 For Preact apps, **Astro component islands**, or any Vite/Preact project:

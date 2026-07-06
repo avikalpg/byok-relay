@@ -155,6 +155,40 @@ Hook shim: resolves `preact/hooks` at runtime; falls back to `react`; uses an in
 
 npm: https://www.npmjs.com/package/@byok-relay/preact
 
+## Astro Integration (`@byok-relay/astro`)
+
+For Astro SSR apps, the Astro package provides server-side middleware and API route helpers that keep the relay URL private in server env vars:
+
+```bash
+npm install @byok-relay/astro
+```
+
+Three components:
+- `createRelayApiRoute(opts)` — one-liner catch-all API route (`src/pages/api/relay/[...path].ts`); proxies all relay calls server-to-server, `RELAY_URL` never in browser bundle
+- `createByokRelayMiddleware(opts)` — Astro `onRequest` middleware that intercepts a path prefix and proxies to relay; use with `sequence()` in `src/middleware.ts`
+- `ByokRelayClient` — plain-JS client class for `<script>` blocks, View Transitions, and Astro pages; works with both direct relay URL and server proxy paths like `/api/relay`
+
+```ts
+// src/pages/api/relay/[...path].ts
+import { createRelayApiRoute } from '@byok-relay/astro';
+export const prerender = false;
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } = createRelayApiRoute({
+  relayUrl: import.meta.env.RELAY_URL,  // server-only — never shipped to browser
+});
+```
+
+```astro
+<!-- In any .astro page -->
+<script>
+  import { ByokRelayClient } from '@byok-relay/astro';
+  const relay = new ByokRelayClient({ relayUrl: '/api/relay', appId: 'my-app' });
+  await relay.storeKey('openai', userKey);
+  const reply = await relay.chat({ provider: 'openai', model: 'gpt-4o', messages });
+</script>
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/astro
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
