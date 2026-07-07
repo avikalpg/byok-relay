@@ -212,6 +212,35 @@ return result.toDataStreamResponse();
 
 Supports `generateText`, `streamText`, `generateObject`, tool calling, vision inputs. Model IDs: `'openai/gpt-4o'`, `'anthropic/claude-3-5-sonnet-20241022'`, `'groq/llama3-70b-8192'`, bare model names (default: OpenAI). [Full docs →](packages/vercel-ai/README.md)
 
+### Hono middleware (`@byok-relay/hono`)
+
+For [Hono](https://hono.dev) apps on **Cloudflare Workers, Deno Deploy, Bun, or Node.js**. Keeps `RELAY_URL` server-side only via Hono's context env:
+
+```bash
+npm install @byok-relay/hono
+```
+
+```typescript
+// Cloudflare Workers — src/worker.ts
+import { Hono } from 'hono';
+import { createByokRelayMiddleware } from '@byok-relay/hono';
+
+const app = new Hono<{ Bindings: { RELAY_URL: string } }>();
+
+// Mount the proxy — RELAY_URL read from c.env (Workers binding), never in the bundle
+app.use('/relay/*', createByokRelayMiddleware());
+
+export default app;
+```
+
+```typescript
+// Bun / Node.js — explicit catch-all route
+import { createRelayRoute } from '@byok-relay/hono';
+app.all('/relay/*', createRelayRoute({ relayUrl: process.env.RELAY_URL }));
+```
+
+Includes `ByokRelayClient` for server-side usage (route handlers, scheduled Workers) with in-memory storage and optional custom adapter for Workers KV. [Full docs →](packages/hono/README.md)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
