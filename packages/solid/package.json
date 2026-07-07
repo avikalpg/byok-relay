@@ -1,0 +1,56 @@
+{
+  "name": "@byok-relay/solid",
+  "version": "1.0.0",
+  "description": "SolidJS reactive stores for byok-relay — drop-in BYOK AI in any SolidJS or SolidStart app",
+  "keywords": [
+    "byok",
+    "ai",
+    "solid",
+    "solidjs",
+    "solidstart",
+    "signals",
+    "stores",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "frontend",
+    "lovable",
+    "bolt",
+    "no-backend",
+    "api-key",
+    "self-hosted"
+  ],
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/stores.test.js"
+  },
+  "peerDependencies": {
+    "solid-js": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "solid-js": {
+      "optional": true
+    }
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/solid"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "MIT",
+  "author": "avikalpg"
+}
