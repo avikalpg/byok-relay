@@ -241,6 +241,36 @@ app.all('/relay/*', createRelayRoute({ relayUrl: process.env.RELAY_URL }));
 
 Includes `ByokRelayClient` for server-side usage (route handlers, scheduled Workers) with in-memory storage and optional custom adapter for Workers KV. [Full docs →](packages/hono/README.md)
 
+### Next.js App Router (`@byok-relay/next`)
+
+Route Handler factory, middleware, and React hooks for **Next.js 13+ App Router**. `RELAY_URL` stays in `process.env` — the browser only calls your own API route:
+
+```bash
+npm install @byok-relay/next
+```
+
+```js
+// app/api/relay/[...path]/route.js — RELAY_URL is server-only
+import { createRelayRouteHandler } from '@byok-relay/next';
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } =
+  createRelayRouteHandler({ relayUrl: process.env.RELAY_URL });
+```
+
+```jsx
+// 'use client' component — point at your own route, not the upstream relay
+'use client';
+import { useByokRelay, useStreamingChat } from '@byok-relay/next';
+
+export function ChatBox () {
+  const { token, registerUser } = useByokRelay({ relayUrl: '/api/relay' });
+  const { messages, streamingContent, sendMessage, stopStreaming } =
+    useStreamingChat({ relayUrl: '/api/relay', token, model: 'openai/gpt-4o' });
+  // ...
+}
+```
+
+Also includes `ByokRelayClient` for Server Components and Server Actions (accepts a custom `storage` adapter for cookies/session). [Full docs →](packages/next/README.md)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
