@@ -283,6 +283,42 @@ const { messages, streamingContent, sendMessage } =
 
 npm: https://www.npmjs.com/package/@byok-relay/next
 
+## Qwik City Integration (`@byok-relay/qwik`)
+
+Qwik City server loaders, actions, and reactive stores for BYOK AI. `RELAY_URL` stays in `process.env` via Vite private env — never in the browser bundle.
+
+```
+npm install @byok-relay/qwik
+```
+
+- `createRelayLoader(opts)` — returns a Qwik City `routeLoader$`-compatible function; proxies GET requests to relay; reads `process.env.RELAY_URL`; `[...path]` maps to upstream sub-path; optional app_id allowlist
+- `createRelayAction(opts)` — returns a `routeAction$`-compatible function for POST/PUT/PATCH/DELETE; receives `{ path, token, body }` from Zod-validated form data
+- `createByokRelayStore(opts)` — token registration + key CRUD + logout; pass `useStore()` result as `opts.store` for full Qwik reactivity; `init()` restores token from localStorage
+- `createChatStore(opts)` — stateful non-streaming chat; openai/anthropic/groq/mistral/openrouter; systemPrompt + extraParams; optimistic rollback on error
+- `createStreamingChatStore(opts)` — SSE streaming with AbortController; `stopStreaming()` partial-commits accumulated content; `streamingContent` updates in real-time
+- `createRelayHealthStore(opts)` — polls `/health`; `startPolling(ms)` / `destroy()` for `useVisibleTask$` cleanup; `status` is `'ok' | 'degraded' | 'unknown'`
+- `ByokRelayClient` — plain-JS class; works in `routeLoader$`, `routeAction$`, middleware, or browser; localStorage default; custom `storage` adapter for server-side / cookie session
+
+```tsx
+// src/routes/relay/[...path]/index.tsx — server-only proxy route
+import { routeLoader$, routeAction$, zod$, z } from '@builder.io/qwik-city';
+import { createRelayLoader, createRelayAction } from '@byok-relay/qwik';
+export const useRelayData   = routeLoader$(createRelayLoader());
+export const useRelayAction = routeAction$(createRelayAction(),
+  zod$({ path: z.string(), token: z.string(), body: z.any().optional() }));
+```
+
+```tsx
+// Client component — streaming chat
+import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/qwik';
+const relayState  = useStore({ token: null, keys: [], loading: false, error: null });
+const streamState = useStore({ messages: [], streamingContent: '', isStreaming: false, error: null });
+const relay = createByokRelayStore({ store: relayState, relayUrl: '/relay' });
+const chat  = createStreamingChatStore({ store: streamState, model: 'openai/gpt-4o-mini', relayUrl: '/relay' });
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/qwik
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay

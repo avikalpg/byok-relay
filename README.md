@@ -271,6 +271,45 @@ export function ChatBox () {
 
 Also includes `ByokRelayClient` for Server Components and Server Actions (accepts a custom `storage` adapter for cookies/session). [Full docs →](packages/next/README.md)
 
+### Qwik City integration (`@byok-relay/qwik`)
+
+For [Qwik City](https://qwik.dev) apps. `RELAY_URL` stays in `process.env` (Vite private env) — never in the browser bundle.
+
+```bash
+npm install @byok-relay/qwik
+```
+
+```tsx
+// src/routes/relay/[...path]/index.tsx — server-side proxy
+import { routeLoader$, routeAction$, zod$, z } from '@builder.io/qwik-city';
+import { createRelayLoader, createRelayAction } from '@byok-relay/qwik';
+
+export const useRelayData   = routeLoader$(createRelayLoader());
+export const useRelayAction = routeAction$(
+  createRelayAction(),
+  zod$({ path: z.string(), token: z.string(), body: z.any().optional() })
+);
+```
+
+```tsx
+// Client component — streaming chat
+import { component$, useStore, useVisibleTask$ } from '@builder.io/qwik';
+import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/qwik';
+
+export default component$(() => {
+  const relayState  = useStore({ token: null, keys: [], loading: false, error: null });
+  const streamState = useStore({ messages: [], streamingContent: '', isStreaming: false, error: null });
+  const relay = createByokRelayStore({ store: relayState, relayUrl: '/relay' });
+  const chat  = createStreamingChatStore({
+    store: streamState, model: 'openai/gpt-4o-mini', relayUrl: '/relay',
+  });
+  useVisibleTask$(async () => { await relay.init(); });
+  // ...
+});
+```
+
+Also includes `createByokRelayStore` (key management), `createRelayHealthStore` (polling), and `ByokRelayClient` (plain-JS class for loaders, actions, and middleware). [Full docs →](packages/qwik/README.md)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
