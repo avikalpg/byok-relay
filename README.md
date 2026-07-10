@@ -310,6 +310,33 @@ export default component$(() => {
 
 Also includes `createByokRelayStore` (key management), `createRelayHealthStore` (polling), and `ByokRelayClient` (plain-JS class for loaders, actions, and middleware). [Full docs →](packages/qwik/README.md)
 
+### Nuxt 3 (`@byok-relay/nuxt`)
+
+Nuxt 3 module, H3 server route factory, and Vue composables. `RELAY_URL` stays in `process.env` (Nitro server-only) — the browser only calls your own `/relay/*` Nuxt server route.
+
+```bash
+npm install @byok-relay/nuxt
+```
+
+```js
+// server/routes/relay/[...].js
+import { createRelayServerRoute } from '@byok-relay/nuxt'
+export default createRelayServerRoute()  // reads RELAY_URL from process.env
+```
+
+```vue
+<script setup>
+import { useByokRelay, useStreamingChat } from '@byok-relay/nuxt'
+const { token, storeKey } = useByokRelay({ relayUrl: '/relay' })
+const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingChat({
+  relayUrl: '/relay',
+  model   : 'openai/gpt-4o',
+})
+</script>
+```
+
+Also includes `defineByokRelayModule` (auto-registers `/relay` route via `nuxt.config.ts`), `useChat`, `useRelayHealth`, and `ByokRelayClient` (safe in server routes, plugins, `useAsyncData()`, and browser scripts). [Full docs →](packages/nuxt/README.md)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:

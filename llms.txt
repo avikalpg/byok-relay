@@ -319,6 +319,31 @@ const chat  = createStreamingChatStore({ store: streamState, model: 'openai/gpt-
 
 npm: https://www.npmjs.com/package/@byok-relay/qwik
 
+## Nuxt 3 Integration (`@byok-relay/nuxt`)
+
+Nuxt 3 module, H3 server route factory, and Vue composables. RELAY_URL stays in process.env (Nitro server-only); browser calls your own `/relay/*` Nuxt server route.
+
+```bash
+npm install @byok-relay/nuxt
+```
+
+```js
+// server/routes/relay/[...].js
+import { createRelayServerRoute } from '@byok-relay/nuxt'
+export default createRelayServerRoute()  // reads RELAY_URL from process.env
+```
+
+```vue
+<!-- Component -->
+<script setup>
+import { useByokRelay, useStreamingChat } from '@byok-relay/nuxt'
+const { token, storeKey } = useByokRelay({ relayUrl: '/relay' })
+const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingChat({ relayUrl: '/relay', model: 'openai/gpt-4o' })
+</script>
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/nuxt
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
