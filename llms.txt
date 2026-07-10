@@ -73,6 +73,277 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 
 Apache 2.0 — free to self-host or build on top of.
 
+## SolidJS Signals (`@byok-relay/solid`)
+
+For SolidJS or SolidStart apps, install the signals package:
+
+```bash
+npm install @byok-relay/solid
+```
+
+Four reactive stores with SolidJS's `[getter, setter]` signal contract:
+- `createByokRelayStore(opts)` — token registration + key CRUD + logout (localStorage persistence, SolidStart SSR-safe)
+- `createChatStore(opts)` — stateful message list, non-streaming, openai/anthropic/groq/mistral/openrouter
+- `createStreamingChatStore(opts)` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent()` live signal
+- `createRelayHealthStore(opts)` — polls /health, refetch(), destroy() for onCleanup
+
+npm: https://www.npmjs.com/package/@byok-relay/solid
+
+## Angular Injectable Services (`@byok-relay/angular`)
+
+For Angular 14+ or Analog apps, install the Angular services package:
+
+```bash
+npm install @byok-relay/angular
+```
+
+Four Angular injectable services with optional Angular 16+ signal reactivity:
+- `ByokRelayService` — token registration + key CRUD + logout (localStorage persistence, Analog SSR-safe)
+- `ChatService` — stateful message list, non-streaming, openai/anthropic/groq/mistral/openrouter
+- `StreamingChatService` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent()` live signal
+- `RelayHealthService` — polls /health, `destroy()` for ngOnDestroy cleanup
+
+Setup: `provideByokRelay({ relayUrl: 'https://relay.byokrelay.com' })` in `app.config.ts` providers.
+Services use Angular `signal()` when @angular/core 16+ is detected; plain getter shim otherwise.
+
+npm: https://www.npmjs.com/package/@byok-relay/angular
+
+## Vercel AI SDK Custom Provider (`@byok-relay/vercel-ai`)
+
+For Next.js, SvelteKit, Nuxt, or any app using the Vercel AI SDK (`ai` package), install the adapter:
+
+```bash
+npm install @byok-relay/vercel-ai
+```
+
+Returns a `LanguageModelV1`-compatible provider that works with `generateText`, `streamText`, `generateObject`, and all AI SDK tools:
+
+```ts
+import { createByokRelayProviderSync } from '@byok-relay/vercel-ai';
+import { streamText } from 'ai';
+
+const provider = createByokRelayProviderSync({ relayUrl: 'https://relay.byokrelay.com', appId: 'my-app' });
+
+// Store user's API key once (from a settings form)
+await provider.storeKey('openai', userKey);
+
+// Use with any AI SDK function
+const result = streamText({ model: provider.languageModel('openai/gpt-4o'), messages });
+```
+
+Model ID format: `'provider/model'` (e.g. `'anthropic/claude-3-5-sonnet-20241022'`, `'groq/llama3-70b-8192'`) or bare name for OpenAI.
+Supports: generateText, streamText, generateObject, tool calling, image/vision inputs, streaming.
+Factory: `createByokRelayProviderSync` (sync, lazy register) or `createByokRelayProvider` (async, eager register).
+
+npm: https://www.npmjs.com/package/@byok-relay/vercel-ai
+
+## Preact Hooks (`@byok-relay/preact`)
+
+For Preact apps, Astro component islands, or any Vite/Preact project:
+
+```bash
+npm install @byok-relay/preact
+```
+
+Four hooks — SSR-safe, works with `client:load` Astro islands:
+- `useByokRelay({ relayUrl, appId })` — token registration, key management, logout
+- `useChat({ relayUrl, appId, provider, model, systemPrompt })` — stateful non-streaming chat
+- `useStreamingChat({ relayUrl, appId, provider, model })` — SSE streaming with `streamingContent` live string and `stopStreaming()`
+- `useRelayHealth({ relayUrl, intervalMs, deep })` — polls /health, supports readiness probe
+
+Hook shim: resolves `preact/hooks` at runtime; falls back to `react`; uses an inline shim if neither is installed.
+
+npm: https://www.npmjs.com/package/@byok-relay/preact
+
+## Astro Integration (`@byok-relay/astro`)
+
+For Astro SSR apps, the Astro package provides server-side middleware and API route helpers that keep the relay URL private in server env vars:
+
+```bash
+npm install @byok-relay/astro
+```
+
+Three components:
+- `createRelayApiRoute(opts)` — one-liner catch-all API route (`src/pages/api/relay/[...path].ts`); proxies all relay calls server-to-server, `RELAY_URL` never in browser bundle
+- `createByokRelayMiddleware(opts)` — Astro `onRequest` middleware that intercepts a path prefix and proxies to relay; use with `sequence()` in `src/middleware.ts`
+- `ByokRelayClient` — plain-JS client class for `<script>` blocks, View Transitions, and Astro pages; works with both direct relay URL and server proxy paths like `/api/relay`
+
+```ts
+// src/pages/api/relay/[...path].ts
+import { createRelayApiRoute } from '@byok-relay/astro';
+export const prerender = false;
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } = createRelayApiRoute({
+  relayUrl: import.meta.env.RELAY_URL,  // server-only — never shipped to browser
+});
+```
+
+```astro
+<!-- In any .astro page -->
+<script>
+  import { ByokRelayClient } from '@byok-relay/astro';
+  const relay = new ByokRelayClient({ relayUrl: '/api/relay', appId: 'my-app' });
+  await relay.storeKey('openai', userKey);
+  const reply = await relay.chat({ provider: 'openai', model: 'gpt-4o', messages });
+</script>
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/astro
+
+## Remix / React Router v7 Integration (`@byok-relay/remix`)
+
+Loader and action factories for Remix v2 / React Router v7, plus React hooks and a plain-JS `ByokRelayClient`. RELAY_URL stays server-only in `process.env`; the browser never sees it.
+
+```
+npm install @byok-relay/remix
+```
+
+- `createRelayLoader(opts)` — Remix `LoaderFunction` catch-all; maps `params['*']` to relay sub-path; optional app_id allowlist
+- `createRelayAction(opts)` — Remix `ActionFunction` catch-all; forwards POST/PUT/PATCH/DELETE; optional app_id allowlist
+- `useByokRelay(opts)` — token registration + key CRUD + logout; localStorage persistence
+- `useChat(opts)` — stateful non-streaming chat; openai/anthropic/groq/mistral/openrouter
+- `useStreamingChat(opts)` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent` live string, partial-commit on abort
+- `useRelayHealth(opts)` — polls /health, `refetch()`, `check(deep?)` readiness probe
+- `ByokRelayClient` — plain-JS class; works in both loaders (server) and browser `<script>` blocks
+
+```ts
+// app/routes/api.relay.$.tsx
+import { createRelayLoader, createRelayAction } from '@byok-relay/remix';
+export const loader = createRelayLoader({ relayUrl: process.env.RELAY_URL });
+export const action = createRelayAction({ relayUrl: process.env.RELAY_URL });
+```
+
+```tsx
+// app/components/AiChat.tsx
+import { useByokRelay, useStreamingChat } from '@byok-relay/remix';
+const { token } = useByokRelay({ relayUrl: window.ENV.RELAY_URL });
+const { messages, streamingContent, send } = useStreamingChat({ relayUrl: window.ENV.RELAY_URL, token });
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/remix
+
+## Hono Middleware (`@byok-relay/hono`)
+
+Hono middleware and route factory for BYOK AI relay. Works on Cloudflare Workers, Deno Deploy, Bun, and Node.js. RELAY_URL is read from `c.env` (Workers binding) so it never ships to the browser bundle.
+
+```
+npm install @byok-relay/hono
+```
+
+- `createByokRelayMiddleware(opts)` — Hono `MiddlewareHandler`; intercepts paths matching `pathPrefix` (default `/relay`); reads `c.env.RELAY_URL`; optional app_id allowlist; strips hop-by-hop headers
+- `createRelayRoute(opts)` — Hono `Handler` for explicit catch-all route registration (`app.all('/relay/*', handler)`)
+- `ByokRelayClient` — plain-JS class; in-memory storage on edge (no localStorage); accepts custom `storage` adapter for Workers KV; `register`, `ensureToken`, `storeKey`, `listKeys`, `deleteKey`, `rotateKey`, `chat`, `streamChat` (async generator), `health`, `stats`, `getModels`, `deleteAccount`
+
+```typescript
+// Cloudflare Workers
+import { Hono } from 'hono';
+import { createByokRelayMiddleware } from '@byok-relay/hono';
+const app = new Hono();
+app.use('/relay/*', createByokRelayMiddleware());  // reads c.env.RELAY_URL
+export default app;
+```
+
+```typescript
+// Bun / Node.js — explicit route
+import { createRelayRoute } from '@byok-relay/hono';
+app.all('/relay/*', createRelayRoute({ relayUrl: process.env.RELAY_URL }));
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/hono
+
+## Next.js App Router Integration (`@byok-relay/next`)
+
+Route Handler factory, middleware, React hooks (`'use client'`), and `ByokRelayClient` for Server Components and Server Actions. RELAY_URL lives in `process.env` — it never ships to the browser bundle.
+
+```
+npm install @byok-relay/next
+```
+
+- `createRelayRouteHandler(opts)` — returns `{ GET, POST, PUT, PATCH, DELETE, OPTIONS }` for `app/api/relay/[...path]/route.js`; `[...path]` maps to relay sub-path; optional app_id allowlist; 30 s timeout
+- `createRelayMiddleware(opts)` — Next.js `middleware.js` export; intercepts requests matching `pathPrefix` (default `/relay`); Edge Runtime compatible
+- `useByokRelay(opts)` — register user + key CRUD + logout, localStorage persistence, `'use client'` safe
+- `useChat(opts)` — stateful non-streaming chat, openai/anthropic/groq/mistral/openrouter, systemPrompt + extraParams
+- `useStreamingChat(opts)` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent` live string
+- `useRelayHealth(opts)` — polls `/health`, `check(deep?)`, `intervalMs` control
+- `ByokRelayClient` — plain-JS class for Server Components, Server Actions, API Routes; custom `storage` adapter for cookies/session; `register`, `ensureToken`, `logout`, `storeKey`, `listKeys`, `deleteKey`, `rotateKey`, `chat`, `streamChat` (async generator), `health`, `stats`, `getModels`, `deleteAccount`
+
+```js
+// app/api/relay/[...path]/route.js
+import { createRelayRouteHandler } from '@byok-relay/next';
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } =
+  createRelayRouteHandler({ relayUrl: process.env.RELAY_URL });
+```
+
+```jsx
+// 'use client' component
+import { useByokRelay, useStreamingChat } from '@byok-relay/next';
+const { token, registerUser } = useByokRelay({ relayUrl: '/api/relay' });
+const { messages, streamingContent, sendMessage } =
+  useStreamingChat({ relayUrl: '/api/relay', token, model: 'openai/gpt-4o' });
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/next
+
+## Qwik City Integration (`@byok-relay/qwik`)
+
+Qwik City server loaders, actions, and reactive stores for BYOK AI. `RELAY_URL` stays in `process.env` via Vite private env — never in the browser bundle.
+
+```
+npm install @byok-relay/qwik
+```
+
+- `createRelayLoader(opts)` — returns a Qwik City `routeLoader$`-compatible function; proxies GET requests to relay; reads `process.env.RELAY_URL`; `[...path]` maps to upstream sub-path; optional app_id allowlist
+- `createRelayAction(opts)` — returns a `routeAction$`-compatible function for POST/PUT/PATCH/DELETE; receives `{ path, token, body }` from Zod-validated form data
+- `createByokRelayStore(opts)` — token registration + key CRUD + logout; pass `useStore()` result as `opts.store` for full Qwik reactivity; `init()` restores token from localStorage
+- `createChatStore(opts)` — stateful non-streaming chat; openai/anthropic/groq/mistral/openrouter; systemPrompt + extraParams; optimistic rollback on error
+- `createStreamingChatStore(opts)` — SSE streaming with AbortController; `stopStreaming()` partial-commits accumulated content; `streamingContent` updates in real-time
+- `createRelayHealthStore(opts)` — polls `/health`; `startPolling(ms)` / `destroy()` for `useVisibleTask$` cleanup; `status` is `'ok' | 'degraded' | 'unknown'`
+- `ByokRelayClient` — plain-JS class; works in `routeLoader$`, `routeAction$`, middleware, or browser; localStorage default; custom `storage` adapter for server-side / cookie session
+
+```tsx
+// src/routes/relay/[...path]/index.tsx — server-only proxy route
+import { routeLoader$, routeAction$, zod$, z } from '@builder.io/qwik-city';
+import { createRelayLoader, createRelayAction } from '@byok-relay/qwik';
+export const useRelayData   = routeLoader$(createRelayLoader());
+export const useRelayAction = routeAction$(createRelayAction(),
+  zod$({ path: z.string(), token: z.string(), body: z.any().optional() }));
+```
+
+```tsx
+// Client component — streaming chat
+import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/qwik';
+const relayState  = useStore({ token: null, keys: [], loading: false, error: null });
+const streamState = useStore({ messages: [], streamingContent: '', isStreaming: false, error: null });
+const relay = createByokRelayStore({ store: relayState, relayUrl: '/relay' });
+const chat  = createStreamingChatStore({ store: streamState, model: 'openai/gpt-4o-mini', relayUrl: '/relay' });
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/qwik
+
+## Nuxt 3 Integration (`@byok-relay/nuxt`)
+
+Nuxt 3 module, H3 server route factory, and Vue composables. RELAY_URL stays in process.env (Nitro server-only); browser calls your own `/relay/*` Nuxt server route.
+
+```bash
+npm install @byok-relay/nuxt
+```
+
+```js
+// server/routes/relay/[...].js
+import { createRelayServerRoute } from '@byok-relay/nuxt'
+export default createRelayServerRoute()  // reads RELAY_URL from process.env
+```
+
+```vue
+<!-- Component -->
+<script setup>
+import { useByokRelay, useStreamingChat } from '@byok-relay/nuxt'
+const { token, storeKey } = useByokRelay({ relayUrl: '/relay' })
+const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingChat({ relayUrl: '/relay', model: 'openai/gpt-4o' })
+</script>
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/nuxt
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
