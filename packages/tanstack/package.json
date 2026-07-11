@@ -1,0 +1,50 @@
+{
+  "name": "@byok-relay/tanstack",
+  "version": "1.0.0",
+  "description": "TanStack Start API route factory, server function adapter, and React hooks for byok-relay BYOK AI",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/tanstack.test.js"
+  },
+  "keywords": [
+    "tanstack",
+    "tanstack-start",
+    "tanstack-router",
+    "react",
+    "vinxi",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "byok-relay",
+    "relay",
+    "frontend",
+    "server-functions"
+  ],
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "@tanstack/react-start": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "@tanstack/react-start": { "optional": true }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/tanstack"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  }
+}

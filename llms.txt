@@ -344,6 +344,42 @@ const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingC
 
 npm: https://www.npmjs.com/package/@byok-relay/nuxt
 
+## TanStack Start Integration (`@byok-relay/tanstack`)
+
+API route factory, server function adapter, and React hooks. RELAY_URL stays in process.env (Vinxi/Vite private env); browser calls your own /api/relay catch-all API route.
+
+```bash
+npm install @byok-relay/tanstack
+```
+
+- `createByokRelayAPIRoute(opts)` — returns handler map for `createAPIFileRoute('/api/relay/$')({ ...handlers })`; reads `process.env.RELAY_URL` server-side only; optional app_id allowlist; 30s AbortController timeout; binary/streaming body pass-through
+- `createRelayServerFnHandler(opts)` — async handler body for `createServerFn().handler(fn)`; receives `{ path, token, method, body }` from validated input; returns upstream JSON or `{ _text, _status }` for non-JSON responses
+- `useByokRelay(opts)` — token registration + key CRUD + logout; localStorage default; custom storage adapter for cookie-session persistence
+- `useChat(opts)` — stateful non-streaming chat; openai/anthropic/groq/mistral/openrouter; systemPrompt + extraParams; optimistic rollback on error
+- `useStreamingChat(opts)` — SSE streaming with AbortController; `stopStreaming()` partial-commits with `[stopped]` suffix; `streamingContent` live string
+- `useRelayHealth(opts)` — polls /health; `check(deep?)` upstream readiness; `startPolling(ms)` / `stopPolling()`
+- `ByokRelayClient` — plain JS class; prefers `process.env.RELAY_URL` on server; falls back to `opts.relayUrl` in browser; custom storage adapter for cookie-session in server functions
+
+```ts
+// app/routes/api/relay.$.ts — TanStack Start catch-all API route
+import { createAPIFileRoute }      from '@tanstack/start/api';
+import { createByokRelayAPIRoute } from '@byok-relay/tanstack';
+export const APIRoute = createAPIFileRoute('/api/relay/$')({
+  ...createByokRelayAPIRoute(),  // reads RELAY_URL from process.env server-side only
+});
+```
+
+```ts
+// Server function adapter
+import { createServerFn }             from '@tanstack/react-start/server';
+import { createRelayServerFnHandler } from '@byok-relay/tanstack';
+export const relayFn = createServerFn({ method: 'POST' })
+  .validator(z.object({ path: z.string(), token: z.string(), body: z.any().optional() }))
+  .handler(createRelayServerFnHandler());
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/tanstack
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
