@@ -337,6 +337,38 @@ const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingC
 
 Also includes `defineByokRelayModule` (auto-registers `/relay` route via `nuxt.config.ts`), `useChat`, `useRelayHealth`, and `ByokRelayClient` (safe in server routes, plugins, `useAsyncData()`, and browser scripts). [Full docs →](packages/nuxt/README.md)
 
+### TanStack Start (`@byok-relay/tanstack`)
+
+API route factory, server function adapter, and React hooks for **TanStack Start** (Vinxi + TanStack Router). `RELAY_URL` stays in `process.env` — the browser only calls your own `/api/relay` API route:
+
+```bash
+npm install @byok-relay/tanstack
+```
+
+```ts
+// app/routes/api/relay.$.ts — catch-all API route
+import { createAPIFileRoute }      from '@tanstack/start/api';
+import { createByokRelayAPIRoute } from '@byok-relay/tanstack';
+
+export const APIRoute = createAPIFileRoute('/api/relay/$')({
+  ...createByokRelayAPIRoute(),   // reads RELAY_URL from process.env server-only
+});
+```
+
+```tsx
+import { useByokRelay, useStreamingChat } from '@byok-relay/tanstack';
+
+export function ChatBox () {
+  const { token, storeKey }                                         = useByokRelay({ relayUrl: '/api/relay' });
+  const { messages, streamingContent, sendMessage, stopStreaming }  = useStreamingChat({
+    relayUrl: '/api/relay', model: 'openai/gpt-4o-mini', token,
+  });
+  return <div>...</div>;
+}
+```
+
+Also includes `createRelayServerFnHandler` (typed `.handler()` body for `createServerFn`), `useChat`, `useRelayHealth`, and `ByokRelayClient` (safe in server functions, loaders, and browser). [Full docs →](packages/tanstack/README.md)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
