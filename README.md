@@ -1335,7 +1335,7 @@ function App() {
 }
 ```
 
-Also available: [`@byok-relay/react`](https://npmjs.com/package/@byok-relay/react), [`@byok-relay/vue`](https://npmjs.com/package/@byok-relay/vue), [`@byok-relay/svelte`](https://npmjs.com/package/@byok-relay/svelte), [`@byok-relay/angular`](https://npmjs.com/package/@byok-relay/angular)
+Also available: [`@byok-relay/react`](https://npmjs.com/package/@byok-relay/react), [`@byok-relay/vue`](https://npmjs.com/package/@byok-relay/vue), [`@byok-relay/svelte`](https://npmjs.com/package/@byok-relay/svelte), [`@byok-relay/angular`](https://npmjs.com/package/@byok-relay/angular), [`@byok-relay/expo`](https://npmjs.com/package/@byok-relay/expo) (React Native)
 
 ## Angular injectable services
 
@@ -1625,6 +1625,48 @@ const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingC
 ```
 
 Also includes `defineByokRelayModule` (auto-registers `/relay` route via `nuxt.config.ts`), `useChat`, `useRelayHealth`, and `ByokRelayClient` (safe in server routes, plugins, `useAsyncData()`, and browser scripts). [Full docs →](packages/nuxt/README.md)
+
+### React Native / Expo (`@byok-relay/expo`)
+
+Hooks and `ByokRelayClient` for **React Native** and **Expo** mobile apps. Uses **AsyncStorage** instead of `localStorage` for persistent token storage, and fetch-based SSE streaming compatible with the Hermes engine — no `EventSource` polyfill required.
+
+```bash
+npx expo install @byok-relay/expo @react-native-async-storage/async-storage
+```
+
+```tsx
+import { useByokRelay, useStreamingChat } from '@byok-relay/expo';
+
+// Settings screen — save the user's API key once
+function ApiKeySettings() {
+  const { token, register, storeKey } = useByokRelay({
+    relayUrl: 'https://relay.byokrelay.com',
+    appId: 'my-expo-app',
+  });
+  const save = async (key: string) => {
+    if (!token) await register();
+    await storeKey('openai', key);
+  };
+  return <TextInput secureTextEntry onSubmitEditing={e => save(e.nativeEvent.text)} />;
+}
+
+// Chat screen — streaming AI replies
+function ChatScreen() {
+  const { messages, streamingContent, loading, sendMessage } = useStreamingChat({
+    relayUrl: 'https://relay.byokrelay.com',
+    model: 'openai/gpt-4o',
+  });
+  return (
+    <View style={{ flex: 1 }}>
+      <FlatList data={messages} renderItem={({ item }) => <Text>{item.content}</Text>} />
+      {streamingContent ? <Text style={{ opacity: 0.6 }}>{streamingContent}</Text> : null}
+      <Button title={loading ? '…' : 'Send'} onPress={() => sendMessage('Hello!')} />
+    </View>
+  );
+}
+```
+
+Also supports **Expo SecureStore** as a custom storage adapter for credential-grade encrypted storage. Exports: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`. [Full docs →](packages/expo/README.md)
 
 ## For AI coding agents
 

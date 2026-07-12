@@ -482,6 +482,46 @@ const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingC
 
 npm: https://www.npmjs.com/package/@byok-relay/nuxt
 
+## React Native / Expo Integration (`@byok-relay/expo`)
+
+For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming compatible with Hermes engine.
+
+```bash
+npx expo install @byok-relay/expo @react-native-async-storage/async-storage
+```
+
+```tsx
+import { useStreamingChat, useByokRelay } from '@byok-relay/expo';
+
+// API key settings screen
+const { token, register, storeKey } = useByokRelay({ relayUrl: 'https://relay.byokrelay.com' });
+
+// Chat screen
+const { messages, streamingContent, sendMessage } = useStreamingChat({
+  relayUrl: 'https://relay.byokrelay.com',
+  model: 'openai/gpt-4o',
+});
+```
+
+With Expo SecureStore for credential-grade storage:
+```tsx
+import * as SecureStore from 'expo-secure-store';
+import { ByokRelayClient } from '@byok-relay/expo';
+
+const client = new ByokRelayClient({
+  relayUrl: 'https://relay.byokrelay.com',
+  storage: {
+    getItem:    (k) => SecureStore.getItemAsync(k),
+    setItem:    (k, v) => SecureStore.setItemAsync(k, v),
+    removeItem: (k) => SecureStore.deleteItemAsync(k),
+  },
+});
+```
+
+Exported: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`.
+
+npm: https://www.npmjs.com/package/@byok-relay/expo
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
