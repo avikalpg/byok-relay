@@ -101,6 +101,34 @@ app.use('/relay', createRelayRouter({ relayUrl: process.env.RELAY_URL }));
 Also exports `ByokRelayClient` for server-side usage in route handlers with a custom session-storage adapter.
 npm: https://www.npmjs.com/package/@byok-relay/express
 
+## Fastify Integration (`@byok-relay/fastify`)
+
+Fastify plugin and standalone route handler factory for Node.js servers running Fastify 4+.
+`RELAY_URL` stays in `process.env` — the browser only calls your own Fastify server.
+
+```bash
+npm install @byok-relay/fastify
+```
+
+```js
+const Fastify = require('fastify');
+const { byokRelayPlugin } = require('@byok-relay/fastify');
+
+const fastify = Fastify();
+await fastify.register(byokRelayPlugin, { relayUrl: process.env.RELAY_URL });
+await fastify.listen({ port: 3000 });
+```
+
+Or use the standalone route handler for explicit registration:
+
+```js
+const { createRelayRouteHandler } = require('@byok-relay/fastify');
+fastify.all('/relay/*', createRelayRouteHandler({ relayUrl: process.env.RELAY_URL }));
+```
+
+The plugin decorates `fastify.byokRelayClient` for server-side usage in other routes. Supports `allowedAppIds` allowlist, 30 s `AbortController` timeout, and `ByokRelayClient` with custom session-storage adapter.
+npm: https://www.npmjs.com/package/@byok-relay/fastify
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
