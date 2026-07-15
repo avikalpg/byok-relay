@@ -89,6 +89,32 @@ fastify.all('/relay/*', createRelayRouteHandler({ relayUrl: process.env.RELAY_UR
 
 The plugin decorates `fastify.byokRelayClient` for server-side usage in other routes. Includes `ByokRelayClient` with custom session-storage adapter support. [Full docs →](packages/fastify/README.md)
 
+## Elysia integration (`@byok-relay/elysia`)
+
+For **Bun-native servers running Elysia 1.x** (also works on Node.js 18+). `RELAY_URL` stays in `Bun.env` — the browser only calls your own Elysia server:
+
+```bash
+bun add @byok-relay/elysia elysia
+```
+
+```js
+const { Elysia } = require('elysia');
+const { byokRelayPlugin } = require('@byok-relay/elysia');
+
+const app = new Elysia()
+  .use(byokRelayPlugin({ relayUrl: Bun.env.RELAY_URL }))
+  .listen(3000);
+```
+
+Or use the standalone handler for explicit route registration:
+
+```js
+const { createRelayRouteHandler } = require('@byok-relay/elysia');
+app.all('/relay/*', createRelayRouteHandler({ relayUrl: Bun.env.RELAY_URL }));
+```
+
+Returns a native `Response` with the upstream `ReadableStream` piped directly — SSE streaming works out of the box on Bun. Includes `ByokRelayClient` with custom storage adapter support. [Full docs →](packages/elysia/README.md)
+
 ## The problem
 
 Browser apps can't call AI APIs directly:
