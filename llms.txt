@@ -69,6 +69,37 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 - CORS locked to allowed origins
 - HTTPS required in production
 
+## NestJS Integration (`@byok-relay/nest`)
+
+NestJS dynamic module, middleware, and injectable service for BYOK AI.
+`RELAY_URL` stays in `process.env` — the browser only calls your NestJS server.
+`npm install @byok-relay/nest`
+
+```js
+// app.module.js
+const { Module }          = require('@nestjs/common');
+const { ByokRelayModule, ByokRelayMiddleware } = require('@byok-relay/nest');
+
+class AppModule {
+  configure(consumer) {
+    consumer.apply(ByokRelayMiddleware).forRoutes('/relay');
+  }
+}
+Module({
+  imports: [ByokRelayModule.forRoot({ relayUrl: process.env.RELAY_URL })],
+})(AppModule);
+```
+
+Inject `ByokRelayService` for chat/streaming in any provider:
+```js
+const svc = /* injected ByokRelayService */;
+await svc.storeKey('openai', userKey);
+const reply = await svc.chat({ model: 'openai/gpt-4o', messages });
+for await (const chunk of svc.streamChat({ model: 'anthropic/claude-opus-4-5', messages })) { ... }
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/nest
+
 ## License
 
 Apache 2.0 — free to self-host or build on top of.
