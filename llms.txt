@@ -79,6 +79,22 @@ Apache 2.0 — free to self-host or build on top of.
 - Hosted relay: https://relay.byokrelay.com
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
 
+## Koa Middleware (`@byok-relay/koa`)
+
+Koa `async (ctx, next)` middleware and `@koa/router` router factory for BYOK AI.
+`RELAY_URL` stays in `process.env` — browser only calls your `/relay` Koa route.
+`npm install @byok-relay/koa`
+
+```js
+const Koa = require('koa');
+const { createByokRelayMiddleware, ByokRelayClient } = require('@byok-relay/koa');
+const app = new Koa();
+app.use(createByokRelayMiddleware({ pathPrefix: '/relay' }));
+app.listen(3000);
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/koa
+
 ## tRPC Integration (`@byok-relay/trpc`)
 
 tRPC v11 router adapter, context factory, and middleware for BYOK AI.

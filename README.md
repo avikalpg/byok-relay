@@ -19,6 +19,22 @@ https://relay.byokrelay.com
 
 Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
 
+## Koa Middleware (`@byok-relay/koa`)
+
+```bash
+npm install @byok-relay/koa
+```
+
+```js
+const Koa = require('koa');
+const { createByokRelayMiddleware } = require('@byok-relay/koa');
+const app = new Koa();
+app.use(createByokRelayMiddleware()); // intercepts /relay/*
+app.listen(3000);
+```
+
+Also: `createRelayRouter` for `@koa/router` integration + `ByokRelayClient` for browser/server usage.
+
 ## tRPC Integration (`@byok-relay/trpc`)
 
 Type-safe AI procedures with user-owned keys. `RELAY_URL` stays in `process.env` — the browser only calls your tRPC server.
