@@ -69,6 +69,58 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 - CORS locked to allowed origins
 - HTTPS required in production
 
+## LangChain.js Integration
+
+Drop `ByokRelayChatModel` into any LangChain chain, agent, or LCEL pipeline. Users supply their own AI provider keys; keys are AES-256-GCM encrypted at rest in the relay.
+
+```bash
+npm install @byok-relay/langchain @langchain/core
+```
+
+### ByokRelayChatModel (extends BaseChatModel)
+
+```js
+import { ByokRelayChatModel } from '@byok-relay/langchain';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+
+const model = new ByokRelayChatModel({
+  relayUrl:  process.env.RELAY_URL,
+  modelName: 'openai/gpt-4o',
+});
+await model.storeKey('openai', 'sk-...');
+const result = await model.invoke([new HumanMessage('Explain BYOK.')]);
+```
+
+### ByokRelayEmbeddings (extends Embeddings)
+
+```js
+import { ByokRelayEmbeddings } from '@byok-relay/langchain';
+import { MemoryVectorStore } from 'langchain/vectorstores/memory';
+
+const embeddings = new ByokRelayEmbeddings({ modelName: 'openai/text-embedding-3-small' });
+await embeddings.storeKey('openai', 'sk-...');
+const store = await MemoryVectorStore.fromTexts(['doc1', 'doc2'], [{}, {}], embeddings);
+```
+
+### Tool calling (bindTools)
+
+```js
+const modelWithTools = model.bindTools([weatherTool]);
+const result = await modelWithTools.invoke([new HumanMessage('Weather in Tokyo?')]);
+// result.tool_calls → [{ name: 'get_weather', args: { city: 'Tokyo' }, id: '...' }]
+```
+
+### Streaming (LCEL)
+
+```js
+const chain = prompt.pipe(model).pipe(new StringOutputParser());
+for await (const chunk of await chain.stream({ input: 'Hello' })) {
+  process.stdout.write(chunk);
+}
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/langchain
+
 ## License
 
 Apache 2.0 — free to self-host or build on top of.

@@ -19,6 +19,30 @@ https://relay.byokrelay.com
 
 Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
 
+## LangChain.js Integration
+
+Drop `ByokRelayChatModel` into any LangChain chain, agent, or RAG pipeline. Users supply their own keys; the relay stores them AES-256-GCM encrypted.
+
+```bash
+npm install @byok-relay/langchain @langchain/core
+```
+
+```js
+import { ByokRelayChatModel, ByokRelayEmbeddings } from '@byok-relay/langchain';
+import { HumanMessage } from '@langchain/core/messages';
+
+// Chat model — works with LCEL chains, agents, tool calling
+const model = new ByokRelayChatModel({ relayUrl: process.env.RELAY_URL, modelName: 'openai/gpt-4o' });
+await model.storeKey('openai', 'sk-...');           // user supplies key via settings UI
+const result = await model.invoke([new HumanMessage('Explain BYOK.')]);
+
+// Embeddings — drop into any LangChain vector store
+const embeddings = new ByokRelayEmbeddings({ modelName: 'openai/text-embedding-3-small' });
+const vectors = await embeddings.embedDocuments(['doc1', 'doc2']);
+```
+
+Supports: streaming, tool calling (`bindTools`), LCEL pipes, ReAct agents, RAG with vector stores.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
