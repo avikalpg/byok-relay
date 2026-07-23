@@ -43,6 +43,32 @@ const vectors = await embeddings.embedDocuments(['doc1', 'doc2']);
 
 Supports: streaming, tool calling (`bindTools`), LCEL pipes, ReAct agents, RAG with vector stores.
 
+## LlamaIndex.TS Integration
+
+Drop `ByokRelayLLM` into any LlamaIndex pipeline — RAG, query engines, ReActAgent. Users supply their own keys; the relay stores them AES-256-GCM encrypted.
+
+```bash
+npm install @byok-relay/llamaindex llamaindex
+```
+
+```js
+import { ByokRelayLLM, ByokRelayEmbedding } from '@byok-relay/llamaindex';
+import { VectorStoreIndex, Document } from 'llamaindex';
+
+// LLM — non-streaming + streaming + tool calling
+const llm = new ByokRelayLLM({ model: 'openai/gpt-4o' });
+await llm.storeKey('openai', 'sk-...');             // user supplies key via settings UI
+const response = await llm.chat({ messages: [{ role: 'user', content: 'Explain BYOK.' }] });
+
+// Embeddings — drop-in for VectorStoreIndex embedModel
+const embed = new ByokRelayEmbedding({ model: 'openai/text-embedding-3-small' });
+const index = await VectorStoreIndex.fromDocuments([new Document({ text: 'hello' })], { embedModel: embed });
+const engine = index.asQueryEngine({ llm });
+const result = await engine.query({ query: 'What does byok-relay do?' });
+```
+
+Supports: streaming (`for await`), tool calling (`withTools()`), ReActAgent, RAG with VectorStoreIndex.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:

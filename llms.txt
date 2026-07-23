@@ -121,6 +121,62 @@ for await (const chunk of await chain.stream({ input: 'Hello' })) {
 
 npm: https://www.npmjs.com/package/@byok-relay/langchain
 
+## LlamaIndex.TS Integration
+
+Drop `ByokRelayLLM` into any LlamaIndex pipeline — RAG, query engines, ReActAgent. Users supply their own AI provider keys; keys are AES-256-GCM encrypted at rest in the relay.
+
+```bash
+npm install @byok-relay/llamaindex llamaindex
+```
+
+### ByokRelayLLM (extends BaseLLM)
+
+```js
+import { ByokRelayLLM } from '@byok-relay/llamaindex';
+
+const llm = new ByokRelayLLM({
+  relayUrl: process.env.RELAY_URL,
+  model:    'openai/gpt-4o',
+});
+await llm.storeKey('openai', 'sk-...');
+const response = await llm.chat({ messages: [{ role: 'user', content: 'Explain BYOK.' }] });
+console.log(response.message.content);
+```
+
+### ByokRelayEmbedding (extends BaseEmbedding)
+
+```js
+import { ByokRelayEmbedding } from '@byok-relay/llamaindex';
+import { VectorStoreIndex, Document } from 'llamaindex';
+
+const embed = new ByokRelayEmbedding({ model: 'openai/text-embedding-3-small' });
+await embed.storeKey('openai', 'sk-...');
+const index = await VectorStoreIndex.fromDocuments(
+  [new Document({ text: 'byok-relay is an open-source BYOK AI relay.' })],
+  { embedModel: embed },
+);
+const engine = index.asQueryEngine({ llm });
+const result = await engine.query({ query: 'What does byok-relay do?' });
+```
+
+### Tool calling (withTools)
+
+```js
+const llmWithTools = llm.withTools([weatherTool]);
+const response = await llmWithTools.chat({ messages: [{ role: 'user', content: 'Weather in Tokyo?' }] });
+// response.message.options.toolCall → [{ name: 'get_weather', input: { city: 'Tokyo' }, id: '...' }]
+```
+
+### Streaming
+
+```js
+for await (const chunk of llm.stream({ messages: [{ role: 'user', content: 'Tell me a story.' }] })) {
+  process.stdout.write(chunk.delta);
+}
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/llamaindex
+
 ## License
 
 Apache 2.0 — free to self-host or build on top of.
