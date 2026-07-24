@@ -43,6 +43,44 @@ const vectors = await embeddings.embedDocuments(['doc1', 'doc2']);
 
 Supports: streaming, tool calling (`bindTools`), LCEL pipes, ReAct agents, RAG with vector stores.
 
+## OpenAI SDK — Drop-in Compatible Client
+
+Replace `new OpenAI({ apiKey })` with `new ByokRelayOpenAI(...)` — users' keys are stored **AES-256-GCM encrypted** in the relay. Your app never sees the raw key. All namespaces mirror the openai SDK exactly: `chat.completions`, `embeddings`, `images`, `models`, `audio`, `completions`.
+
+```bash
+npm install @byok-relay/openai
+```
+
+```js
+import { ByokRelayOpenAI } from '@byok-relay/openai';
+
+// Drop-in replacement for new OpenAI({ apiKey: ... })
+const client = new ByokRelayOpenAI({ relayUrl: process.env.RELAY_URL });
+
+// User stores their key once via your settings UI
+await client.storeKey('openai', userApiKey);
+
+// Use exactly like the openai SDK
+const completion = await client.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+
+// Streaming — identical interface
+const stream = await client.chat.completions.create({ model: 'gpt-4o', messages, stream: true });
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
+}
+
+// Multi-provider — prefix the model name
+const reply = await client.chat.completions.create({
+  model: 'anthropic/claude-3-5-sonnet-20241022',   // routes to Anthropic
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+```
+
+Supports: streaming, tool calling, embeddings, image generation, audio transcription/speech, legacy completions.
+
 ## LlamaIndex.TS Integration
 
 Drop `ByokRelayLLM` into any LlamaIndex pipeline — RAG, query engines, ReActAgent. Users supply their own keys; the relay stores them AES-256-GCM encrypted.

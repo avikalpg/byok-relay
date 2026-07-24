@@ -177,6 +177,61 @@ for await (const chunk of llm.stream({ messages: [{ role: 'user', content: 'Tell
 
 npm: https://www.npmjs.com/package/@byok-relay/llamaindex
 
+## OpenAI SDK — Drop-in Compatible Client
+
+Replace `new OpenAI({ apiKey })` with `new ByokRelayOpenAI(...)` — mirrors the openai npm package interface exactly. Users' API keys are stored AES-256-GCM encrypted in the relay; your app never sees the raw key.
+
+```bash
+npm install @byok-relay/openai
+```
+
+### ByokRelayOpenAI
+
+```js
+import { ByokRelayOpenAI } from '@byok-relay/openai';
+
+// Drop-in replacement for new OpenAI({ apiKey: ... })
+const client = new ByokRelayOpenAI({ relayUrl: process.env.RELAY_URL });
+
+// Store user's API key once (BYOK step — from your settings UI)
+await client.storeKey('openai', userApiKey);
+
+// Use exactly like the openai SDK
+const completion = await client.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+console.log(completion.choices[0].message.content);
+
+// Streaming — identical interface to openai SDK
+const stream = await client.chat.completions.create({ model: 'gpt-4o', messages, stream: true });
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
+}
+
+// Multi-provider: prefix model name with provider
+const reply = await client.chat.completions.create({
+  model: 'anthropic/claude-3-5-sonnet-20241022',
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+
+// Embeddings
+const result = await client.embeddings.create({
+  model: 'text-embedding-3-small',
+  input: 'The food was great!',
+});
+```
+
+### Supported namespaces
+- `chat.completions.create(params)` — streaming + non-streaming
+- `completions.create(params)` — legacy non-chat
+- `embeddings.create(params)` — batch or single input
+- `images.generate(params)` / `images.edit(params)`
+- `models.list()` / `models.retrieve(model)`
+- `audio.transcriptions.create(params)` / `audio.speech.create(params)`
+
+npm: https://www.npmjs.com/package/@byok-relay/openai
+
 ## License
 
 Apache 2.0 — free to self-host or build on top of.
