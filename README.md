@@ -250,7 +250,7 @@ export ALLOWED_ORIGINS=https://your-app.example.com  # or * for dev
 npx byok-relay
 ```
 
-> ⚠️ **Persistence:** `ENCRYPTION_SECRET` set via `export` is ephemeral (session only). If you restart the server without the same secret, it cannot decrypt previously stored keys and all users will need to re-register their keys. Save it to a file (e.g. `.env`) or your shell profile for persistence.
+> ⚠️ **Persistence:** `ENCRYPTION_SECRET` set via `export` is ephemeral (session only). If you restart the server without the same secret, it cannot decrypt previously stored keys and all users will need to re-register their keys. Save it to a file (e.g. `.env`) or your shell profile for persistence. If you also customize `ENCRYPTION_SALT` (default: `byok-relay-salt`), save and keep that unchanged too — both values must match to decrypt existing keys.
 
 **Option B — global install**
 
@@ -263,7 +263,7 @@ export ALLOWED_ORIGINS=https://your-app.example.com
 byok-relay
 ```
 
-> ⚠️ **Persistence:** Same caveat as Option A — store `ENCRYPTION_SECRET` somewhere durable (e.g. a `.env` file or your shell's `.bashrc`/`.zshrc`) so restarts don't invalidate existing stored keys.
+> ⚠️ **Persistence:** Same caveat as Option A — store `ENCRYPTION_SECRET` somewhere durable (e.g. a `.env` file or your shell's `.bashrc`/`.zshrc`) so restarts don't invalidate existing stored keys. This applies to `ENCRYPTION_SALT` too if you've customized it.
 
 **Option C — clone & run**
 ```bash
