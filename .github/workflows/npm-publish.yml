@@ -34,13 +34,20 @@ jobs:
         id: version_check
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view byok-relay@$PKG_VERSION version 2>/dev/null || echo "")
+          set +e
+          PUBLISHED_OUTPUT=$(npm view byok-relay@$PKG_VERSION version 2>&1)
+          VIEW_EXIT_CODE=$?
+          set -e
           echo "pkg_version=$PKG_VERSION" >> $GITHUB_OUTPUT
-          if [ -z "$PUBLISHED" ]; then
-            echo "should_publish=true" >> $GITHUB_OUTPUT
-          else
+          if [ $VIEW_EXIT_CODE -eq 0 ]; then
             echo "should_publish=false" >> $GITHUB_OUTPUT
             echo "Version $PKG_VERSION already published — skipping."
+          elif echo "$PUBLISHED_OUTPUT" | grep -q "E404"; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "npm view failed for a reason other than 404 (registry outage, rate limit, auth failure, etc). Failing closed instead of risking an unintended publish."
+            echo "$PUBLISHED_OUTPUT"
+            exit 1
           fi
 
       - name: Publish
