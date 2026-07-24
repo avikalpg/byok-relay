@@ -26,9 +26,11 @@
     "express",
     "self-hosted",
     "managed-relay",
+    "managed-service",
     "ai-gateway",
     "no-backend",
     "frontend-only",
+    "frontend-only-ai",
     "react",
     "react-native",
     "vite",
@@ -39,7 +41,10 @@
     "cors-proxy",
     "key-management",
     "serverless-ai",
-    "no-server"
+    "no-server",
+    "byok-proxy-service",
+    "ai-agent-integration",
+    "llm-relay-for-agents"
   ],
   "author": "Avikalp Gupta <avikalpgupta@gmail.com>",
   "repository": {
