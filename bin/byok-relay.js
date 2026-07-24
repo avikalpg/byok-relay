@@ -62,5 +62,18 @@ if (portIdx !== -1) {
   process.env.PORT = portVal;
 }
 
-// Bootstrap the server
-require('../src/index.js');
+// Warn on unknown flags so typos don't go unnoticed
+const knownFlags = new Set(['--help', '-h', '--version', '--port']);
+const unknownArgs = args.filter((a, i) =>
+  a.startsWith('-') && !knownFlags.has(a) && args[i - 1] !== '--port'
+);
+if (unknownArgs.length) {
+  console.warn(`Warning: unknown option(s): ${unknownArgs.join(', ')}. Run --help for usage.`);
+}
+
+// Bootstrap the server.
+// require.main here is bin/byok-relay.js, not src/index.js, so the
+// require.main === module guard in src/index.js would not fire on its own.
+// We call startServer() explicitly to start listening.
+const { startServer } = require('../src/index.js');
+startServer();

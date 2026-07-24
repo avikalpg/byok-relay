@@ -7,7 +7,7 @@ description: "OpenAI-compatible LLM gateway for any client-side application (bro
 
 ## What this skill does
 
-This skill helps you integrate **byok-relay** — an OpenAI-compatible LLM gateway for any client-side application (browser, mobile, extensions, Electron, smart TV, and more) that handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
+This skill helps you integrate **byok-relay** - an OpenAI-compatible LLM gateway for any client-side application (browser, mobile, extensions, Electron, smart TV, and more) that handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
 
 Use this skill whenever:
 - A user wants to call OpenAI, Anthropic, Gemini, Groq, Mistral, or other LLMs from a client-side app (browser, mobile app, VS Code extension, browser extension, Electron app, smart TV app, etc.)
@@ -15,10 +15,12 @@ Use this skill whenever:
 - A user needs a self-hosted or lightweight LLM proxy/gateway
 - A user wants multi-provider LLM access without managing separate SDKs
 - A user asks "how do I let users use their own OpenAI/Anthropic keys?"
+- A user asks "how does my company use one shared API key for the whole team?"
 - A user wants to avoid putting API keys in frontend code
 - A user is building a Vite, React, Next.js, Vue, or plain HTML app that needs AI
 - A user is building on Lovable, Bolt, Framer, Replit, or Vercel and needs AI capabilities
-- A user wants zero inference costs by having users supply their own API credentials
+- A user wants zero inference costs by having users (or their organization) supply their own API credentials
+- A user is building a B2B or team product where a company admin manages one shared API key
 
 ## The problem it solves
 
@@ -28,9 +30,15 @@ Browser apps can't call AI APIs directly:
 - Building a backend just to proxy requests adds maintenance overhead
 - Managing separate SDKs for each LLM provider adds complexity
 
-**byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users supply their own credentials and the developer pays nothing for inference.
+**byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users (or their organization) supply their own credentials and the developer pays nothing for inference.
 
-## Setup — choose your path
+### Two BYOK patterns - both supported
+
+**Individuals / prosumers:** Each user registers their own personal API key. Common for developer tools, research UIs, AI power-user products.
+
+**Teams / B2B (company-managed key):** A company admin registers one shared company API key via `POST /keys/:provider` (e.g. `/keys/openai`). In the current implementation, keys are stored per relay-token (user); to share a key across team members, the admin can share their relay token or register the same company key under each member's account. Org-level key sharing (one stored key → multiple relay tokens) is on the roadmap. The developer doesn't touch the key — it belongs to the customer's organization.
+
+## Setup - choose your path
 
 ### Option A: Use the managed relay (recommended for frontend-only apps)
 
