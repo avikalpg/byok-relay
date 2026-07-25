@@ -21,12 +21,33 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http   = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const os     = require('node:os');
 const path   = require('node:path');
 const fs     = require('node:fs');
 
 const { createMockProvider } = require('./mock-provider');
+
+function createSelfSignedCert(tmpDir) {
+  const keyPath = path.join(tmpDir, 'key.pem');
+  const certPath = path.join(tmpDir, 'cert.pem');
+  const openssl = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',
+    '-subj', '/CN=localtest.me',
+    '-addext', 'subjectAltName=DNS:localtest.me,DNS:*.localtest.me',
+    '-keyout', keyPath,
+    '-out', certPath,
+  ], { encoding: 'utf8' });
+
+  if (openssl.status !== 0) {
+    throw new Error(`openssl failed to create E2E TLS certificate: ${openssl.stderr || openssl.stdout}`);
+  }
+
+  return {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+  };
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // HTTP helpers
@@ -141,6 +162,8 @@ describe('byok-relay — example product end-to-end', () => {
   let relayProc;      // relay child process
   let relayPort;
   let tmpDb;          // path to ephemeral SQLite file
+  let tmpCertDir;     // path to ephemeral TLS cert directory
+  let mockBaseUrl;    // HTTPS URL used by the relay to reach the mock provider
 
   // Shared session state — persists across tests within this suite,
   // exactly as a frontend app would persist state in localStorage
@@ -151,9 +174,17 @@ describe('byok-relay — example product end-to-end', () => {
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   before(async () => {
-    // 1. Start the mock AI provider on a random port
-    mock = createMockProvider();
+    // 1. Start the mock AI provider on a random port.
+    // The relay requires HTTPS openai-compatible base URLs. Use a self-signed
+    // localtest.me endpoint so the test stays local while still exercising the
+    // HTTPS path.
+    tmpCertDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-e2e-cert-'));
+    mock = createMockProvider({
+      tls: createSelfSignedCert(tmpCertDir),
+      host: '::',
+    });
     mockPort = await mock.start();
+    mockBaseUrl = `https://localtest.me:${mockPort}`;
 
     // 2. Reserve a free port for the relay
     relayPort = await getFreePort();
@@ -173,6 +204,7 @@ describe('byok-relay — example product end-to-end', () => {
           DB_PATH:           tmpDb,
           ALLOWED_ORIGINS:   '*',
           NODE_ENV:          'test',
+          NODE_TLS_REJECT_UNAUTHORIZED: '0',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -200,6 +232,7 @@ describe('byok-relay — example product end-to-end', () => {
     for (const suffix of ['', '-wal', '-shm']) {
       try { fs.unlinkSync(tmpDb + suffix); } catch { /* ok if already gone */ }
     }
+    if (tmpCertDir) fs.rmSync(tmpCertDir, { recursive: true, force: true });
   });
 
   // ── 1. Health check ─────────────────────────────────────────────────────
@@ -303,7 +336,7 @@ describe('byok-relay — example product end-to-end', () => {
       chatBody,
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': `http://127.0.0.1:${mockPort}`,
+        'x-relay-base-url': mockBaseUrl,
       },
     );
 
@@ -332,7 +365,7 @@ describe('byok-relay — example product end-to-end', () => {
       { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hostile test' }] },
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': `http://127.0.0.1:${mockPort}`,
+        'x-relay-base-url': mockBaseUrl,
         'Authorization':    HOSTILE_KEY,   // ← attacker-supplied, must be ignored
       },
     );
@@ -367,7 +400,7 @@ describe('byok-relay — example product end-to-end', () => {
       chatBody,
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': `http://127.0.0.1:${mockPort}`,
+        'x-relay-base-url': mockBaseUrl,
       },
     );
 

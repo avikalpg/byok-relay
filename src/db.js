@@ -69,7 +69,7 @@ function _migrateTokenColumn() {
   if (!cols.includes('token')) return; // no legacy column — already migrated
 
   // Idempotent: if a previous run crashed after ALTER TABLE but before the
-  // table rebuild, token_hash already exists.  Skip the ALTER in that case.
+  // table rebuild, token_hash already exists. Skip the ALTER in that case.
   const alreadyHasTokenHash = cols.includes('token_hash');
 
   // Wrap everything (DDL + DML + rebuild) in a single transaction so that a
@@ -80,7 +80,8 @@ function _migrateTokenColumn() {
       db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
     }
 
-    // 2. Backfill — only rows whose token_hash is still NULL (idempotent)
+    // 2. Backfill hash values into the new column. Only rows whose token_hash
+    //    is still NULL need updating, which keeps the migration idempotent.
     const hmacKey = _getHmacKey();
     const rows = db.prepare('SELECT id, token FROM users WHERE token_hash IS NULL').all();
     const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
@@ -90,6 +91,7 @@ function _migrateTokenColumn() {
 
     // 3. Rebuild the table without the old `token` column
     //    (SQLite does not support DROP COLUMN before 3.35.0)
+    //    All statements run atomically — no window where `users` is absent.
     db.exec(`
       CREATE TABLE users_new (
         id TEXT PRIMARY KEY,
@@ -126,6 +128,10 @@ function getEncryptionKey() {
   _encryptionKey = crypto.scryptSync(secret, salt, 32);
   return _encryptionKey;
 }
+
+// Warm the cache eagerly at module load (dotenv is guaranteed to have run
+// before this module is imported — see src/index.js).
+getEncryptionKey();
 
 function encryptApiKey(plaintext) {
   const key = getEncryptionKey();
@@ -205,7 +211,9 @@ function createUser(appId) {
  */
 function getUserByToken(token) {
   const token_hash = hashToken(token);
-  return db.prepare('SELECT * FROM users WHERE token_hash = ?').get(token_hash);
+  return db
+    .prepare('SELECT id, app_id, created_at FROM users WHERE token_hash = ?')
+    .get(token_hash);
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
