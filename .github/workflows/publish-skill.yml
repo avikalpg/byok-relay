@@ -21,6 +21,9 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -41,7 +44,10 @@ jobs:
       - name: Read current version
         id: current_version
         run: |
-          if [ -f skills/byok-relay/VERSION ]; then
+          LATEST_TAG=$(git tag --list 'skill-v*' --sort=-v:refname | head -n 1)
+          if [ -n "$LATEST_TAG" ]; then
+            VERSION="${LATEST_TAG#skill-v}"
+          elif [ -f skills/byok-relay/VERSION ]; then
             VERSION=$(cat skills/byok-relay/VERSION)
           else
             VERSION="1.0.0"
@@ -119,14 +125,6 @@ jobs:
             --name "BYOK Relay Builder" \
             --version ${{ steps.new_version.outputs.version }} \
             --changelog "${{ steps.changelog.outputs.text }}"
-      
-      - name: Commit version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add skills/byok-relay/VERSION
-          git commit -m "chore: bump skill version to ${{ steps.new_version.outputs.version }}"
-          git push
       
       - name: Create Git tag
         run: |
