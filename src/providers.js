@@ -14,6 +14,7 @@
  *   the base URL as a header `x-relay-base-url`.
  */
 const dns = require('node:dns').promises;
+const https = require('node:https');
 const net = require('node:net');
 const fetch = require('node-fetch');
 
@@ -65,6 +66,30 @@ function isBlockedIp(ipStr) {
   // Use `>>> 0` to coerce the bitwise-AND result back to an unsigned 32-bit
   // integer before comparing, because JS `&` returns a signed 32-bit value.
   return BLOCKED_CIDRS.some(({ baseInt, mask }) => ((ipInt & mask) >>> 0) === baseInt);
+}
+
+function stripIpv6Brackets(hostname) {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
+function isBlockedAddress(address, family) {
+  if (family === 4) return isBlockedIp(address);
+  if (family === 6) return isBlockedIpv6(address);
+  return false;
+}
+
+function createPinnedHttpsAgent({ address, family }) {
+  return new https.Agent({
+    lookup(_hostname, options, callback) {
+      if (options?.all) {
+        callback(null, [{ address, family }]);
+        return;
+      }
+      callback(null, address, family);
+    },
+  });
 }
 
 // ── IPv6 blocked ranges ──────────────────────────────────────────────────────
@@ -177,29 +202,24 @@ async function validateAndNormaliseBaseUrl(raw) {
   }
 
   const hostname = parsed.hostname;
+  const ipv6Bare = stripIpv6Brackets(hostname);
+  let approvedAddress;
 
-  // Block raw IPv4 addresses in private / link-local / reserved ranges
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
-    if (isBlockedIp(hostname)) {
+  // Block raw IP addresses in private / link-local / reserved ranges.
+  const literalFamily = net.isIP(ipv6Bare);
+  if (literalFamily !== 0) {
+    if (isBlockedAddress(ipv6Bare, literalFamily)) {
       throw new RelayUrlValidationError(
         'x-relay-base-url must not target a private or reserved IP address',
       );
     }
+    approvedAddress = { address: ipv6Bare, family: literalFamily };
   }
 
   // Block IPv6 literals.  WHATWG URL preserves brackets in hostname
   // (e.g. new URL('https://[::1]').hostname === '[::1]'), so strip them
-  // before passing to the parser.
-  const ipv6Bare = hostname.startsWith('[') && hostname.endsWith(']')
-    ? hostname.slice(1, -1)
-    : hostname;
-  if (ipv6Bare.includes(':')) {
-    if (isBlockedIpv6(ipv6Bare)) {
-      throw new RelayUrlValidationError(
-        'x-relay-base-url must not target a private or reserved IP address',
-      );
-    }
-  }
+  // before passing to the parser. The literalFamily branch above handles both
+  // IPv4 and IPv6 literals.
 
   // Block localhost by name.
   // Strip trailing dot first: 'localhost.' parses as-is in Node but still
@@ -212,7 +232,7 @@ async function validateAndNormaliseBaseUrl(raw) {
   // Hostname SSRF protection: reject DNS names that resolve to private,
   // loopback, link-local, reserved, or IMDS ranges. IP literals were already
   // checked above, so only perform resolver work for real hostnames.
-  if (net.isIP(ipv6Bare) === 0 && !/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+  if (literalFamily === 0) {
     let addresses;
     try {
       addresses = await dns.lookup(hostForNameCheck, { all: true });
@@ -225,20 +245,24 @@ async function validateAndNormaliseBaseUrl(raw) {
     }
 
     for (const { address, family } of addresses) {
-      const blocked = family === 4
-        ? isBlockedIp(address)
-        : family === 6 && isBlockedIpv6(address);
-      if (blocked) {
+      if (isBlockedAddress(address, family)) {
         throw new RelayUrlValidationError(
           'x-relay-base-url must not resolve to a private or reserved IP address',
         );
       }
     }
+
+    // Pin the actual request to one address that passed validation so a later
+    // DNS answer cannot rebind the approved hostname to a private target.
+    approvedAddress = addresses[0];
   }
 
-  // Return only the origin (scheme + host + port) — strip any path the
-  // client may have embedded to prevent path-injection attacks.
-  return parsed.origin;
+  // Return only the origin (scheme + host + port) and a pinned agent — strip
+  // any path the client may have embedded to prevent path-injection attacks.
+  return {
+    origin: parsed.origin,
+    agent: createPinnedHttpsAgent(approvedAddress),
+  };
 }
 
 function getE2eBaseUrlOverride(extraHeaders) {
@@ -347,6 +371,7 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
   let baseUrl = config.baseUrl;
+  const fetchOptions = {};
 
   // For openai-compatible, the base URL comes from the request header.
   // Validate and normalise it to prevent SSRF attacks.
@@ -356,14 +381,22 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
       throw new RelayUrlValidationError('x-relay-base-url header is required for openai-compatible provider');
     }
     // validateAndNormaliseBaseUrl throws on any policy violation and returns
-    // url.origin (scheme + host + port), stripping any path the client embedded.
-    baseUrl = await validateAndNormaliseBaseUrl(rawBaseUrl);
+    // url.origin (scheme + host + port), stripping any path the client embedded,
+    // plus a custom agent pinned to the DNS result that passed validation.
+    const validatedBaseUrl = await validateAndNormaliseBaseUrl(rawBaseUrl);
+    baseUrl = validatedBaseUrl.origin;
+    fetchOptions.agent = validatedBaseUrl.agent;
+    fetchOptions.redirect = 'manual';
 
     // E2E tests need a loopback HTTPS mock provider, but production requests
     // must reject hostnames such as localtest.me that resolve to loopback. Keep
     // the public header validation path intact, then swap in the mock base URL
     // only when the test runner supplies a one-off process-local token.
-    baseUrl = getE2eBaseUrlOverride(extraHeaders) || baseUrl;
+    const e2eBaseUrl = getE2eBaseUrlOverride(extraHeaders);
+    if (e2eBaseUrl) {
+      baseUrl = e2eBaseUrl;
+      delete fetchOptions.agent;
+    }
   }
 
   const headers = config.buildHeaders(apiKey, extraHeaders);
@@ -374,6 +407,7 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     : `${baseUrl}${path}`;
 
   const response = await fetch(url, {
+    ...fetchOptions,
     method,
     headers,
     body: method !== 'GET' ? JSON.stringify(body) : undefined,
