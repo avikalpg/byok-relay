@@ -165,6 +165,16 @@ describe('byok-relay — example product end-to-end', () => {
   let tmpCertDir;     // path to ephemeral TLS cert directory
   let mockBaseUrl;    // HTTPS URL used by the relay to reach the mock provider
 
+  const SAFE_E2E_BASE_URL = 'https://example.com';
+  const E2E_BASE_URL_OVERRIDE_TOKEN = `e2e-${process.pid}-${Date.now()}`;
+
+  function e2eRelayHeaders() {
+    return {
+      'x-relay-base-url': SAFE_E2E_BASE_URL,
+      'x-relay-e2e-base-url-token': E2E_BASE_URL_OVERRIDE_TOKEN,
+    };
+  }
+
   // Shared session state — persists across tests within this suite,
   // exactly as a frontend app would persist state in localStorage
   let relayToken;
@@ -205,6 +215,8 @@ describe('byok-relay — example product end-to-end', () => {
           ALLOWED_ORIGINS:   '*',
           NODE_ENV:          'test',
           NODE_TLS_REJECT_UNAUTHORIZED: '0',
+          E2E_OPENAI_COMPATIBLE_BASE_URL: mockBaseUrl,
+          E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN: E2E_BASE_URL_OVERRIDE_TOKEN,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -336,7 +348,7 @@ describe('byok-relay — example product end-to-end', () => {
       chatBody,
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': mockBaseUrl,
+        ...e2eRelayHeaders(),
       },
     );
 
@@ -365,7 +377,7 @@ describe('byok-relay — example product end-to-end', () => {
       { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hostile test' }] },
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': mockBaseUrl,
+        ...e2eRelayHeaders(),
         'Authorization':    HOSTILE_KEY,   // ← attacker-supplied, must be ignored
       },
     );
@@ -400,7 +412,7 @@ describe('byok-relay — example product end-to-end', () => {
       chatBody,
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': mockBaseUrl,
+        ...e2eRelayHeaders(),
       },
     );
 
@@ -458,6 +470,7 @@ describe('byok-relay — example product end-to-end', () => {
     ['RFC-1918 class C (192.168.x.x)','http://192.168.1.1/v1/chat'],
     ['Alibaba Cloud IMDS',            'http://100.100.100.200/latest/meta-data'],
     ['localhost by hostname',         'http://localhost:9999/v1/chat'],
+    ['DNS hostname resolving to loopback', 'https://localtest.me:9999/v1/chat'],
     ['non-HTTPS external URL',        'http://api.openai.com/v1/chat'],
     ['embedded credentials in URL',   'https://user:pass@api.openai.com/v1/chat'],
   ];

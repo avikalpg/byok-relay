@@ -13,6 +13,8 @@
  *   the user stores their key under a name like `openrouter` and passes
  *   the base URL as a header `x-relay-base-url`.
  */
+const dns = require('node:dns').promises;
+const net = require('node:net');
 const fetch = require('node-fetch');
 
 // ── SSRF protection ──────────────────────────────────────────────────────────
@@ -155,9 +157,10 @@ class RelayUrlValidationError extends Error {
  *  5. IPv6 hostname must not fall in a blocked range (::1, fe80::/10,
  *     fc00::/7, ::ffff:0:0/96).
  *  6. 'localhost' (and *.localhost) is blocked by name.
- *  7. Normalised to url.origin — path/query stripped to prevent path-injection.
+ *  7. Hostnames must resolve only to public IP ranges.
+ *  8. Normalised to url.origin — path/query stripped to prevent path-injection.
  */
-function validateAndNormaliseBaseUrl(raw) {
+async function validateAndNormaliseBaseUrl(raw) {
   let parsed;
   try {
     parsed = new URL(raw);
@@ -206,9 +209,48 @@ function validateAndNormaliseBaseUrl(raw) {
     throw new RelayUrlValidationError('x-relay-base-url must not target localhost');
   }
 
+  // Hostname SSRF protection: reject DNS names that resolve to private,
+  // loopback, link-local, reserved, or IMDS ranges. IP literals were already
+  // checked above, so only perform resolver work for real hostnames.
+  if (net.isIP(ipv6Bare) === 0 && !/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+    let addresses;
+    try {
+      addresses = await dns.lookup(hostForNameCheck, { all: true });
+    } catch {
+      throw new RelayUrlValidationError('x-relay-base-url hostname could not be resolved safely');
+    }
+
+    if (!addresses.length) {
+      throw new RelayUrlValidationError('x-relay-base-url hostname could not be resolved safely');
+    }
+
+    for (const { address, family } of addresses) {
+      const blocked = family === 4
+        ? isBlockedIp(address)
+        : family === 6 && isBlockedIpv6(address);
+      if (blocked) {
+        throw new RelayUrlValidationError(
+          'x-relay-base-url must not resolve to a private or reserved IP address',
+        );
+      }
+    }
+  }
+
   // Return only the origin (scheme + host + port) — strip any path the
   // client may have embedded to prevent path-injection attacks.
   return parsed.origin;
+}
+
+function getE2eBaseUrlOverride(extraHeaders) {
+  if (process.env.NODE_ENV !== 'test') return null;
+
+  const overrideBaseUrl = process.env.E2E_OPENAI_COMPATIBLE_BASE_URL;
+  const overrideToken = process.env.E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN;
+  if (!overrideBaseUrl || !overrideToken) return null;
+
+  return extraHeaders['x-relay-e2e-base-url-token'] === overrideToken
+    ? overrideBaseUrl
+    : null;
 }
 
 const PROVIDERS = {
@@ -315,7 +357,13 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     }
     // validateAndNormaliseBaseUrl throws on any policy violation and returns
     // url.origin (scheme + host + port), stripping any path the client embedded.
-    baseUrl = validateAndNormaliseBaseUrl(rawBaseUrl);
+    baseUrl = await validateAndNormaliseBaseUrl(rawBaseUrl);
+
+    // E2E tests need a loopback HTTPS mock provider, but production requests
+    // must reject hostnames such as localtest.me that resolve to loopback. Keep
+    // the public header validation path intact, then swap in the mock base URL
+    // only when the test runner supplies a one-off process-local token.
+    baseUrl = getE2eBaseUrlOverride(extraHeaders) || baseUrl;
   }
 
   const headers = config.buildHeaders(apiKey, extraHeaders);
