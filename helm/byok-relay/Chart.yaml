@@ -1,0 +1,20 @@
+apiVersion: v2
+name: byok-relay
+description: A Helm chart for deploying byok-relay, the BYOK AI relay for frontend apps.
+type: application
+version: 0.1.0
+appVersion: "1.1.0"
+home: https://byokrelay.com
+sources:
+  - https://github.com/avikalpg/byok-relay
+keywords:
+  - byok
+  - ai-gateway
+  - llm
+  - relay
+  - self-hosted
+maintainers:
+  - name: Avikalp Gupta
+    email: avikalpgupta@gmail.com
+annotations:
+  artifacthub.io/license: Apache-2.0

@@ -26,6 +26,27 @@ If an AI agent (Claude Code, Lovable, Bolt, Replit, Cursor, Devin, Emergent) is 
 - You need model routing across providers (use OpenRouter)
 - You need self-hosted proxy for a backend team (use LiteLLM)
 
+## Kubernetes / Helm
+
+Use the in-repo chart at `helm/byok-relay` for Kubernetes deployments. It provides Deployment, Service, optional Ingress, health probes, Secret wiring, and a persistent SQLite PVC mounted at `/data`.
+
+Minimal install pattern:
+
+```bash
+kubectl create secret generic byok-relay-secrets \
+  --from-literal=ENCRYPTION_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=TOKEN_HMAC_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=ENCRYPTION_SALT="$(openssl rand -hex 32)" \
+  --from-literal=APP_SECRET="$(openssl rand -hex 32)"
+
+helm install byok-relay ./helm/byok-relay \
+  --set secrets.create=false \
+  --set secrets.existingSecret=byok-relay-secrets \
+  --set config.allowedOrigins=https://your-app.example.com
+```
+
+Keep `replicaCount: 1` while using SQLite. Override `image.repository` and `image.tag` if you publish your own container image.
+
 ## Quickstart (60 seconds)
 
 ```bash
