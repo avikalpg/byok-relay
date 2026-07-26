@@ -189,6 +189,25 @@ Content-Type: application/json
 { "model": "...", "messages": [...] }
 ```
 
+## Kubernetes / Helm
+
+For Kubernetes deployments, use the Helm chart in [`helm/byok-relay`](helm/byok-relay):
+
+```bash
+kubectl create secret generic byok-relay-secrets \
+  --from-literal=ENCRYPTION_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=TOKEN_HMAC_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=ENCRYPTION_SALT="$(openssl rand -hex 32)" \
+  --from-literal=APP_SECRET="$(openssl rand -hex 32)"
+
+helm install byok-relay ./helm/byok-relay \
+  --set secrets.create=false \
+  --set secrets.existingSecret=byok-relay-secrets \
+  --set config.allowedOrigins=https://your-app.example.com
+```
+
+The chart includes Deployment, Service, optional Ingress, health probes, Secret wiring, and a persistent SQLite PVC mounted at `/data`. Keep one replica for SQLite-backed deployments.
+
 ## Deploy in one click
 
 The fastest way to get byok-relay running is via Vercel:

@@ -1,0 +1,117 @@
+# Default values for byok-relay.
+# See README.md for production guidance.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/avikalpg/byok-relay
+  pullPolicy: IfNotPresent
+  tag: "" # Defaults to .Chart.AppVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+# Public ingress for the relay API.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: byok-relay.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources: {}
+#  requests:
+#    cpu: 100m
+#    memory: 128Mi
+#  limits:
+#    cpu: 500m
+#    memory: 512Mi
+
+livenessProbe:
+  enabled: true
+  path: /health
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  path: /health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Non-secret runtime config.
+config:
+  nodeEnv: production
+  port: "3000"
+  # Comma-separated list. Use a specific domain in production.
+  allowedOrigins: "*"
+  # Mounted inside the persistent volume by default.
+  dbPath: /data/relay.db
+
+# Secret config.
+# Production recommendation: create a Kubernetes Secret outside Helm and set existingSecret.
+# Required keys in existingSecret: ENCRYPTION_SECRET.
+# Optional keys: TOKEN_HMAC_SECRET, ENCRYPTION_SALT, APP_SECRET.
+secrets:
+  create: true
+  existingSecret: ""
+  encryptionSecret: "" # Required when secrets.create=true and existingSecret is empty
+  tokenHmacSecret: ""
+  encryptionSalt: ""
+  appSecret: ""
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  storageClass: ""
+  existingClaim: ""
+  annotations: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+extraEnv: []
+# - name: LOG_LEVEL
+#   value: info
+
+extraVolumes: []
+extraVolumeMounts: []
