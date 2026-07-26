@@ -297,6 +297,21 @@ function getE2eBaseUrlOverride(extraHeaders) {
  * @param {string} provider - Provider name from PROVIDERS
  * @param {string} path - Forward path starting with '/'
  */
+function safeDecodePath(path) {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+function normalizeProviderPath(path) {
+  const withLeadingSlash = path.startsWith('/') ? path : `/${path}`;
+  const decodedPath = safeDecodePath(withLeadingSlash);
+  const normalizedPath = nodePath.posix.normalize(decodedPath);
+  return normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+}
+
 function isPathAllowed(provider, path) {
   const config = PROVIDERS[provider];
   if (!config) return false;
@@ -308,9 +323,12 @@ function isPathAllowed(provider, path) {
   // Normalize the path to collapse dot-segments before prefix matching.
   // This prevents traversal payloads like '/v1/chat/completions/../files'
   // from bypassing the allowlist by starting with an allowed prefix.
-  const normalizedPath = nodePath.posix.normalize(path);
+  const normalizedPath = normalizeProviderPath(path);
 
-  return allowed.some(prefix => normalizedPath === prefix || normalizedPath.startsWith(prefix + '/') || normalizedPath.startsWith(prefix + '?'));
+  return allowed.some(prefix => {
+    const normalizedPrefix = normalizeProviderPath(prefix);
+    return normalizedPath === normalizedPrefix || normalizedPath.startsWith(normalizedPrefix + '/') || normalizedPath.startsWith(normalizedPrefix + '?');
+  });
 }
 
 const PROVIDERS = {
@@ -460,6 +478,7 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
 
   let baseUrl = config.baseUrl;
   const fetchOptions = {};
+  const e2eBaseUrl = getE2eBaseUrlOverride(extraHeaders);
 
   // For openai-compatible, the base URL comes from the request header.
   // Validate and normalise it to prevent SSRF attacks.
@@ -480,11 +499,14 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     // must reject hostnames such as localtest.me that resolve to loopback. Keep
     // the public header validation path intact, then swap in the mock base URL
     // only when the test runner supplies a one-off process-local token.
-    const e2eBaseUrl = getE2eBaseUrlOverride(extraHeaders);
     if (e2eBaseUrl) {
       baseUrl = e2eBaseUrl;
       delete fetchOptions.agent;
     }
+  } else if (e2eBaseUrl) {
+    // E2E tests may route built-in providers to the local mock server so
+    // allowlist smoke tests never contact real vendor APIs.
+    baseUrl = e2eBaseUrl;
   }
 
   const headers = config.buildHeaders(apiKey, extraHeaders);
@@ -506,4 +528,4 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
 
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
-module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl, isPathAllowed };
+module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl, isPathAllowed, normalizeProviderPath };

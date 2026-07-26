@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
-const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed } = require('./providers');
+const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
@@ -196,7 +196,8 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   // A stolen token should not be usable to probe non-inference endpoints.
   const { provider } = req.params;
   if (SUPPORTED_PROVIDERS.includes(provider)) {
-    const forwardPath = '/' + (req.params[0] || '');
+    const forwardPath = normalizeProviderPath('/' + (req.params[0] || ''));
+    req.forwardPath = forwardPath;
     if (!isPathAllowed(provider, forwardPath)) {
       return res.status(403).json({
         error: `Path "${forwardPath}" is not permitted for provider "${provider}". Only inference endpoints are allowed.`,
@@ -210,8 +211,8 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
-  // Build the path to forward (everything after /relay/:provider)
-  const forwardPath = '/' + (req.params[0] || '');
+  // Reuse the normalized path that passed the allowlist check.
+  const forwardPath = req.forwardPath || normalizeProviderPath('/' + (req.params[0] || ''));
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {

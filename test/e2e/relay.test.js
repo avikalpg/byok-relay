@@ -231,6 +231,15 @@ describe('byok-relay — example product end-to-end', () => {
     };
   }
 
+  async function ensureProviderKey(provider) {
+    const r = await request(
+      relayPort, 'POST', `/keys/${provider}`,
+      { key: FAKE_API_KEY },
+      { 'x-relay-token': relayToken },
+    );
+    assert.equal(r.status, 200, `Expected to store test key for ${provider}, got ${r.status}`);
+  }
+
   // Shared session state — persists across tests within this suite,
   // exactly as a frontend app would persist state in localStorage
   let relayToken;
@@ -591,16 +600,25 @@ describe('byok-relay — example product end-to-end', () => {
       });
     } else {
       it(`Path traversal allowed — ${provider} ${relayPath} is not blocked`, async () => {
+        await ensureProviderKey(provider);
+        mock.clearRequests();
+
         const r = await request(
           relayPort, 'POST', `/relay/${provider}${relayPath}`,
           { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'test' }] },
-          { 'x-relay-token': relayToken },
+          { 'x-relay-token': relayToken, ...e2eRelayHeaders() },
         );
         assert.notEqual(
           r.status,
           403,
           `Expected non-403 for allowed path "${relayPath}" on provider "${provider}", got 403.`,
         );
+        assert.equal(
+          mock.requests.length,
+          1,
+          `Allowed ${provider} path should be routed to the mock provider, not a real vendor API`,
+        );
+        assert.equal(mock.requests[0].url, relayPath);
       });
     }
   }
