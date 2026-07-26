@@ -25,8 +25,64 @@ const { spawn, spawnSync } = require('node:child_process');
 const os     = require('node:os');
 const path   = require('node:path');
 const fs     = require('node:fs');
+const Database = require('better-sqlite3');
 
 const { createMockProvider } = require('./mock-provider');
+
+it('startup migration preserves keys belonging to legacy-token users', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-migration-'));
+  const dbPath = path.join(tmpDir, 'legacy.db');
+  const legacyDb = new Database(dbPath);
+
+  legacyDb.pragma('foreign_keys = ON');
+  legacyDb.exec(`
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      token TEXT UNIQUE NOT NULL,
+      app_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE keys (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      encrypted_key TEXT NOT NULL,
+      iv TEXT NOT NULL,
+      auth_tag TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(user_id, provider)
+    );
+    INSERT INTO users VALUES ('legacy-user', 'legacy-token', 'legacy-app', 1);
+    INSERT INTO keys VALUES (
+      'legacy-key', 'legacy-user', 'openai', 'ciphertext', 'iv', 'tag', 2
+    );
+  `);
+  legacyDb.close();
+
+  const migrated = spawnSync(process.execPath, ['-e', "require('./src/db')"], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: {
+      ...process.env,
+      DB_PATH: dbPath,
+      ENCRYPTION_SECRET: 'migration-test-secret-at-least-32-characters',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout);
+
+  const verifyDb = new Database(dbPath, { readonly: true });
+  assert.deepEqual(
+    verifyDb.prepare('SELECT id, user_id, provider FROM keys').all(),
+    [{ id: 'legacy-key', user_id: 'legacy-user', provider: 'openai' }],
+  );
+  assert.equal(
+    verifyDb.prepare('SELECT token_hash FROM users WHERE id = ?').get('legacy-user').token_hash.length,
+    64,
+  );
+  assert.deepEqual(verifyDb.pragma('foreign_key_check'), []);
+  verifyDb.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
 
 function createSelfSignedCert(tmpDir) {
   const keyPath = path.join(tmpDir, 'key.pem');

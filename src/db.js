@@ -72,6 +72,11 @@ function _migrateTokenColumn() {
   // table rebuild, token_hash already exists. Skip the ALTER in that case.
   const alreadyHasTokenHash = cols.includes('token_hash');
 
+  // Dropping a referenced table applies ON DELETE actions when foreign-key
+  // enforcement is enabled. Disable it outside the transaction so rebuilding
+  // users cannot cascade-delete existing provider keys.
+  db.pragma('foreign_keys = OFF');
+
   // Wrap everything (DDL + DML + rebuild) in a single transaction so that a
   // crash mid-migration leaves the DB unchanged and the next startup retries.
   const migrate = db.transaction(() => {
@@ -106,7 +111,15 @@ function _migrateTokenColumn() {
     `);
   });
 
-  migrate();
+  try {
+    migrate();
+    const violations = db.pragma('foreign_key_check');
+    if (violations.length > 0) {
+      throw new Error('Legacy token migration left invalid foreign-key references');
+    }
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 _migrateTokenColumn();
