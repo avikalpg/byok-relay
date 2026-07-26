@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -15,6 +16,24 @@ if (!process.env.ENCRYPTION_SECRET) {
 if (process.env.ENCRYPTION_SECRET.length < 32) {
   console.error('ERROR: ENCRYPTION_SECRET must be at least 32 characters.');
   process.exit(1);
+}
+if (process.env.APP_SECRET && process.env.APP_SECRET.includes(' ')) {
+  console.error('ERROR: APP_SECRET must not contain spaces. Generate a safe value with: openssl rand -hex 32');
+  process.exit(1);
+}
+if (!process.env.APP_SECRET) {
+  console.warn('WARNING: APP_SECRET is not set. POST /users is open — anyone can register.');
+  console.warn('Set APP_SECRET to restrict registration to authorised callers only.');
+  console.warn('Generate one with: openssl rand -hex 32');
+}
+if (process.env.TOKEN_HMAC_SECRET && process.env.TOKEN_HMAC_SECRET.length < 32) {
+  console.error('ERROR: TOKEN_HMAC_SECRET must be at least 32 characters.');
+  process.exit(1);
+}
+if (!process.env.TOKEN_HMAC_SECRET) {
+  console.warn('WARNING: TOKEN_HMAC_SECRET is not set. Falling back to ENCRYPTION_SECRET for token hashing.');
+  console.warn('Set TOKEN_HMAC_SECRET to use a dedicated key per best practice.');
+  console.warn('Generate one with: openssl rand -hex 32');
 }
 
 const app = express();
@@ -63,6 +82,33 @@ const registrationLimiter = rateLimit({
 
 // ── Auth middleware ─────────────────────────────────────────────────────────
 
+/**
+ * requireAppSecret — guards POST /users when APP_SECRET is configured.
+ * If APP_SECRET env var is set, the caller must supply:
+ *   Authorization: Bearer <APP_SECRET>
+ * If APP_SECRET is not set, the route is open (dev/single-user mode).
+ */
+function requireAppSecret(req, res, next) {
+  const appSecret = process.env.APP_SECRET;
+  if (!appSecret) return next(); // open registration — operator has been warned at startup
+
+  const authHeader = req.headers['authorization'] || '';
+  const [scheme, token] = authHeader.split(' ');
+
+  const validScheme = scheme === 'Bearer';
+  const validToken =
+    token &&
+    token.length === appSecret.length &&
+    crypto.timingSafeEqual(Buffer.from(token), Buffer.from(appSecret));
+
+  if (!validScheme || !validToken) {
+    return res.status(401).json({
+      error: 'Unauthorized: valid Authorization: Bearer <APP_SECRET> header required to register.',
+    });
+  }
+  next();
+}
+
 function requireToken(req, res, next) {
   const token = req.headers['x-relay-token'];
   if (!token) return res.status(401).json({ error: 'x-relay-token header required' });
@@ -76,7 +122,8 @@ function requireToken(req, res, next) {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ ok: true, version: '1.0.0', providers: SUPPORTED_PROVIDERS });
+  const { version } = require('../package.json');
+  res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
 });
 
 /**
@@ -88,7 +135,7 @@ app.get('/health', (req, res) => {
  * The token is stored in the user's browser (localStorage).
  * It never contains the API key — the API key is stored server-side.
  */
-app.post('/users', registrationLimiter, (req, res) => {
+app.post('/users', requireAppSecret, registrationLimiter, (req, res) => {
   const { app_id } = req.body;
   if (!app_id) return res.status(400).json({ error: 'app_id is required' });
   const { token } = createUser(app_id);
@@ -177,7 +224,7 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer',
+    'http-referer', 'x-relay-e2e-base-url-token',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
@@ -224,14 +271,25 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
-// When run directly (node src/index.js or npm start), start the HTTP server.
-// When imported by Vercel's @vercel/node runtime, export the app instead.
-if (require.main === module) {
-  app.listen(PORT, '0.0.0.0', () => {
+
+/**
+ * Start the HTTP server and return the server instance.
+ * Called by the CLI bin (npx byok-relay) and when run directly.
+ * Not called when imported by Vercel's @vercel/node runtime.
+ */
+function startServer() {
+  return app.listen(PORT, '0.0.0.0', () => {
     console.log(`byok-relay listening on port ${PORT}`);
     console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
     console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
   });
 }
 
+// When run directly (node src/index.js or npm start), start immediately.
+// When imported (Vercel runtime, CLI bin, tests), let the caller decide.
+if (require.main === module) {
+  startServer();
+}
+
 module.exports = app;
+module.exports.startServer = startServer;

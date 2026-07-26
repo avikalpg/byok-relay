@@ -21,12 +21,89 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http   = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const os     = require('node:os');
 const path   = require('node:path');
 const fs     = require('node:fs');
+const Database = require('better-sqlite3');
 
 const { createMockProvider } = require('./mock-provider');
+
+it('startup migration preserves keys belonging to legacy-token users', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-migration-'));
+  const dbPath = path.join(tmpDir, 'legacy.db');
+  const legacyDb = new Database(dbPath);
+
+  legacyDb.pragma('foreign_keys = ON');
+  legacyDb.exec(`
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      token TEXT UNIQUE NOT NULL,
+      app_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE keys (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      encrypted_key TEXT NOT NULL,
+      iv TEXT NOT NULL,
+      auth_tag TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(user_id, provider)
+    );
+    INSERT INTO users VALUES ('legacy-user', 'legacy-token', 'legacy-app', 1);
+    INSERT INTO keys VALUES (
+      'legacy-key', 'legacy-user', 'openai', 'ciphertext', 'iv', 'tag', 2
+    );
+  `);
+  legacyDb.close();
+
+  const migrated = spawnSync(process.execPath, ['-e', "require('./src/db')"], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: {
+      ...process.env,
+      DB_PATH: dbPath,
+      ENCRYPTION_SECRET: 'migration-test-secret-at-least-32-characters',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout);
+
+  const verifyDb = new Database(dbPath, { readonly: true });
+  assert.deepEqual(
+    verifyDb.prepare('SELECT id, user_id, provider FROM keys').all(),
+    [{ id: 'legacy-key', user_id: 'legacy-user', provider: 'openai' }],
+  );
+  assert.equal(
+    verifyDb.prepare('SELECT token_hash FROM users WHERE id = ?').get('legacy-user').token_hash.length,
+    64,
+  );
+  assert.deepEqual(verifyDb.pragma('foreign_key_check'), []);
+  verifyDb.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+function createSelfSignedCert(tmpDir) {
+  const keyPath = path.join(tmpDir, 'key.pem');
+  const certPath = path.join(tmpDir, 'cert.pem');
+  const openssl = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',
+    '-subj', '/CN=localtest.me',
+    '-addext', 'subjectAltName=DNS:localtest.me,DNS:*.localtest.me',
+    '-keyout', keyPath,
+    '-out', certPath,
+  ], { encoding: 'utf8' });
+
+  if (openssl.status !== 0) {
+    throw new Error(`openssl failed to create E2E TLS certificate: ${openssl.stderr || openssl.stdout}`);
+  }
+
+  return {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
+  };
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // HTTP helpers
@@ -141,6 +218,18 @@ describe('byok-relay — example product end-to-end', () => {
   let relayProc;      // relay child process
   let relayPort;
   let tmpDb;          // path to ephemeral SQLite file
+  let tmpCertDir;     // path to ephemeral TLS cert directory
+  let mockBaseUrl;    // HTTPS URL used by the relay to reach the mock provider
+
+  const SAFE_E2E_BASE_URL = 'https://example.com';
+  const E2E_BASE_URL_OVERRIDE_TOKEN = `e2e-${process.pid}-${Date.now()}`;
+
+  function e2eRelayHeaders() {
+    return {
+      'x-relay-base-url': SAFE_E2E_BASE_URL,
+      'x-relay-e2e-base-url-token': E2E_BASE_URL_OVERRIDE_TOKEN,
+    };
+  }
 
   // Shared session state — persists across tests within this suite,
   // exactly as a frontend app would persist state in localStorage
@@ -151,9 +240,17 @@ describe('byok-relay — example product end-to-end', () => {
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   before(async () => {
-    // 1. Start the mock AI provider on a random port
-    mock = createMockProvider();
+    // 1. Start the mock AI provider on a random port.
+    // The relay requires HTTPS openai-compatible base URLs. Use a self-signed
+    // localtest.me endpoint so the test stays local while still exercising the
+    // HTTPS path.
+    tmpCertDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-e2e-cert-'));
+    mock = createMockProvider({
+      tls: createSelfSignedCert(tmpCertDir),
+      host: '::',
+    });
     mockPort = await mock.start();
+    mockBaseUrl = `https://localtest.me:${mockPort}`;
 
     // 2. Reserve a free port for the relay
     relayPort = await getFreePort();
@@ -173,9 +270,9 @@ describe('byok-relay — example product end-to-end', () => {
           DB_PATH:           tmpDb,
           ALLOWED_ORIGINS:   '*',
           NODE_ENV:          'test',
-          // Allow HTTP loopback for the mock provider in tests.
-          // In production this env var must NOT be set.
-          BYOK_RELAY_ALLOW_INSECURE_BASE_URL: 'true',
+          NODE_TLS_REJECT_UNAUTHORIZED: '0',
+          E2E_OPENAI_COMPATIBLE_BASE_URL: mockBaseUrl,
+          E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN: E2E_BASE_URL_OVERRIDE_TOKEN,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -188,8 +285,14 @@ describe('byok-relay — example product end-to-end', () => {
   });
 
   after(async () => {
-    relayProc.kill('SIGTERM');
-    await new Promise((r) => relayProc.on('exit', r));
+    // Guard against already-exited process: register the listener BEFORE kill
+    // so we never miss the exit event, and skip the whole thing if the process
+    // already terminated (exitCode / signalCode are set once it has).
+    if (relayProc && relayProc.exitCode == null && relayProc.signalCode == null) {
+      const exited = new Promise((r) => relayProc.once('exit', r));
+      relayProc.kill('SIGTERM');
+      await exited;
+    }
 
     await mock.stop();
 
@@ -197,6 +300,7 @@ describe('byok-relay — example product end-to-end', () => {
     for (const suffix of ['', '-wal', '-shm']) {
       try { fs.unlinkSync(tmpDb + suffix); } catch { /* ok if already gone */ }
     }
+    if (tmpCertDir) fs.rmSync(tmpCertDir, { recursive: true, force: true });
   });
 
   // ── 1. Health check ─────────────────────────────────────────────────────
@@ -300,7 +404,7 @@ describe('byok-relay — example product end-to-end', () => {
       chatBody,
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': `http://127.0.0.1:${mockPort}`,
+        ...e2eRelayHeaders(),
       },
     );
 
@@ -314,6 +418,37 @@ describe('byok-relay — example product end-to-end', () => {
       mock.requests[0].authorization,
       `Bearer ${FAKE_API_KEY}`,
       'relay must forward the stored API key — not a value the client supplied directly',
+    );
+  });
+
+  it('POST /relay — ignores hostile client-supplied Authorization header', async () => {
+    // A malicious (or confused) client that sends their own Authorization header
+    // must not be able to override the key the relay forwards to the AI provider.
+    mock.clearRequests();
+
+    const HOSTILE_KEY = 'Bearer sk-hostile-attacker-key-9999999999';
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hostile test' }] },
+      {
+        'x-relay-token':    relayToken,
+        ...e2eRelayHeaders(),
+        'Authorization':    HOSTILE_KEY,   // ← attacker-supplied, must be ignored
+      },
+    );
+
+    assert.equal(r.status, 200);
+    assert.equal(mock.requests.length, 1);
+    assert.notEqual(
+      mock.requests[0].authorization,
+      HOSTILE_KEY,
+      'relay must never forward a client-supplied Authorization header to the AI provider',
+    );
+    assert.equal(
+      mock.requests[0].authorization,
+      `Bearer ${FAKE_API_KEY}`,
+      'relay must use the stored key regardless of what Authorization header the client sends',
     );
   });
 
@@ -333,7 +468,7 @@ describe('byok-relay — example product end-to-end', () => {
       chatBody,
       {
         'x-relay-token':    relayToken,
-        'x-relay-base-url': `http://127.0.0.1:${mockPort}`,
+        ...e2eRelayHeaders(),
       },
     );
 
@@ -391,6 +526,7 @@ describe('byok-relay — example product end-to-end', () => {
     ['RFC-1918 class C (192.168.x.x)','http://192.168.1.1/v1/chat'],
     ['Alibaba Cloud IMDS',            'http://100.100.100.200/latest/meta-data'],
     ['localhost by hostname',         'http://localhost:9999/v1/chat'],
+    ['DNS hostname resolving to loopback', 'https://localtest.me:9999/v1/chat'],
     ['non-HTTPS external URL',        'http://api.openai.com/v1/chat'],
     ['embedded credentials in URL',   'https://user:pass@api.openai.com/v1/chat'],
   ];
@@ -412,10 +548,10 @@ describe('byok-relay — example product end-to-end', () => {
     });
   }
 
-  // ── 10. Path traversal allowlist ──────────────────────────────────────
-  // These tests verify that non-inference paths are blocked even with a valid
-  // relay token. A stolen token must not be usable to reach fine-tuning, file
-  // upload, billing, or model management endpoints.
+  // ── 10. Path traversal allowlist ─────────────────────────────────────────
+  // Non-inference paths must be blocked even with a valid relay token. A
+  // stolen token must not be usable to reach fine-tuning, file upload,
+  // billing, or model-management endpoints.
 
   const PATH_TRAVERSAL_CASES = [
     // OpenAI non-inference paths
@@ -425,7 +561,7 @@ describe('byok-relay — example product end-to-end', () => {
     ['openai', '/v1/models/gpt-4/delete',                 403],
     ['openai', '/v1/organization/members',                403],
     // OpenAI allowed inference paths
-    ['openai', '/v1/chat/completions',                    null], // null = any non-403 (provider forwards ok)
+    ['openai', '/v1/chat/completions',                    null], // null = any non-403; provider may still fail without a real upstream key
     ['openai', '/v1/embeddings',                          null],
     // Anthropic non-inference paths
     ['anthropic', '/v1/models',                           403],
@@ -439,29 +575,31 @@ describe('byok-relay — example product end-to-end', () => {
     ['groq', '/openai/v1/chat/completions',               null],
   ];
 
-  for (const [provider, path, expectedStatus] of PATH_TRAVERSAL_CASES) {
+  for (const [provider, relayPath, expectedStatus] of PATH_TRAVERSAL_CASES) {
     if (expectedStatus === 403) {
-      it(`Path traversal blocked — ${provider} ${path}`, async () => {
+      it(`Path traversal blocked — ${provider} ${relayPath}`, async () => {
         const r = await request(
-          relayPort, 'POST', `/relay/${provider}${path}`,
+          relayPort, 'POST', `/relay/${provider}${relayPath}`,
           { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'test' }] },
           { 'x-relay-token': relayToken },
         );
         assert.equal(
-          r.status, 403,
-          `Expected 403 for path "${path}" on provider "${provider}", got ${r.status}. Path allowlist may be missing.`,
+          r.status,
+          403,
+          `Expected 403 for path "${relayPath}" on provider "${provider}", got ${r.status}. Path allowlist may be missing.`,
         );
       });
     } else {
-      it(`Path traversal allowed — ${provider} ${path} is not blocked`, async () => {
+      it(`Path traversal allowed — ${provider} ${relayPath} is not blocked`, async () => {
         const r = await request(
-          relayPort, 'POST', `/relay/${provider}${path}`,
+          relayPort, 'POST', `/relay/${provider}${relayPath}`,
           { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'test' }] },
           { 'x-relay-token': relayToken },
         );
         assert.notEqual(
-          r.status, 403,
-          `Expected non-403 for allowed path "${path}" on provider "${provider}", got 403.`,
+          r.status,
+          403,
+          `Expected non-403 for allowed path "${relayPath}" on provider "${provider}", got 403.`,
         );
       });
     }

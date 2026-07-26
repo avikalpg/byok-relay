@@ -15,16 +15,17 @@
 
 'use strict';
 
-const http = require('node:http');
+const http  = require('node:http');
+const https = require('node:https');
 
 /**
  * Create a new mock provider instance.
  * Each call returns a fresh server + request log so tests are isolated.
  */
-function createMockProvider() {
+function createMockProvider(options = {}) {
   const requests = [];
 
-  const server = http.createServer((req, res) => {
+  const handler = (req, res) => {
     let raw = '';
     req.on('data', (chunk) => (raw += chunk));
     req.on('end', () => {
@@ -76,7 +77,11 @@ function createMockProvider() {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `Mock: no handler for ${req.method} ${req.url}` }));
     });
-  });
+  };
+
+  const server = options.tls
+    ? https.createServer(options.tls, handler)
+    : http.createServer(handler);
 
   return {
     /** The recorded request log. Read directly or call clearRequests(). */
@@ -92,7 +97,7 @@ function createMockProvider() {
       return new Promise((resolve, reject) => {
         server.once('error', reject);
         // Port 0 → OS picks a free port
-        server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+        server.listen(0, options.host || '127.0.0.1', () => resolve(server.address().port));
       });
     },
 
