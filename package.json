@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "test -f test/e2e/relay.test.js && node --test test/e2e/relay.test.js || echo 'No committed test suite yet on this branch (E2E suite lands in PR #20) — skipping.'"
+    "test": "node --test test/e2e/relay.test.js"
   },
   "keywords": [
     "byok",

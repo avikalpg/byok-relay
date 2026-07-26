@@ -210,7 +210,7 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer',
+    'http-referer', 'x-relay-e2e-base-url-token',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
