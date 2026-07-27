@@ -494,6 +494,26 @@ describe('byok-relay — example product end-to-end', () => {
     assert.ok(r.body.error?.toLowerCase().includes('no api key'), `Expected 'no api key' error, got: ${r.body.error}`);
   });
 
+  it('POST /relay — rejects provider account-management paths', async () => {
+    mock.clearRequests();
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/files',
+      { purpose: 'fine-tune' },
+      {
+        'x-relay-token': relayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 403);
+    assert.ok(
+      r.body.error?.includes('only forwards inference endpoints'),
+      `Expected inference-only error, got: ${JSON.stringify(r.body)}`,
+    );
+    assert.equal(mock.requests.length, 0, 'blocked path must not reach the upstream provider');
+  });
+
   // ── 8. Key deletion ──────────────────────────────────────────────────────
 
   it('DELETE /keys/:provider — removes the stored key', async () => {

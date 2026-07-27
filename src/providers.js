@@ -18,6 +18,61 @@ const https = require('node:https');
 const net = require('node:net');
 const fetch = require('node-fetch');
 
+// ── Provider path allowlist ─────────────────────────────────────────────────
+// Relay tokens should only unlock inference endpoints. Without an allowlist, a
+// stolen relay token could be used to reach provider account-management APIs
+// such as files, fine-tuning, billing, or model deletion.
+class RelayPathNotAllowedError extends Error {
+  constructor(provider, path) {
+    super(`Path not allowed for provider "${provider}": ${path}`);
+    this.name = 'RelayPathNotAllowedError';
+    this.code = 'PROVIDER_PATH_NOT_ALLOWED';
+    this.statusCode = 403;
+  }
+}
+
+const PROVIDER_PATH_ALLOWLIST = {
+  anthropic: [/^\/v\d+\/messages(?:[?#]|$)/],
+  openai: [
+    /^\/v\d+\/chat\/completions(?:[?#]|$)/,
+    /^\/v\d+\/completions(?:[?#]|$)/,
+    /^\/v\d+\/embeddings(?:[?#]|$)/,
+    /^\/v\d+\/responses(?:[?#]|$)/,
+  ],
+  google: [
+    /^\/v\w*\/models\/[^/?#]+:(?:generateContent|streamGenerateContent|countTokens|embedContent)(?:[?#]|$)/,
+    /^\/v\w*\/models:batchEmbedContents(?:[?#]|$)/,
+  ],
+  groq: [
+    /^\/openai\/v\d+\/chat\/completions(?:[?#]|$)/,
+    /^\/openai\/v\d+\/completions(?:[?#]|$)/,
+    /^\/openai\/v\d+\/embeddings(?:[?#]|$)/,
+  ],
+  openrouter: [
+    /^\/api\/v\d+\/chat\/completions(?:[?#]|$)/,
+    /^\/api\/v\d+\/completions(?:[?#]|$)/,
+    /^\/api\/v\d+\/embeddings(?:[?#]|$)/,
+  ],
+  mistral: [
+    /^\/v\d+\/chat\/completions(?:[?#]|$)/,
+    /^\/v\d+\/fim\/completions(?:[?#]|$)/,
+    /^\/v\d+\/embeddings(?:[?#]|$)/,
+  ],
+  'openai-compatible': [
+    /^\/v\d+\/chat\/completions(?:[?#]|$)/,
+    /^\/v\d+\/completions(?:[?#]|$)/,
+    /^\/v\d+\/embeddings(?:[?#]|$)/,
+    /^\/v\d+\/responses(?:[?#]|$)/,
+  ],
+};
+
+function assertAllowedProviderPath(provider, path) {
+  const allowlist = PROVIDER_PATH_ALLOWLIST[provider] || [];
+  if (!allowlist.some((pattern) => pattern.test(path))) {
+    throw new RelayPathNotAllowedError(provider, path);
+  }
+}
+
 // ── SSRF protection ──────────────────────────────────────────────────────────
 // Blocked IP ranges: RFC-1918 private, loopback, link-local, and cloud IMDS
 // endpoints. Used to validate the `x-relay-base-url` header for the
@@ -369,6 +424,7 @@ const PROVIDERS = {
 async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}) {
   const config = PROVIDERS[provider];
   if (!config) throw new Error(`Unknown provider: ${provider}`);
+  assertAllowedProviderPath(provider, path);
 
   let baseUrl = config.baseUrl;
   const fetchOptions = {};
@@ -418,4 +474,9 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
 
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
-module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl };
+module.exports = {
+  forwardRequest,
+  SUPPORTED_PROVIDERS,
+  validateAndNormaliseBaseUrl,
+  assertAllowedProviderPath,
+};
