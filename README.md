@@ -191,6 +191,35 @@ Content-Type: application/json
 
 ## Deploy in one click
 
+### Docker (recommended for self-hosters)
+
+```bash
+# 1. Copy and fill in the env template
+cp .env.example .env
+# Set ENCRYPTION_SECRET (required): openssl rand -hex 32
+# Set ALLOWED_ORIGINS to your frontend domain(s)
+# Set APP_SECRET (strongly recommended): openssl rand -hex 32
+
+# 2. Start the relay
+docker compose up -d
+
+# 3. Check it's healthy
+docker compose ps
+curl http://localhost:3000/health
+```
+
+SQLite data persists in the Compose named volume `relay_data` (mounted at `/app/data` inside the container).
+Back up the volume contents (the SQLite file holds all encrypted API keys). Example:
+
+```bash
+docker run --rm -v relay_data:/data -v $(pwd):/out alpine sh -c \
+  'apk add --no-cache sqlite && sqlite3 /data/relay.db ".backup /out/relay-backup-$(date +%s).db"'
+```
+
+> **Note:** When you update the image, run `docker compose up --build -d` — the `relay_data` volume is preserved.
+
+### Vercel (prototyping only)
+
 The fastest way to get byok-relay running is via Vercel:
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS,APP_SECRET&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
@@ -201,7 +230,7 @@ The fastest way to get byok-relay running is via Vercel:
 
 > **Note:** Vercel's serverless environment has an ephemeral filesystem, so SQLite state resets between cold starts. This is fine for demos and prototyping. For production with persistent key storage, deploy to a long-running server (see [Production setup](#production-ubuntu--systemd) below, or use Railway/Render).
 
-## Quickstart (60 seconds)
+## Quickstart (npm / CLI)
 
 > **Fastest path:** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) && npx byok-relay`
 > For the full walkthrough continue below, or see [Setup options](#setup) for `npm install -g` and clone paths.
