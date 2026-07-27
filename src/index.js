@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
-const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
+const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
@@ -190,11 +190,31 @@ app.get('/keys', requireToken, (req, res) => {
  * Supports streaming: if the request body has stream: true, the response
  * is piped directly back to the client as SSE.
  */
-app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
+app.post('/relay/:provider/*', requireToken, (req, res, next) => {
+  // ── Path traversal allowlist ────────────────────────────────────────────
+  // Checked before rate limiting: rejected paths must not consume quota.
+  // A stolen token should not be usable to probe non-inference endpoints.
+  const { provider } = req.params;
+  if (SUPPORTED_PROVIDERS.includes(provider)) {
+    const forwardPath = normalizeProviderPath('/' + (req.params[0] || ''));
+    req.forwardPath = forwardPath;
+    if (!isPathAllowed(provider, forwardPath)) {
+      return res.status(403).json({
+        error: `Path "${forwardPath}" is not permitted for provider "${provider}". Only inference endpoints are allowed.`,
+      });
+    }
+  }
+  next();
+}, relayLimiter, async (req, res) => {
   const { provider } = req.params;
   if (!SUPPORTED_PROVIDERS.includes(provider)) {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
+
+  // Forward exactly the normalized path that passed the allowlist check.
+  // Do not reconstruct it from Express params here: validation and use must
+  // operate on the same value.
+  const forwardPath = req.forwardPath;
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
@@ -202,9 +222,6 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       error: `No API key stored for provider "${provider}". POST /keys/${provider} first.`,
     });
   }
-
-  // Build the path to forward (everything after /relay/:provider)
-  const forwardPath = '/' + (req.params[0] || '');
 
   // Pass through provider-specific and relay headers
   const extraHeaders = {};

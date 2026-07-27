@@ -231,6 +231,15 @@ describe('byok-relay — example product end-to-end', () => {
     };
   }
 
+  async function ensureProviderKey(provider) {
+    const r = await request(
+      relayPort, 'POST', `/keys/${provider}`,
+      { key: FAKE_API_KEY },
+      { 'x-relay-token': relayToken },
+    );
+    assert.equal(r.status, 200, `Expected to store test key for ${provider}, got ${r.status}`);
+  }
+
   // Shared session state — persists across tests within this suite,
   // exactly as a frontend app would persist state in localStorage
   let relayToken;
@@ -546,5 +555,71 @@ describe('byok-relay — example product end-to-end', () => {
         `Expected 400 for SSRF target "${label}" (${url}), got ${r.status}. Relay may be missing SSRF validation — see PR #18.`,
       );
     });
+  }
+
+  // ── 10. Path traversal allowlist ─────────────────────────────────────────
+  // Non-inference paths must be blocked even with a valid relay token. A
+  // stolen token must not be usable to reach fine-tuning, file upload,
+  // billing, or model-management endpoints.
+
+  const PATH_TRAVERSAL_CASES = [
+    // OpenAI non-inference paths
+    ['openai', '/v1/fine-tuning/jobs',                    403],
+    ['openai', '/v1/files',                               403],
+    ['openai', '/v1/billing/usage',                       403],
+    ['openai', '/v1/models/gpt-4/delete',                 403],
+    ['openai', '/v1/organization/members',                403],
+    // OpenAI allowed inference paths
+    ['openai', '/v1/chat/completions',                    null], // null = any non-403; provider may still fail without a real upstream key
+    ['openai', '/v1/embeddings',                          null],
+    // Anthropic non-inference paths
+    ['anthropic', '/v1/models',                           403],
+    ['anthropic', '/v1/organizations',                    403],
+    // Anthropic allowed
+    ['anthropic', '/v1/messages',                         null],
+    // Groq non-inference
+    ['groq', '/openai/v1/models/delete',                  403],
+    ['groq', '/openai/v1/organizations',                  403],
+    // Groq allowed
+    ['groq', '/openai/v1/chat/completions',               null],
+  ];
+
+  for (const [provider, relayPath, expectedStatus] of PATH_TRAVERSAL_CASES) {
+    if (expectedStatus === 403) {
+      it(`Path traversal blocked — ${provider} ${relayPath}`, async () => {
+        const r = await request(
+          relayPort, 'POST', `/relay/${provider}${relayPath}`,
+          { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'test' }] },
+          { 'x-relay-token': relayToken },
+        );
+        assert.equal(
+          r.status,
+          403,
+          `Expected 403 for path "${relayPath}" on provider "${provider}", got ${r.status}. Path allowlist may be missing.`,
+        );
+      });
+    } else {
+      it(`Path traversal allowed — ${provider} ${relayPath} is routed through the mock provider`, async () => {
+        await ensureProviderKey(provider);
+        mock.clearRequests();
+
+        const r = await request(
+          relayPort, 'POST', `/relay/${provider}${relayPath}`,
+          { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'test' }] },
+          { 'x-relay-token': relayToken, ...e2eRelayHeaders() },
+        );
+        assert.notEqual(
+          r.status,
+          403,
+          `Expected non-403 for allowed path "${relayPath}" on provider "${provider}", got 403.`,
+        );
+        assert.equal(
+          mock.requests.length,
+          1,
+          `Allowed ${provider} path should be routed to the mock provider, not a real vendor API`,
+        );
+        assert.equal(mock.requests[0].url, relayPath);
+      });
+    }
   }
 });
