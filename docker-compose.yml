@@ -9,7 +9,7 @@ services:
       # SQLite database persists in a named Docker volume across restarts and
       # image rebuilds. Docker manages ownership so the container user (UID 1001)
       # can always write to it — no host chown step needed.
-      # To back up: docker run --rm -v relay_data:/data -v $(pwd):/out alpine cp /data/relay.db /out/relay.db
+      # Safe backup (WAL-aware): docker run --rm -v relay_data:/data -v $(pwd):/out alpine sh -c 'apk add --no-cache sqlite && sqlite3 /data/relay.db ".backup /out/relay-backup-$(date +%s).db"'
       - relay_data:/app/data
     environment:
       # ── Required ────────────────────────────────────────────────────────────

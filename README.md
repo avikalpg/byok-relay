@@ -208,10 +208,15 @@ docker compose ps
 curl http://localhost:3000/health
 ```
 
-SQLite data persists in `./data/relay.db` between restarts and rebuilds.
-Back up that file; it holds all encrypted API keys.
+SQLite data persists in the Compose named volume `relay_data` (mounted at `/app/data` inside the container).
+Back up the volume contents (the SQLite file holds all encrypted API keys). Example:
 
-> **Note:** When you update the image, run `docker compose pull && docker compose up -d` — the `./data` volume is preserved.
+```bash
+docker run --rm -v relay_data:/data -v $(pwd):/out alpine sh -c \
+  'apk add --no-cache sqlite && sqlite3 /data/relay.db ".backup /out/relay-backup-$(date +%s).db"'
+```
+
+> **Note:** When you update the image, run `docker compose up --build -d` — the `relay_data` volume is preserved.
 
 ### Vercel (prototyping only)
 
@@ -225,7 +230,7 @@ The fastest way to get byok-relay running is via Vercel:
 
 > **Note:** Vercel's serverless environment has an ephemeral filesystem, so SQLite state resets between cold starts. This is fine for demos and prototyping. For production with persistent key storage, deploy to a long-running server (see [Production setup](#production-ubuntu--systemd) below, or use Railway/Render).
 
-## Quickstart (60 seconds)
+## Quickstart (npm / CLI)
 
 > **Fastest path:** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) && npx byok-relay`
 > For the full walkthrough continue below, or see [Setup options](#setup) for `npm install -g` and clone paths.
