@@ -251,6 +251,11 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     if (err.code === 'INVALID_RELAY_BASE_URL') {
       return res.status(400).json({ error: err.message });
     }
+    if (err.code === 'PROVIDER_PATH_NOT_ALLOWED') {
+      return res.status(403).json({
+        error: 'Provider path not allowed. byok-relay only forwards inference endpoints.',
+      });
+    }
     console.error('Relay error:', err);
     res.status(502).json({ error: 'Failed to reach AI provider' });
   }
