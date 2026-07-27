@@ -211,8 +211,10 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
-  // Reuse the normalized path that passed the allowlist check.
-  const forwardPath = req.forwardPath || normalizeProviderPath('/' + (req.params[0] || ''));
+  // Forward exactly the normalized path that passed the allowlist check.
+  // Do not reconstruct it from Express params here: validation and use must
+  // operate on the same value.
+  const forwardPath = req.forwardPath;
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {

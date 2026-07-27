@@ -599,7 +599,7 @@ describe('byok-relay — example product end-to-end', () => {
         );
       });
     } else {
-      it(`Path traversal allowed — ${provider} ${relayPath} is not blocked`, async () => {
+      it(`Path traversal allowed — ${provider} ${relayPath} is routed through the mock provider`, async () => {
         await ensureProviderKey(provider);
         mock.clearRequests();
 
