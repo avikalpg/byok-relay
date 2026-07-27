@@ -225,16 +225,78 @@ The fastest way to get byok-relay running is via Vercel:
 
 > **Note:** Vercel's serverless environment has an ephemeral filesystem, so SQLite state resets between cold starts. This is fine for demos and prototyping. For production with persistent key storage, deploy to a long-running server (see [Production setup](#production-ubuntu--systemd) below, or use Railway/Render).
 
+## Quickstart (60 seconds)
+
+> **Fastest path:** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) && npx byok-relay`
+> For the full walkthrough continue below, or see [Setup options](#setup) for `npm install -g` and clone paths.
+
+```bash
+# 1. Clone and install (or skip this with: npx byok-relay)
+git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
+
+# 2. Configure
+echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
+echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+
+# 3. Start
+npm start &
+
+# 4. Register a user and get a token
+TOKEN=$(curl -s -X POST http://localhost:3000/users \
+  -H "Content-Type: application/json" \
+  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# 5. Store your Anthropic key
+curl -X POST http://localhost:3000/keys/anthropic \
+  -H "Content-Type: application/json" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"key":"sk-ant-YOUR-KEY-HERE"}'
+
+# 6. Relay a request (streaming)
+curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
 ## Setup
 
 ### 1. Install
+
+**Option A — npx (quickest, no install)**
+
+`npx byok-relay` launches a **standalone relay server process** — you run it alongside your existing app. It is not an embedded library; it listens on a port that your frontend calls. Set env vars in your shell before running.
+
+```bash
+export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+export ALLOWED_ORIGINS=https://your-app.example.com  # or * for dev
+npx byok-relay
+```
+
+> ⚠️ **Persistence:** `ENCRYPTION_SECRET` set via `export` is ephemeral (session only). If you restart the server without the same secret, it cannot decrypt previously stored keys and all users will need to re-register their keys. Save it to a file (e.g. `.env`) or your shell profile for persistence. If you also customize `ENCRYPTION_SALT` (default: `byok-relay-salt`), save and keep that unchanged too — both values must match to decrypt existing keys.
+
+**Option B — global install**
+
+Same standalone server as Option A, available as a persistent command.
+
+```bash
+npm install -g byok-relay
+export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+export ALLOWED_ORIGINS=https://your-app.example.com
+byok-relay
+```
+
+> ⚠️ **Persistence:** Same caveat as Option A — store `ENCRYPTION_SECRET` somewhere durable (e.g. a `.env` file or your shell's `.bashrc`/`.zshrc`) so restarts don't invalidate existing stored keys. This applies to `ENCRYPTION_SALT` too if you've customized it.
+
+**Option C — clone & run**
 ```bash
 git clone https://github.com/avikalpg/byok-relay.git
 cd byok-relay
 npm install
 ```
 
-### 2. Configure
+### 2. Configure *(Option C only — A and B use env vars directly, as shown above)*
 ```bash
 cp .env.example .env
 # Set ENCRYPTION_SECRET (generate: openssl rand -hex 32)
