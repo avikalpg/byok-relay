@@ -91,6 +91,7 @@ echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
 
 # 3. Start (add APP_SECRET for production to restrict who can register users)
 # echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
+# Optional: LOG_LEVEL=debug for more verbose structured JSON logs
 npm start &
 
 # 4. Register a user and get a token
@@ -167,6 +168,33 @@ x-relay-token: <token>
 DELETE /keys/anthropic
 x-relay-token: <token>
 ```
+
+### Usage stats
+```http
+GET /stats
+x-relay-token: <token>
+```
+Returns aggregate usage for the current relay token's user:
+
+```json
+{
+  "total_requests": 42,
+  "error_count": 1,
+  "success_rate": 0.9762,
+  "avg_latency_ms": 318.4,
+  "total_tokens": 12000,
+  "by_provider": [{ "provider": "anthropic", "request_count": 40 }],
+  "by_model": [{ "model": "claude-3-5-haiku-20241022", "request_count": 40 }]
+}
+```
+
+```http
+GET /stats/my-app
+x-relay-token: <token>
+```
+Returns the same aggregate view for the token's `app_id`, so app operators can show lightweight observability without wiring in a separate analytics service.
+
+Every relay response includes an `x-request-id` header. Send your own `x-request-id` header to correlate frontend errors with server logs, or let byok-relay generate one automatically. Structured JSON logs include `request_id`, `user_id`, `app_id`, `provider`, `model`, `status`, `latency_ms`, and `token_count` when the provider returns usage metadata.
 
 ### Relay a request
 ```http

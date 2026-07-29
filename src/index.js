@@ -3,8 +3,24 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
+const pino = require('pino');
+const {
+  createUser,
+  getUserByToken,
+  upsertKey,
+  getDecryptedKey,
+  deleteKey,
+  listProviders,
+  logRequest,
+  getStatsForUser,
+  getStatsForApp,
+} = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  redact: ['req.headers.authorization', 'req.headers.x-relay-token', 'apiKey', 'token'],
+});
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
@@ -41,6 +57,13 @@ const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
 
 // ── Middleware ──────────────────────────────────────────────────────────────
+
+app.use((req, res, next) => {
+  const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+  req.id = requestId;
+  res.setHeader('x-request-id', requestId);
+  next();
+});
 
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
@@ -182,6 +205,26 @@ app.get('/keys', requireToken, (req, res) => {
 });
 
 /**
+ * GET /stats
+ * Return aggregate relay usage for the current token's user.
+ */
+app.get('/stats', requireToken, (req, res) => {
+  res.json(getStatsForUser(req.user.id));
+});
+
+/**
+ * GET /stats/:app_id
+ * Return aggregate relay usage for an app_id. Operators can use this to see
+ * conversion-driving observability without attaching an external service.
+ */
+app.get('/stats/:app_id', requireToken, (req, res) => {
+  if (req.params.app_id !== req.user.app_id) {
+    return res.status(403).json({ error: 'Stats for this app_id are not available to the current token' });
+  }
+  res.json(getStatsForApp(req.params.app_id));
+});
+
+/**
  * POST /relay/:provider/*
  * Forward a request to the AI provider using the user's stored API key.
  * Headers: x-relay-token
@@ -233,6 +276,9 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
+  const startedAt = Date.now();
+  const model = req.body && typeof req.body.model === 'string' ? req.body.model : null;
+
   try {
     const providerResponse = await forwardRequest(
       provider,
@@ -248,19 +294,53 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     const contentType = providerResponse.headers.get('content-type');
     if (contentType) res.setHeader('Content-Type', contentType);
 
-    const isStream = req.body?.stream === true ||
-      (contentType && contentType.includes('text/event-stream'));
+    const isStream = contentType && contentType.includes('text/event-stream');
+    let tokenCount = null;
 
     if (isStream) {
       // Pipe the SSE stream directly to the client
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+
+      providerResponse.body.on('error', (streamErr) => {
+        logger.error({ err: streamErr, request_id: req.id, provider, model }, 'upstream stream error');
+        if (!res.headersSent) res.status(502);
+        res.end();
+      });
+      res.on('close', () => providerResponse.body.destroy());
       providerResponse.body.pipe(res);
     } else {
-      const data = await providerResponse.json();
-      res.json(data);
+      const text = await providerResponse.text();
+      if (contentType && contentType.includes('application/json')) {
+        const data = text ? JSON.parse(text) : {};
+        tokenCount = data?.usage?.total_tokens ?? null;
+        res.json(data);
+      } else {
+        res.send(text);
+      }
     }
+
+    const latencyMs = Date.now() - startedAt;
+    logRequest({
+      userId: req.user.id,
+      appId: req.user.app_id,
+      provider,
+      model,
+      status: providerResponse.status,
+      latencyMs,
+      tokenCount,
+    });
+    logger.info({
+      request_id: req.id,
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status: providerResponse.status,
+      latency_ms: latencyMs,
+      token_count: tokenCount,
+    }, 'relay request');
   } catch (err) {
     // SSRF / input validation errors are client mistakes — return 400.
     // All other relay failures return 502 with a generic message so we don't
@@ -268,7 +348,25 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     if (err.code === 'INVALID_RELAY_BASE_URL') {
       return res.status(400).json({ error: err.message });
     }
-    console.error('Relay error:', err);
+    const latencyMs = Date.now() - startedAt;
+    logRequest({
+      userId: req.user.id,
+      appId: req.user.app_id,
+      provider,
+      model,
+      status: 502,
+      latencyMs,
+    });
+    logger.error({
+      err,
+      request_id: req.id,
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status: 502,
+      latency_ms: latencyMs,
+    }, 'relay error');
     res.status(502).json({ error: 'Failed to reach AI provider' });
   }
 });
@@ -282,9 +380,9 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
  */
 function startServer() {
   return app.listen(PORT, '0.0.0.0', () => {
-    console.log(`byok-relay listening on port ${PORT}`);
-    console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
-    console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
+    logger.info({ port: PORT }, 'byok-relay listening');
+    logger.info({ allowed_origins: ALLOWED_ORIGINS }, 'allowed origins configured');
+    logger.info({ supported_providers: SUPPORTED_PROVIDERS }, 'supported providers configured');
   });
 }
 
