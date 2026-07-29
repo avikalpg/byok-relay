@@ -1,7 +1,8 @@
 /**
  * SQLite database layer.
  * Schema:
- *   users(id TEXT PK, token_hash TEXT UNIQUE, app_id TEXT, created_at INTEGER)
+ *   users(id TEXT PK, token_hash TEXT UNIQUE, token_hmac_version INTEGER,
+ *         app_id TEXT, created_at INTEGER)
  *   keys(id TEXT PK, user_id TEXT FK, provider TEXT, encrypted_key TEXT, created_at INTEGER)
  *
  * Keys are encrypted with AES-256-GCM using ENCRYPTION_SECRET from env.
@@ -33,6 +34,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     token_hash TEXT UNIQUE NOT NULL,
+    token_hmac_version INTEGER NOT NULL DEFAULT 2,
     app_id TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );
@@ -101,11 +103,12 @@ function _migrateTokenColumn() {
       CREATE TABLE users_new (
         id TEXT PRIMARY KEY,
         token_hash TEXT UNIQUE NOT NULL,
+        token_hmac_version INTEGER NOT NULL DEFAULT 1,
         app_id TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
-      INSERT INTO users_new (id, token_hash, app_id, created_at)
-        SELECT id, token_hash, app_id, created_at FROM users;
+      INSERT INTO users_new (id, token_hash, token_hmac_version, app_id, created_at)
+        SELECT id, token_hash, 1, app_id, created_at FROM users;
       DROP TABLE users;
       ALTER TABLE users_new RENAME TO users;
     `);
@@ -123,6 +126,18 @@ function _migrateTokenColumn() {
 }
 
 _migrateTokenColumn();
+
+// Existing token_hash rows predate key-version tracking and are conservatively
+// marked legacy/unconfirmed. A successful authentication confirms and updates
+// them to version 2. Fresh databases already include this column above.
+function _ensureTokenHmacVersionColumn() {
+  const cols = db.pragma('table_info(users)').map(c => c.name);
+  if (!cols.includes('token_hmac_version')) {
+    db.exec('ALTER TABLE users ADD COLUMN token_hmac_version INTEGER NOT NULL DEFAULT 1');
+  }
+}
+
+_ensureTokenHmacVersionColumn();
 
 // Create the token_hash index AFTER migration so it works on both
 // fresh installs (table was just created with token_hash) and legacy
@@ -225,7 +240,7 @@ function createUser(appId) {
   const token_hash = hashToken(token);
   const now = Date.now();
   db.prepare(
-    'INSERT INTO users (id, token_hash, app_id, created_at) VALUES (?, ?, ?, ?)'
+    'INSERT INTO users (id, token_hash, token_hmac_version, app_id, created_at) VALUES (?, ?, 2, ?, ?)'
   ).run(id, token_hash, appId, now);
   // Return plaintext token to caller — this is the only time it leaves memory.
   return { id, token };
@@ -238,9 +253,15 @@ function createUser(appId) {
 function getUserByToken(token) {
   const token_hash = hashToken(token);
   const selectUser = db
-    .prepare('SELECT id, app_id, created_at FROM users WHERE token_hash = ?')
+    .prepare('SELECT id, app_id, created_at, token_hmac_version FROM users WHERE token_hash = ?');
   let user = selectUser.get(token_hash);
-  if (user) return user;
+  if (user) {
+    if (user.token_hmac_version !== 2) {
+      db.prepare('UPDATE users SET token_hmac_version = 2 WHERE id = ?').run(user.id);
+    }
+    const { token_hmac_version: _version, ...publicUser } = user;
+    return publicUser;
+  }
 
   // Existing installations historically used ENCRYPTION_SECRET as the token
   // HMAC key. During key separation, accept that digest once and atomically
@@ -253,9 +274,34 @@ function getUserByToken(token) {
   user = selectUser.get(legacyHash);
   if (!user) return undefined;
 
-  db.prepare('UPDATE users SET token_hash = ? WHERE id = ? AND token_hash = ?')
+  db.prepare('UPDATE users SET token_hash = ?, token_hmac_version = 2 WHERE id = ? AND token_hash = ?')
     .run(token_hash, user.id, legacyHash);
-  return user;
+  const { token_hmac_version: _version, ...publicUser } = user;
+  return publicUser;
+}
+
+/**
+ * Return conservative HMAC migration progress without exposing user records.
+ * "current" means confirmed by a successful authentication or created after
+ * tracking was introduced; "legacy" includes all still-unconfirmed rows.
+ */
+function getTokenHmacMigrationProgress() {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN token_hmac_version = 2 THEN 1 ELSE 0 END) AS current,
+      SUM(CASE WHEN token_hmac_version = 2 THEN 0 ELSE 1 END) AS legacy
+    FROM users
+  `).get();
+  const total = Number(row.total || 0);
+  const current = Number(row.current || 0);
+  const legacy = Number(row.legacy || 0);
+  return {
+    total,
+    current,
+    legacy,
+    percent: total === 0 ? 100 : Number(((current / total) * 100).toFixed(1)),
+  };
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
@@ -290,4 +336,12 @@ function listProviders(userId) {
     .map(r => r.provider);
 }
 
-module.exports = { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders };
+module.exports = {
+  createUser,
+  getUserByToken,
+  getTokenHmacMigrationProgress,
+  upsertKey,
+  getDecryptedKey,
+  deleteKey,
+  listProviders,
+};
