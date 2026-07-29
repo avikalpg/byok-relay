@@ -48,9 +48,11 @@ db.exec(`
     UNIQUE(user_id, provider)
   );
 
-  CREATE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
   CREATE INDEX IF NOT EXISTS idx_keys_user_provider ON keys(user_id, provider);
 `);
+// NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
+// On a legacy DB the users table still has 'token', not 'token_hash', so
+// creating the index here would throw "no such column: token_hash".
 
 // ── Migration: rename legacy `token` column → `token_hash` and hash values ─
 //
@@ -64,26 +66,37 @@ db.exec(`
 
 function _migrateTokenColumn() {
   const cols = db.pragma('table_info(users)').map(c => c.name);
-  if (!cols.includes('token')) return; // already migrated
+  if (!cols.includes('token')) return; // no legacy column — already migrated
 
-  // 1. Backfill hash values into a new column
-  db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+  // Idempotent: if a previous run crashed after ALTER TABLE but before the
+  // table rebuild, token_hash already exists. Skip the ALTER in that case.
+  const alreadyHasTokenHash = cols.includes('token_hash');
 
-  const hmacKey = _getHmacKey();
+  // Dropping a referenced table applies ON DELETE actions when foreign-key
+  // enforcement is enabled. Disable it outside the transaction so rebuilding
+  // users cannot cascade-delete existing provider keys.
+  db.pragma('foreign_keys = OFF');
 
-  // Wrap backfill + table rebuild in one transaction so a crash mid-way
-  // cannot leave the database without a `users` table.
+  // Wrap everything (DDL + DML + rebuild) in a single transaction so that a
+  // crash mid-migration leaves the DB unchanged and the next startup retries.
   const migrate = db.transaction(() => {
-    // 1. Backfill hash values into the new column
-    const rows = db.prepare('SELECT id, token FROM users').all();
+    // 1. Add the new column (skip if it was added by a prior interrupted run)
+    if (!alreadyHasTokenHash) {
+      db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+    }
+
+    // 2. Backfill hash values into the new column. Only rows whose token_hash
+    //    is still NULL need updating, which keeps the migration idempotent.
+    const hmacKey = _getHmacKey();
+    const rows = db.prepare('SELECT id, token FROM users WHERE token_hash IS NULL').all();
     const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
     for (const row of rows) {
       update.run(_hmac(row.token, hmacKey), row.id);
     }
 
-    // 2. Rebuild the table without the old `token` column
+    // 3. Rebuild the table without the old `token` column
     //    (SQLite does not support DROP COLUMN before 3.35.0)
-    //    All three statements run atomically — no window where `users` is absent.
+    //    All statements run atomically — no window where `users` is absent.
     db.exec(`
       CREATE TABLE users_new (
         id TEXT PRIMARY KEY,
@@ -95,13 +108,26 @@ function _migrateTokenColumn() {
         SELECT id, token_hash, app_id, created_at FROM users;
       DROP TABLE users;
       ALTER TABLE users_new RENAME TO users;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
     `);
   });
-  migrate();
+
+  try {
+    migrate();
+    const violations = db.pragma('foreign_key_check');
+    if (violations.length > 0) {
+      throw new Error('Legacy token migration left invalid foreign-key references');
+    }
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 _migrateTokenColumn();
+
+// Create the token_hash index AFTER migration so it works on both
+// fresh installs (table was just created with token_hash) and legacy
+// installs (migration just renamed the column).
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);');
 
 // ── Encryption helpers ──────────────────────────────────────────────────────
 
@@ -115,6 +141,10 @@ function getEncryptionKey() {
   _encryptionKey = crypto.scryptSync(secret, salt, 32);
   return _encryptionKey;
 }
+
+// Warm the cache eagerly at module load (dotenv is guaranteed to have run
+// before this module is imported — see src/index.js).
+getEncryptionKey();
 
 function encryptApiKey(plaintext) {
   const key = getEncryptionKey();
@@ -194,7 +224,9 @@ function createUser(appId) {
  */
 function getUserByToken(token) {
   const token_hash = hashToken(token);
-  return db.prepare('SELECT * FROM users WHERE token_hash = ?').get(token_hash);
+  return db
+    .prepare('SELECT id, app_id, created_at FROM users WHERE token_hash = ?')
+    .get(token_hash);
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
