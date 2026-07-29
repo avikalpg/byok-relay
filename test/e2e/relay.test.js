@@ -314,9 +314,10 @@ describe('byok-relay — example product end-to-end', () => {
 
   // ── 1. Health check ─────────────────────────────────────────────────────
 
-  it('GET /health — returns ok + provider list', async () => {
-    const r = await request(relayPort, 'GET', '/health');
+  it('GET /health — returns ok + provider list + request id header', async () => {
+    const r = await request(relayPort, 'GET', '/health', undefined, { 'x-request-id': 'e2e-request-id' });
     assert.equal(r.status, 200);
+    assert.equal(r.headers['x-request-id'], 'e2e-request-id');
     assert.equal(r.body.ok, true);
     assert.ok(Array.isArray(r.body.providers), 'providers should be an array');
     assert.ok(r.body.providers.includes('openai'),     'should list openai');
@@ -488,6 +489,20 @@ describe('byok-relay — example product end-to-end', () => {
     );
     assert.ok(r.body.includes('data:'),   'SSE body must contain data: lines');
     assert.ok(r.body.includes('[DONE]'),  'SSE body must contain the [DONE] sentinel');
+  });
+
+  it('GET /stats — returns aggregate relay usage for current user and app_id', async () => {
+    const userStats = await request(relayPort, 'GET', '/stats', undefined, { 'x-relay-token': relayToken });
+    assert.equal(userStats.status, 200);
+    assert.ok(userStats.body.total_requests >= 3, 'should count relay calls made earlier in the suite');
+    assert.ok(userStats.body.by_provider.some((row) => row.provider === 'openai-compatible'));
+    assert.ok(userStats.body.by_model.some((row) => row.model === 'gpt-4o-mini'));
+    assert.equal(typeof userStats.body.success_rate, 'number');
+
+    const appStats = await request(relayPort, 'GET', `/stats/${APP_ID}`, undefined, { 'x-relay-token': relayToken });
+    assert.equal(appStats.status, 200);
+    assert.equal(appStats.body.total_requests, userStats.body.total_requests);
+    assert.deepEqual(appStats.body.by_provider, userStats.body.by_provider);
   });
 
   // ── 7. Relay — error paths ───────────────────────────────────────────────

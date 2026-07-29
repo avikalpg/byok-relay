@@ -3,6 +3,8 @@
  * Schema:
  *   users(id TEXT PK, token_hash TEXT UNIQUE, app_id TEXT, created_at INTEGER)
  *   keys(id TEXT PK, user_id TEXT FK, provider TEXT, encrypted_key TEXT, created_at INTEGER)
+ *   request_logs(id TEXT PK, user_id TEXT FK, app_id TEXT, provider TEXT, model TEXT,
+ *     status INTEGER, latency_ms INTEGER, token_count INTEGER, created_at INTEGER)
  *
  * Keys are encrypted with AES-256-GCM using ENCRYPTION_SECRET from env.
  *
@@ -48,7 +50,21 @@ db.exec(`
     UNIQUE(user_id, provider)
   );
 
+  CREATE TABLE IF NOT EXISTS request_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT,
+    status INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    token_count INTEGER,
+    created_at INTEGER NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_keys_user_provider ON keys(user_id, provider);
+  CREATE INDEX IF NOT EXISTS idx_request_logs_user_created ON request_logs(user_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_request_logs_app_created ON request_logs(app_id, created_at);
 `);
 // NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
 // On a legacy DB the users table still has 'token', not 'token_hash', so
@@ -261,4 +277,94 @@ function listProviders(userId) {
     .map(r => r.provider);
 }
 
-module.exports = { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders };
+// ── Request logging / stats helpers ────────────────────────────────────────
+
+function logRequest({ userId, appId, provider, model = null, status, latencyMs, tokenCount = null }) {
+  db.prepare(`
+    INSERT INTO request_logs (
+      id, user_id, app_id, provider, model, status, latency_ms, token_count, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    uuidv4(),
+    userId,
+    appId,
+    provider,
+    model,
+    status,
+    latencyMs,
+    tokenCount,
+    Date.now(),
+  );
+}
+
+function _summariseStats(whereSql, params) {
+  const summary = db.prepare(`
+    SELECT
+      COUNT(*) AS total_requests,
+      SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS error_count,
+      ROUND(AVG(latency_ms), 2) AS avg_latency_ms,
+      COALESCE(SUM(token_count), 0) AS total_tokens
+    FROM request_logs
+    ${whereSql}
+  `).get(...params);
+
+  const byProvider = db.prepare(`
+    SELECT
+      provider,
+      COUNT(*) AS request_count,
+      SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS error_count,
+      ROUND(AVG(latency_ms), 2) AS avg_latency_ms,
+      COALESCE(SUM(token_count), 0) AS total_tokens
+    FROM request_logs
+    ${whereSql}
+    GROUP BY provider
+    ORDER BY request_count DESC, provider ASC
+  `).all(...params);
+
+  const byModel = db.prepare(`
+    SELECT
+      model,
+      COUNT(*) AS request_count,
+      SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS error_count,
+      ROUND(AVG(latency_ms), 2) AS avg_latency_ms,
+      COALESCE(SUM(token_count), 0) AS total_tokens
+    FROM request_logs
+    ${whereSql}
+    AND model IS NOT NULL
+    GROUP BY model
+    ORDER BY request_count DESC, model ASC
+  `).all(...params);
+
+  const totalRequests = summary.total_requests || 0;
+  const errorCount = summary.error_count || 0;
+
+  return {
+    total_requests: totalRequests,
+    error_count: errorCount,
+    success_rate: totalRequests === 0 ? 1 : Number(((totalRequests - errorCount) / totalRequests).toFixed(4)),
+    avg_latency_ms: summary.avg_latency_ms || 0,
+    total_tokens: summary.total_tokens || 0,
+    by_provider: byProvider,
+    by_model: byModel,
+  };
+}
+
+function getStatsForUser(userId) {
+  return _summariseStats('WHERE user_id = ?', [userId]);
+}
+
+function getStatsForApp(appId) {
+  return _summariseStats('WHERE app_id = ?', [appId]);
+}
+
+module.exports = {
+  createUser,
+  getUserByToken,
+  upsertKey,
+  getDecryptedKey,
+  deleteKey,
+  listProviders,
+  logRequest,
+  getStatsForUser,
+  getStatsForApp,
+};
