@@ -132,6 +132,10 @@ it('dedicated HMAC key accepts legacy tokens and upgrades their stored hashes', 
     verifyDb.prepare('SELECT token_hash FROM users WHERE id = ?').get('existing-user').token_hash,
     currentHash,
   );
+  assert.equal(
+    verifyDb.prepare('SELECT token_hmac_version FROM users WHERE id = ?').get('existing-user').token_hmac_version,
+    2,
+  );
   verifyDb.close();
 
   // After the lazy upgrade, the dedicated key works without legacy fallback.
@@ -151,6 +155,41 @@ it('dedicated HMAC key accepts legacy tokens and upgrades their stored hashes', 
   assert.equal(currentOnlyLookup.status, 0, currentOnlyLookup.stderr || currentOnlyLookup.stdout);
   assert.equal(JSON.parse(currentOnlyLookup.stdout).id, 'existing-user');
 
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+it('HMAC migration progress reports conservative legacy and current counts', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-hmac-progress-'));
+  const dbPath = path.join(tmpDir, 'relay.db');
+  const seedDb = new Database(dbPath);
+  seedDb.exec(`
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT UNIQUE NOT NULL,
+      token_hmac_version INTEGER NOT NULL DEFAULT 1,
+      app_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    INSERT INTO users VALUES ('legacy', 'legacy-hash', 1, 'app', 1);
+    INSERT INTO users VALUES ('current', 'current-hash', 2, 'app', 2);
+  `);
+  seedDb.close();
+
+  const status = spawnSync(process.execPath, ['-e', `
+    const { getTokenHmacMigrationProgress } = require('./src/db');
+    process.stdout.write(JSON.stringify(getTokenHmacMigrationProgress()));
+  `], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: {
+      ...process.env,
+      DB_PATH: dbPath,
+      ENCRYPTION_SECRET: 'progress-test-secret-at-least-32-characters',
+      TOKEN_HMAC_SECRET: 'progress-token-secret-at-least-32-characters',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.deepEqual(JSON.parse(status.stdout), { total: 2, current: 1, legacy: 1, percent: 50 });
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
