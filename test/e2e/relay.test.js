@@ -26,6 +26,7 @@ const os     = require('node:os');
 const path   = require('node:path');
 const fs     = require('node:fs');
 const Database = require('better-sqlite3');
+const crypto = require('node:crypto');
 
 const { createMockProvider } = require('./mock-provider');
 
@@ -81,6 +82,75 @@ it('startup migration preserves keys belonging to legacy-token users', () => {
   );
   assert.deepEqual(verifyDb.pragma('foreign_key_check'), []);
   verifyDb.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+it('dedicated HMAC key accepts legacy tokens and upgrades their stored hashes', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-hmac-rotation-'));
+  const dbPath = path.join(tmpDir, 'relay.db');
+  const legacySecret = 'legacy-encryption-secret-at-least-32-characters';
+  const currentSecret = 'dedicated-token-secret-at-least-32-characters';
+  const token = 'existing-user-plaintext-relay-token';
+  const legacyHash = crypto.createHmac('sha256', legacySecret).update(token).digest('hex');
+  const currentHash = crypto.createHmac('sha256', currentSecret).update(token).digest('hex');
+  const seedDb = new Database(dbPath);
+
+  seedDb.exec(`
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT UNIQUE NOT NULL,
+      app_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  seedDb.prepare('INSERT INTO users VALUES (?, ?, ?, ?)')
+    .run('existing-user', legacyHash, 'existing-app', 1);
+  seedDb.close();
+
+  const lookup = spawnSync(process.execPath, ['-e', `
+    const { getUserByToken } = require('./src/db');
+    process.stdout.write(JSON.stringify(getUserByToken(${JSON.stringify(token)})));
+  `], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: {
+      ...process.env,
+      DB_PATH: dbPath,
+      ENCRYPTION_SECRET: legacySecret,
+      TOKEN_HMAC_SECRET: currentSecret,
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(lookup.status, 0, lookup.stderr || lookup.stdout);
+  assert.deepEqual(JSON.parse(lookup.stdout), {
+    id: 'existing-user',
+    app_id: 'existing-app',
+    created_at: 1,
+  });
+
+  const verifyDb = new Database(dbPath, { readonly: true });
+  assert.equal(
+    verifyDb.prepare('SELECT token_hash FROM users WHERE id = ?').get('existing-user').token_hash,
+    currentHash,
+  );
+  verifyDb.close();
+
+  // After the lazy upgrade, the dedicated key works without legacy fallback.
+  const currentOnlyLookup = spawnSync(process.execPath, ['-e', `
+    const { getUserByToken } = require('./src/db');
+    process.stdout.write(JSON.stringify(getUserByToken(${JSON.stringify(token)})));
+  `], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: {
+      ...process.env,
+      DB_PATH: dbPath,
+      ENCRYPTION_SECRET: currentSecret,
+      TOKEN_HMAC_SECRET: currentSecret,
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(currentOnlyLookup.status, 0, currentOnlyLookup.stderr || currentOnlyLookup.stdout);
+  assert.equal(JSON.parse(currentOnlyLookup.stdout).id, 'existing-user');
+
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 

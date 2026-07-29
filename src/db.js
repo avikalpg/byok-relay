@@ -197,6 +197,19 @@ function hashToken(token) {
   return _hmac(token, _getHmacKey());
 }
 
+/**
+ * Return the previous HMAC key when production is moving from the historical
+ * ENCRYPTION_SECRET fallback to a dedicated TOKEN_HMAC_SECRET.
+ *
+ * Once every stored token has been upgraded, ENCRYPTION_SECRET remains
+ * available for API-key decryption but is no longer used for new token hashes.
+ */
+function _getLegacyHmacKey() {
+  const current = process.env.TOKEN_HMAC_SECRET;
+  const legacy = process.env.ENCRYPTION_SECRET;
+  return current && legacy && current !== legacy ? legacy : null;
+}
+
 // ── User helpers ────────────────────────────────────────────────────────────
 
 /**
@@ -224,9 +237,25 @@ function createUser(appId) {
  */
 function getUserByToken(token) {
   const token_hash = hashToken(token);
-  return db
+  const selectUser = db
     .prepare('SELECT id, app_id, created_at FROM users WHERE token_hash = ?')
-    .get(token_hash);
+  let user = selectUser.get(token_hash);
+  if (user) return user;
+
+  // Existing installations historically used ENCRYPTION_SECRET as the token
+  // HMAC key. During key separation, accept that digest once and atomically
+  // replace it with the dedicated-key digest. The plaintext token is still
+  // never persisted.
+  const legacyKey = _getLegacyHmacKey();
+  if (!legacyKey) return undefined;
+
+  const legacyHash = _hmac(token, legacyKey);
+  user = selectUser.get(legacyHash);
+  if (!user) return undefined;
+
+  db.prepare('UPDATE users SET token_hash = ? WHERE id = ? AND token_hash = ?')
+    .run(token_hash, user.id, legacyHash);
+  return user;
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
