@@ -13,15 +13,8 @@
 
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
-const path = require('path');
-const fs = require('fs');
 
 // ── Setup ──────────────────────────────────────────────────────────────────
-
-const DB_PATH = '/tmp/bench/bench-cpu.db';
-fs.rmSync(DB_PATH, { force: true });
-fs.rmSync(DB_PATH + '-wal', { force: true });
-fs.rmSync(DB_PATH + '-shm', { force: true });
 
 const ENCRYPTION_SECRET = 'benchmarkbenchmarkbenchmarkbenchmark32x';
 const RUNS = 10000;
@@ -32,8 +25,7 @@ const ENCRYPTION_KEY = crypto.scryptSync(ENCRYPTION_SECRET, 'byok-relay-salt', 3
 
 // ── DB setup ───────────────────────────────────────────────────────────────
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+const db = new Database(':memory:');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
@@ -89,6 +81,10 @@ db.prepare('INSERT INTO keys (id, user_id, provider, encrypted_key, iv, auth_tag
 
 const stmtUser = db.prepare('SELECT id FROM users WHERE token_hash = ?');
 const stmtKey  = db.prepare('SELECT encrypted_key, iv, auth_tag FROM keys WHERE user_id = ? AND provider = ?');
+const requestBody = {
+  model: 'claude-3-haiku-20240307',
+  messages: [{ role: 'user', content: 'Hello' }],
+};
 
 // ── Benchmark ──────────────────────────────────────────────────────────────
 
@@ -107,8 +103,7 @@ function oneRequest() {
   const apiKey = decryptKey(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag);
 
   // Step 4: Body re-serialization (what the relay does before forwarding)
-  const body = { model: 'claude-3-haiku-20240307', messages: [{ role: 'user', content: 'Hello' }] };
-  const serialized = JSON.stringify(body);
+  const serialized = JSON.stringify(requestBody);
 
   return apiKey.length + serialized.length; // prevent optimization
 }
@@ -133,6 +128,10 @@ function percentile(arr, p) {
 }
 
 const mean = times.reduce((a, b) => a + b, 0) / times.length;
+const p50 = percentile(times, 50);
+const p90 = percentile(times, 90);
+const p99 = percentile(times, 99);
+const p999 = percentile(times, 99.9);
 console.log('\n=== byok-relay CPU overhead benchmark ===');
 console.log(`Platform: ${process.platform} ${process.arch}, Node ${process.version}`);
 console.log(`Runs: ${WARMUP} warmup + ${RUNS} measured\n`);
@@ -144,15 +143,15 @@ console.log('  4. AES-256-GCM key decryption');
 console.log('  5. JSON body re-serialization\n');
 console.log('Results:');
 console.log(`  min:  ${Math.min(...times).toFixed(3)} ms`);
-console.log(`  p50:  ${percentile(times, 50).toFixed(3)} ms`);
-console.log(`  p90:  ${percentile(times, 90).toFixed(3)} ms`);
-console.log(`  p99:  ${percentile(times, 99).toFixed(3)} ms`);
-console.log(`  p999: ${percentile(times, 99.9).toFixed(3)} ms`);
+console.log(`  p50:  ${p50.toFixed(3)} ms`);
+console.log(`  p90:  ${p90.toFixed(3)} ms`);
+console.log(`  p99:  ${p99.toFixed(3)} ms`);
+console.log(`  p999: ${p999.toFixed(3)} ms`);
 console.log(`  max:  ${Math.max(...times).toFixed(3)} ms`);
 console.log(`  mean: ${mean.toFixed(3)} ms`);
-console.log('\nConclusion: relay processing overhead (excluding network) is <1ms on p99.');
+console.log(`\nConclusion: measured relay CPU overhead at p99 is ${p99.toFixed(3)} ms (excluding network).`);
 console.log('Real-world total overhead = CPU time above + relay→provider network distance.');
-console.log('If relay is hosted in same region as AI provider, expect <2ms total overhead.');
+console.log('Total latency also depends on the network path and is not measured here.');
 
 // Output JSON for embedding in page
 const result = {
@@ -161,10 +160,10 @@ const result = {
   warmup: WARMUP,
   ms: {
     min: +Math.min(...times).toFixed(3),
-    p50: +percentile(times, 50).toFixed(3),
-    p90: +percentile(times, 90).toFixed(3),
-    p99: +percentile(times, 99).toFixed(3),
-    p999: +percentile(times, 99.9).toFixed(3),
+    p50: +p50.toFixed(3),
+    p90: +p90.toFixed(3),
+    p99: +p99.toFixed(3),
+    p999: +p999.toFixed(3),
     max: +Math.max(...times).toFixed(3),
     mean: +mean.toFixed(3),
   }
