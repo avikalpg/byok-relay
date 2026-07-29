@@ -92,25 +92,26 @@ function resolveModelRoute(model, streaming = false) {
   if (model.includes('/')) {
     const slashIdx  = model.indexOf('/');
     const prefix    = model.slice(0, slashIdx).toLowerCase();
-    const modelName = model.slice(slashIdx + 1);
+    const modelName = model.slice(slashIdx + 1).trim();
 
-    if (Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULT_PATHS, prefix)) {
-      let path;
-      if (prefix === 'google') {
-        path = buildGooglePath(modelName, streaming);
-      } else {
-        path = PROVIDER_DEFAULT_PATHS[prefix];
-      }
-      // path can still be null for hypothetical future dynamic providers
-      if (path === null) return null;
-      return { provider: prefix, path, modelName };
+    if (!modelName) return null;
+    if (!Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULT_PATHS, prefix)) {
+      return null;
     }
-    // Unknown prefix — fall through to pattern matching on the bare model name
+
+    let path;
+    if (prefix === 'google') {
+      path = buildGooglePath(modelName, streaming);
+    } else {
+      path = PROVIDER_DEFAULT_PATHS[prefix];
+    }
+    // path can still be null for hypothetical future dynamic providers
+    if (path === null) return null;
+    return { provider: prefix, path, modelName };
   }
 
   // ── Strategy 2: pattern matching ─────────────────────────────────────────
-  // Strip any unrecognised prefix so patterns match against the model name only.
-  const bare = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
+  const bare = model;
 
   for (const { pattern, provider, path: basePath } of MODEL_PATTERNS) {
     if (pattern.test(bare)) {
