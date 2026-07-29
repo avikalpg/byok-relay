@@ -328,6 +328,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 ## Security
 
 - **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
+- **Separated token hashing** — set `TOKEN_HMAC_SECRET` to use a dedicated HMAC key. Existing hashes made with the historical `ENCRYPTION_SECRET` fallback continue to authenticate and are upgraded lazily, so adding the dedicated key does not log out existing users.
 - **Keys never returned** — after the initial POST, the key value is never sent over the wire again
 - **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
 - **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
