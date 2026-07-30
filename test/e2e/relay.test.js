@@ -905,7 +905,7 @@ describe('byok-relay — example product end-to-end', () => {
           REQUEST_BODY_LIMIT_BYTES: '10mb',
           NODE_ENV: 'test',
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['ignore', 'ignore', 'ignore'],
       },
     );
 
@@ -923,8 +923,19 @@ describe('byok-relay — example product end-to-end', () => {
         'large body should reach auth instead of being rejected by a partially parsed 10-byte limit',
       );
     } finally {
-      malformedLimitProc.kill('SIGTERM');
-      await new Promise((resolve) => malformedLimitProc.once('exit', resolve));
+      if (malformedLimitProc.exitCode == null && malformedLimitProc.signalCode == null) {
+        await new Promise((resolve) => {
+          const killTimer = setTimeout(() => {
+            malformedLimitProc.kill('SIGKILL');
+          }, 5000);
+          const done = () => {
+            clearTimeout(killTimer);
+            resolve();
+          };
+          malformedLimitProc.once('exit', done);
+          if (!malformedLimitProc.kill('SIGTERM')) done();
+        });
+      }
       fs.rmSync(malformedLimitDb, { force: true });
     }
   });
