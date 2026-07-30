@@ -191,6 +191,101 @@ function logRelayError(req, details) {
   } catch (_) {}
 }
 
+function createRelayLogger(req) {
+  let relayMetricLogged = false;
+
+  return {
+    logRelayRequestOnce(details) {
+      if (relayMetricLogged) return;
+      relayMetricLogged = true;
+      logRelayRequest(req, details);
+    },
+    logRelayErrorOnce(details) {
+      if (relayMetricLogged) return;
+      relayMetricLogged = true;
+      logRelayError(req, details);
+    },
+  };
+}
+
+async function forwardRelayRequest({
+  req,
+  res,
+  provider,
+  forwardPath,
+  body,
+  apiKey,
+  extraHeaders,
+  model,
+  streamingRequested,
+}) {
+  const relayStart = Date.now();
+  const { logRelayRequestOnce, logRelayErrorOnce } = createRelayLogger(req);
+
+  try {
+    const providerResponse = await forwardRequest(
+      provider,
+      forwardPath,
+      req.method,
+      body,
+      apiKey,
+      extraHeaders,
+    );
+
+    res.status(providerResponse.status);
+    const contentType = providerResponse.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    const isStream = streamingRequested ||
+      (contentType && contentType.includes('text/event-stream'));
+
+    if (isStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      pipeline(providerResponse.body, res, (streamErr) => {
+        const latency_ms = Date.now() - relayStart;
+        if (streamErr) {
+          logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
+          return;
+        }
+        logRelayRequestOnce({
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: true,
+        });
+      });
+      return;
+    }
+
+    const data = await providerResponse.json();
+    const latency_ms = Date.now() - relayStart;
+    logRelayRequestOnce({
+      provider,
+      model,
+      status: providerResponse.status,
+      latency_ms,
+      streaming: false,
+    });
+    res.json(data);
+  } catch (err) {
+    // SSRF / input validation errors are client mistakes — return 400.
+    // All other relay failures return 502 with a generic message so we don't
+    // leak internal hostnames, IPs, or stack traces to the client.
+    if (err.code === 'INVALID_RELAY_BASE_URL') {
+      return res.status(400).json({ error: err.message });
+    }
+    const latency_ms = Date.now() - relayStart;
+    logRelayErrorOnce({ err, provider, model, latency_ms });
+    if (!res.headersSent) {
+      return res.status(502).json({ error: 'Failed to reach AI provider' });
+    }
+    res.destroy(err);
+  }
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // Health check
@@ -361,77 +456,17 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
-  const relayStart = Date.now();
-  let relayMetricLogged = false;
-  const logRelayRequestOnce = (details) => {
-    if (relayMetricLogged) return;
-    relayMetricLogged = true;
-    logRelayRequest(req, details);
-  };
-  const logRelayErrorOnce = (details) => {
-    if (relayMetricLogged) return;
-    relayMetricLogged = true;
-    logRelayError(req, details);
-  };
-
-  try {
-    const providerResponse = await forwardRequest(
-      provider,
-      forwardPath,
-      req.method,
-      forwardBody,
-      apiKey,
-      extraHeaders,
-    );
-
-    res.status(providerResponse.status);
-    const contentType = providerResponse.headers.get('content-type');
-    if (contentType) res.setHeader('Content-Type', contentType);
-
-    const isStream = streaming ||
-      (contentType && contentType.includes('text/event-stream'));
-
-    if (isStream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      pipeline(providerResponse.body, res, (streamErr) => {
-        const latency_ms = Date.now() - relayStart;
-        if (streamErr) {
-          logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
-          return;
-        }
-        logRelayRequestOnce({
-          provider,
-          model,
-          status: providerResponse.status,
-          latency_ms,
-          streaming: true,
-        });
-      });
-    } else {
-      const data = await providerResponse.json();
-      const latency_ms = Date.now() - relayStart;
-      logRelayRequestOnce({
-        provider,
-        model,
-        status: providerResponse.status,
-        latency_ms,
-        streaming: false,
-      });
-      res.json(data);
-    }
-  } catch (err) {
-    if (err.code === 'INVALID_RELAY_BASE_URL') {
-      return res.status(400).json({ error: err.message });
-    }
-    const latency_ms = Date.now() - relayStart;
-    logRelayErrorOnce({ err, provider, model, latency_ms });
-    if (!res.headersSent) {
-      return res.status(502).json({ error: 'Failed to reach AI provider' });
-    }
-    res.destroy(err);
-  }
+  return forwardRelayRequest({
+    req,
+    res,
+    provider,
+    forwardPath,
+    body: forwardBody,
+    apiKey,
+    extraHeaders,
+    model,
+    streamingRequested: streaming,
+  });
 });
 
 /**
@@ -487,82 +522,18 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   }
 
   const model = req.body?.model || null;
-  const relayStart = Date.now();
-  let relayMetricLogged = false;
-  const logRelayRequestOnce = (details) => {
-    if (relayMetricLogged) return;
-    relayMetricLogged = true;
-    logRelayRequest(req, details);
-  };
-  const logRelayErrorOnce = (details) => {
-    if (relayMetricLogged) return;
-    relayMetricLogged = true;
-    logRelayError(req, details);
-  };
 
-  try {
-    const providerResponse = await forwardRequest(
-      provider,
-      forwardPath,
-      req.method,
-      req.body,
-      apiKey,
-      extraHeaders,
-    );
-
-    // Forward status and relevant headers
-    res.status(providerResponse.status);
-    const contentType = providerResponse.headers.get('content-type');
-    if (contentType) res.setHeader('Content-Type', contentType);
-
-    const isStream = req.body?.stream === true ||
-      (contentType && contentType.includes('text/event-stream'));
-
-    if (isStream) {
-      // Pipe the SSE stream directly to the client
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      pipeline(providerResponse.body, res, (streamErr) => {
-        const latency_ms = Date.now() - relayStart;
-        if (streamErr) {
-          logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
-          return;
-        }
-        logRelayRequestOnce({
-          provider,
-          model,
-          status: providerResponse.status,
-          latency_ms,
-          streaming: true,
-        });
-      });
-    } else {
-      const data = await providerResponse.json();
-      const latency_ms = Date.now() - relayStart;
-      logRelayRequestOnce({
-        provider,
-        model,
-        status: providerResponse.status,
-        latency_ms,
-        streaming: false,
-      });
-      res.json(data);
-    }
-  } catch (err) {
-    // SSRF / input validation errors are client mistakes — return 400.
-    // All other relay failures return 502 with a generic message so we don't
-    // leak internal hostnames, IPs, or stack traces to the client.
-    if (err.code === 'INVALID_RELAY_BASE_URL') {
-      return res.status(400).json({ error: err.message });
-    }
-    const latency_ms = Date.now() - relayStart;
-    logRelayErrorOnce({ err, provider, model, latency_ms });
-    if (!res.headersSent) {
-      return res.status(502).json({ error: 'Failed to reach AI provider' });
-    }
-    res.destroy(err);
-  }
+  return forwardRelayRequest({
+    req,
+    res,
+    provider,
+    forwardPath,
+    body: req.body,
+    apiKey,
+    extraHeaders,
+    model,
+    streamingRequested: req.body?.stream === true,
+  });
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
