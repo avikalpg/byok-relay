@@ -41,6 +41,12 @@ function createMockProvider(options = {}) {
 
       // ── Route: POST /v1/chat/completions ─────────────────────────────────
       if (req.method === 'POST' && req.url.startsWith('/v1/chat/completions')) {
+        if (body.forceJsonError) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'mock rate limited' }));
+          return;
+        }
+
         if (body.stream) {
           // Server-Sent Events stream
           res.writeHead(200, {

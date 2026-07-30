@@ -236,8 +236,8 @@ async function forwardRelayRequest({
     const contentType = providerResponse.headers.get('content-type');
     if (contentType) res.setHeader('Content-Type', contentType);
 
-    const isStream = streamingRequested ||
-      (contentType && contentType.includes('text/event-stream'));
+    const isStream = (contentType && contentType.includes('text/event-stream')) ||
+      (streamingRequested && providerResponse.ok);
 
     if (isStream) {
       res.setHeader('Content-Type', 'text/event-stream');

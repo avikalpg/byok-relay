@@ -593,10 +593,39 @@ describe('byok-relay — example product end-to-end', () => {
     assert.equal(r.status, 200);
     assert.ok(
       r.headers['content-type']?.includes('text/event-stream'),
-      `Content-Type should be text/event-stream, got: ${r.headers['content-type']}`,
+      'Content-Type should be text/event-stream',
     );
     assert.ok(r.body.includes('data:'),   'SSE body must contain data: lines');
     assert.ok(r.body.includes('[DONE]'),  'SSE body must contain the [DONE] sentinel');
+  });
+
+  it('POST /relay/openai-compatible — JSON upstream errors stay JSON even when stream is requested', async () => {
+    mock.clearRequests();
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Stream error test' }],
+        stream: true,
+        forceJsonError: true,
+      },
+      {
+        'x-relay-token': relayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 429);
+    assert.ok(
+      r.headers['content-type']?.includes('application/json'),
+      'Content-Type should stay application/json',
+    );
+    assert.ok(
+      !r.headers['content-type']?.includes('text/event-stream'),
+      'JSON upstream errors must not be mislabeled as SSE',
+    );
+    assert.equal(r.body.error, 'mock rate limited');
   });
 
   // ── 7. Relay — error paths ───────────────────────────────────────────────
