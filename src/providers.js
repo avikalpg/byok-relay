@@ -532,7 +532,7 @@ const PROVIDERS = {
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
  */
-async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}) {
+async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}, options = {}) {
   const config = PROVIDERS[provider];
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
@@ -594,6 +594,7 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     method,
     headers,
     body: fetchBody,
+    signal: options.signal,
   });
 
   return response;

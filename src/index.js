@@ -46,13 +46,17 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
 const DEFAULT_REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
-const configuredRequestBodyLimitBytes = Number.parseInt(
-  process.env.REQUEST_BODY_LIMIT_BYTES || String(DEFAULT_REQUEST_BODY_LIMIT_BYTES),
-  10,
-);
-const REQUEST_BODY_LIMIT_BYTES = Number.isFinite(configuredRequestBodyLimitBytes) && configuredRequestBodyLimitBytes > 0
-  ? configuredRequestBodyLimitBytes
-  : DEFAULT_REQUEST_BODY_LIMIT_BYTES;
+function parseRequestBodyLimitBytes(rawValue) {
+  const value = String(rawValue ?? DEFAULT_REQUEST_BODY_LIMIT_BYTES).trim();
+  if (!/^\d+$/.test(value)) return DEFAULT_REQUEST_BODY_LIMIT_BYTES;
+
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_REQUEST_BODY_LIMIT_BYTES;
+}
+
+const REQUEST_BODY_LIMIT_BYTES = parseRequestBodyLimitBytes(process.env.REQUEST_BODY_LIMIT_BYTES);
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 
@@ -262,15 +266,29 @@ async function forwardRelayRequest({
 }) {
   const relayStart = Date.now();
   const { logRelayRequestOnce, logRelayErrorOnce } = createRelayLogger(req);
+  const upstreamAbortController = new AbortController();
+  let providerResponse;
+
+  function abortUpstreamBody() {
+    if (providerResponse?.body && !providerResponse.body.destroyed) {
+      providerResponse.body.destroy();
+    }
+    if (!res.writableEnded && !upstreamAbortController.signal.aborted) {
+      upstreamAbortController.abort();
+    }
+  }
+
+  res.on('close', abortUpstreamBody);
 
   try {
-    const providerResponse = await forwardRequest(
+    providerResponse = await forwardRequest(
       provider,
       forwardPath,
       req.method,
       body,
       apiKey,
       extraHeaders,
+      { signal: upstreamAbortController.signal },
     );
 
     res.status(providerResponse.status);
@@ -308,6 +326,7 @@ async function forwardRelayRequest({
       res.setHeader('Connection', 'keep-alive');
 
       providerResponse.body.on('error', (streamErr) => {
+        if (upstreamAbortController.signal.aborted || res.destroyed) return;
         const latency_ms = Date.now() - relayStart;
         logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
         if (!res.writableEnded) {
@@ -325,11 +344,6 @@ async function forwardRelayRequest({
           streaming: true,
         });
       });
-      res.on('close', () => {
-        if (providerResponse.body && !providerResponse.body.destroyed) {
-          providerResponse.body.destroy();
-        }
-      });
       providerResponse.body.pipe(res);
       return;
     }
@@ -341,9 +355,19 @@ async function forwardRelayRequest({
       if (contentDisposition) res.setHeader('Content-Disposition', contentDisposition);
 
       providerResponse.body.on('error', (binaryErr) => {
+        if (upstreamAbortController.signal.aborted || res.destroyed) return;
         const latency_ms = Date.now() - relayStart;
         logRelayErrorOnce({ err: binaryErr, provider, model, latency_ms });
-        if (!res.writableEnded) res.end();
+        if (res.writableEnded) return;
+        providerResponse.body.unpipe(res);
+        if (!res.headersSent) {
+          res.removeHeader('Content-Type');
+          res.removeHeader('Content-Length');
+          res.removeHeader('Content-Disposition');
+          res.status(502).json({ error: 'Failed to reach AI provider' });
+        } else {
+          res.destroy(binaryErr);
+        }
       });
       providerResponse.body.on('end', () => {
         const latency_ms = Date.now() - relayStart;
@@ -354,11 +378,6 @@ async function forwardRelayRequest({
           latency_ms,
           streaming: false,
         });
-      });
-      res.on('close', () => {
-        if (providerResponse.body && !providerResponse.body.destroyed) {
-          providerResponse.body.destroy();
-        }
       });
       providerResponse.body.pipe(res);
       return;
@@ -384,6 +403,8 @@ async function forwardRelayRequest({
     }
     res.json(responseBody);
   } catch (err) {
+    if (upstreamAbortController.signal.aborted || res.destroyed) return;
+
     // SSRF / input validation errors are client mistakes — return 400.
     // All other relay failures return 502 with a generic message so we don't
     // leak internal hostnames, IPs, or stack traces to the client.

@@ -316,6 +316,15 @@ async function waitForHealth(port, maxMs = 8000) {
   throw new Error(`Relay server on port ${port} did not start within ${maxMs}ms`);
 }
 
+async function waitForCondition(predicate, maxMs = 2000, message = 'condition was not met') {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(message);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Test suite
 // ──────────────────────────────────────────────────────────────────────────────
@@ -694,6 +703,230 @@ describe('byok-relay — example product end-to-end', () => {
 
     assert.equal(r.status, 204);
     assert.equal(r.body, '');
+  });
+
+  it('POST /relay/openai-compatible — upstream SSE errors are reported as SSE error events', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+
+    const r = await requestRaw(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'SSE failure test' }],
+        stream: true,
+        forceSseStreamError: true,
+      },
+      {
+        'x-relay-token': extraRelayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 200);
+    assert.ok(r.body.includes('event: error'), 'SSE error event should be sent before ending');
+    assert.ok(r.body.includes('Stream interrupted by provider'));
+  });
+
+  it('POST /relay/openai-compatible — upstream binary errors abort established responses', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+    const payload = JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'Binary failure test' }],
+      forceBinaryStreamError: true,
+    });
+
+    const r = await new Promise((resolve, reject) => {
+      const chunks = [];
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: relayPort,
+          path: '/relay/openai-compatible/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'x-relay-token': extraRelayToken,
+            ...e2eRelayHeaders(),
+          },
+        },
+        (res) => {
+          const finish = (aborted) => resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString(),
+            aborted,
+          });
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => finish(false));
+          res.on('aborted', () => finish(true));
+          res.on('error', (err) => {
+            if (err.code === 'ECONNRESET') finish(true);
+            else reject(err);
+          });
+        },
+      );
+      req.on('error', reject);
+      req.setTimeout(2000, () => reject(new Error('timed out waiting for relay binary failure')));
+      req.write(payload);
+      req.end();
+    });
+
+    assert.equal(r.status, 200);
+    assert.equal(r.body, 'partial');
+    assert.equal(r.aborted, true, 'binary upstream failure should not end a truncated 200 cleanly');
+  });
+
+  it('POST /relay/openai-compatible — client disconnect destroys the upstream binary body', async () => {
+    mock.clearRequests();
+    mock.streamEvents.length = 0;
+    const extraRelayToken = await createRelayTokenWithKey();
+    const payload = JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'Binary disconnect cleanup test' }],
+      forceSlowBinaryUntilClientClose: true,
+    });
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: relayPort,
+          path: '/relay/openai-compatible/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'x-relay-token': extraRelayToken,
+            ...e2eRelayHeaders(),
+          },
+        },
+        (res) => {
+          res.once('data', () => {
+            req.destroy();
+            res.destroy();
+            done();
+          });
+        },
+      );
+      req.on('error', (err) => {
+        if (settled || err.code === 'ECONNRESET') return;
+        reject(err);
+      });
+      req.setTimeout(2000, () => reject(new Error('timed out waiting for relay binary data')));
+      req.write(payload);
+      req.end();
+    });
+
+    await waitForCondition(
+      () => mock.streamEvents.includes('slow-binary-response-closed'),
+      2000,
+      'relay did not destroy the upstream binary response after client disconnect',
+    );
+  });
+
+  it('POST /relay/openai-compatible — client disconnect destroys the upstream SSE body', async () => {
+    mock.clearRequests();
+    mock.streamEvents.length = 0;
+    const extraRelayToken = await createRelayTokenWithKey();
+    const payload = JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'Disconnect cleanup test' }],
+      stream: true,
+      forceSlowSseUntilClientClose: true,
+    });
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: relayPort,
+          path: '/relay/openai-compatible/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'x-relay-token': extraRelayToken,
+            ...e2eRelayHeaders(),
+          },
+        },
+        (res) => {
+          res.once('data', () => {
+            req.destroy();
+            res.destroy();
+            done();
+          });
+        },
+      );
+      req.on('error', (err) => {
+        if (settled || err.code === 'ECONNRESET') return;
+        reject(err);
+      });
+      req.setTimeout(2000, () => reject(new Error('timed out waiting for relay stream data')));
+      req.write(payload);
+      req.end();
+    });
+
+    await waitForCondition(
+      () => mock.streamEvents.includes('slow-sse-response-closed'),
+      2000,
+      'relay did not destroy the upstream SSE response after client disconnect',
+    );
+  });
+
+  it('REQUEST_BODY_LIMIT_BYTES ignores malformed values instead of truncating them', async () => {
+    const malformedLimitPort = await getFreePort();
+    const malformedLimitDb = path.join(os.tmpdir(), `byok-relay-e2e-malformed-limit-${Date.now()}.db`);
+    const malformedLimitProc = spawn(
+      process.execPath,
+      [path.resolve(__dirname, '../../src/index.js')],
+      {
+        env: {
+          ...process.env,
+          PORT: String(malformedLimitPort),
+          ENCRYPTION_SECRET: 'malformed-limit-test-secret-at-least-32-characters',
+          DB_PATH: malformedLimitDb,
+          ALLOWED_ORIGINS: '*',
+          REQUEST_BODY_LIMIT_BYTES: '10mb',
+          NODE_ENV: 'test',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+
+    try {
+      await waitForHealth(malformedLimitPort);
+      const r = await requestRaw(
+        malformedLimitPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+        'x'.repeat(5000),
+        { 'Content-Type': 'application/octet-stream' },
+      );
+
+      assert.equal(r.status, 401);
+      assert.ok(
+        r.body.includes('x-relay-token header required'),
+        'large body should reach auth instead of being rejected by a partially parsed 10-byte limit',
+      );
+    } finally {
+      malformedLimitProc.kill('SIGTERM');
+      await new Promise((resolve) => malformedLimitProc.once('exit', resolve));
+      fs.rmSync(malformedLimitDb, { force: true });
+    }
   });
 
   it('POST /relay/:provider/* — rejects raw bodies above the configured limit', async () => {
