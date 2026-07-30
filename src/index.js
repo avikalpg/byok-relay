@@ -1,5 +1,6 @@
 require('dotenv').config();
 const crypto = require('crypto');
+const { pipeline } = require('stream');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -275,6 +276,9 @@ app.get('/stats', requireToken, (req, res) => {
  *   { app_id, user_count, total, last_7d, last_30d, error_count, error_rate, providers, top_models }
  */
 app.get('/stats/:app_id', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'Operator stats require APP_SECRET to be configured.' });
+  }
   const stats = getStatsForApp(req.params.app_id);
   res.json(stats);
 });
@@ -358,6 +362,17 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   }
 
   const relayStart = Date.now();
+  let relayMetricLogged = false;
+  const logRelayRequestOnce = (details) => {
+    if (relayMetricLogged) return;
+    relayMetricLogged = true;
+    logRelayRequest(req, details);
+  };
+  const logRelayErrorOnce = (details) => {
+    if (relayMetricLogged) return;
+    relayMetricLogged = true;
+    logRelayError(req, details);
+  };
 
   try {
     const providerResponse = await forwardRequest(
@@ -376,22 +391,34 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
     const isStream = streaming ||
       (contentType && contentType.includes('text/event-stream'));
 
-    const latency_ms = Date.now() - relayStart;
-    logRelayRequest(req, {
-      provider,
-      model,
-      status: providerResponse.status,
-      latency_ms,
-      streaming: isStream,
-    });
-
     if (isStream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      providerResponse.body.pipe(res);
+      pipeline(providerResponse.body, res, (streamErr) => {
+        const latency_ms = Date.now() - relayStart;
+        if (streamErr) {
+          logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
+          return;
+        }
+        logRelayRequestOnce({
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: true,
+        });
+      });
     } else {
       const data = await providerResponse.json();
+      const latency_ms = Date.now() - relayStart;
+      logRelayRequestOnce({
+        provider,
+        model,
+        status: providerResponse.status,
+        latency_ms,
+        streaming: false,
+      });
       res.json(data);
     }
   } catch (err) {
@@ -399,8 +426,11 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
       return res.status(400).json({ error: err.message });
     }
     const latency_ms = Date.now() - relayStart;
-    logRelayError(req, { err, provider, model, latency_ms });
-    res.status(502).json({ error: 'Failed to reach AI provider' });
+    logRelayErrorOnce({ err, provider, model, latency_ms });
+    if (!res.headersSent) {
+      return res.status(502).json({ error: 'Failed to reach AI provider' });
+    }
+    res.destroy(err);
   }
 });
 
@@ -458,6 +488,17 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
 
   const model = req.body?.model || null;
   const relayStart = Date.now();
+  let relayMetricLogged = false;
+  const logRelayRequestOnce = (details) => {
+    if (relayMetricLogged) return;
+    relayMetricLogged = true;
+    logRelayRequest(req, details);
+  };
+  const logRelayErrorOnce = (details) => {
+    if (relayMetricLogged) return;
+    relayMetricLogged = true;
+    logRelayError(req, details);
+  };
 
   try {
     const providerResponse = await forwardRequest(
@@ -477,23 +518,35 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     const isStream = req.body?.stream === true ||
       (contentType && contentType.includes('text/event-stream'));
 
-    const latency_ms = Date.now() - relayStart;
-    logRelayRequest(req, {
-      provider,
-      model,
-      status: providerResponse.status,
-      latency_ms,
-      streaming: isStream,
-    });
-
     if (isStream) {
       // Pipe the SSE stream directly to the client
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      providerResponse.body.pipe(res);
+      pipeline(providerResponse.body, res, (streamErr) => {
+        const latency_ms = Date.now() - relayStart;
+        if (streamErr) {
+          logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
+          return;
+        }
+        logRelayRequestOnce({
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: true,
+        });
+      });
     } else {
       const data = await providerResponse.json();
+      const latency_ms = Date.now() - relayStart;
+      logRelayRequestOnce({
+        provider,
+        model,
+        status: providerResponse.status,
+        latency_ms,
+        streaming: false,
+      });
       res.json(data);
     }
   } catch (err) {
@@ -504,8 +557,11 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
       return res.status(400).json({ error: err.message });
     }
     const latency_ms = Date.now() - relayStart;
-    logRelayError(req, { err, provider, model, latency_ms });
-    res.status(502).json({ error: 'Failed to reach AI provider' });
+    logRelayErrorOnce({ err, provider, model, latency_ms });
+    if (!res.headersSent) {
+      return res.status(502).json({ error: 'Failed to reach AI provider' });
+    }
+    res.destroy(err);
   }
 });
 
