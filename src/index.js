@@ -3,8 +3,19 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, logRequest, getStatsForUser, getStatsForApp } = require('./db');
-const { forwardRequest, SUPPORTED_PROVIDERS } = require('./providers');
+const {
+  createUser,
+  getUserByToken,
+  upsertKey,
+  getDecryptedKey,
+  deleteKey,
+  listProviders,
+  logRequest,
+  getStatsForUser,
+  getStatsForApp,
+} = require('./db');
+const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
+const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
 const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -40,7 +51,17 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o =>
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-relay-token', 'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title', 'http-referer'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-relay-token',
+    'anthropic-version',
+    'x-relay-base-url',
+    'x-relay-referer',
+    'x-title',
+    'http-referer',
+    'x-relay-e2e-base-url-token',
+  ],
   credentials: false,
 }));
 
@@ -114,6 +135,59 @@ function requireToken(req, res, next) {
   if (!user) return res.status(401).json({ error: 'Invalid or expired token' });
   req.user = user;
   next();
+}
+
+function logRelayRequest(req, details) {
+  const { provider, model, status, latency_ms, streaming } = details;
+
+  req.log.info({
+    event: 'relay_request',
+    user_id: req.user.id,
+    app_id: req.user.app_id,
+    provider,
+    model,
+    status,
+    latency_ms,
+    streaming,
+  }, 'relay');
+
+  try {
+    logRequest({
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status,
+      latency_ms,
+    });
+  } catch (logErr) {
+    // Never let logging failure affect the response
+    req.log.warn({ err: logErr }, 'request log write failed');
+  }
+}
+
+function logRelayError(req, details) {
+  const { err, provider, model, latency_ms } = details;
+  req.log.error({
+    err,
+    event: 'relay_error',
+    user_id: req.user.id,
+    app_id: req.user.app_id,
+    provider,
+    model,
+    latency_ms,
+  }, 'relay error');
+
+  try {
+    logRequest({
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status: 502,
+      latency_ms,
+    });
+  } catch (_) {}
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -206,19 +280,61 @@ app.get('/stats/:app_id', requireAppSecret, (req, res) => {
 });
 
 /**
- * POST /relay/:provider/*
- * Forward a request to the AI provider using the user's stored API key.
- * Headers: x-relay-token
- * Body: provider-specific request body (e.g. Anthropic Messages API body)
- *
- * Supports streaming: if the request body has stream: true, the response
- * is piped directly back to the client as SSE.
+ * GET /models
+ * Returns the routing table so clients can discover which model names / prefixes
+ * are routable without specifying an explicit provider path.
  */
-app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
-  const { provider } = req.params;
-  if (!SUPPORTED_PROVIDERS.includes(provider)) {
-    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
+app.get('/models', (req, res) => {
+  res.json({
+    providers: SUPPORTED_PROVIDERS,
+    providerPrefixes: Object.keys(PROVIDER_DEFAULT_PATHS),
+    patterns: MODEL_PATTERNS.map(({ pattern, provider }) => ({
+      pattern: pattern.source,
+      flags: pattern.flags,
+      provider,
+    })),
+    usage: 'POST /relay with { model: "provider/model-name", ...providerBody }',
+    examples: [
+      '{ "model": "anthropic/claude-3-5-haiku", "max_tokens": 256, "messages": [{"role":"user","content":"Hello"}] }',
+      '{ "model": "gpt-4o", "messages": [{"role":"user","content":"Hello"}] }',
+      '{ "model": "google/gemini-2.0-flash", "contents": [{"parts":[{"text":"Hello"}]}] }',
+    ],
+  });
+});
+
+/**
+ * POST /relay
+ * Unified model routing — resolve provider from the `model` field in the body.
+ *
+ * The request body is forwarded as-is to the resolved provider endpoint.
+ * Use "provider/model-name" for an explicit route, or a bare model name
+ * that matches one of the patterns in GET /models.
+ *
+ * Streaming: pass `stream: true` in the body; SSE is piped back to the client.
+ *
+ * Per-provider bodies:
+ *   anthropic — { model, max_tokens, messages: [{role, content}] }
+ *   openai    — { model, messages: [{role, content}] }
+ *   google    — { model, contents: [{parts:[{text}]}] }
+ *   groq/mistral/openrouter — OpenAI-compatible
+ */
+app.post('/relay', requireToken, relayLimiter, async (req, res) => {
+  const { model } = req.body || {};
+  if (!model) {
+    return res.status(400).json({
+      error: 'model field is required. Use "provider/model-name" (e.g. "anthropic/claude-3-5-haiku") or a recognised model name (e.g. "gpt-4o"). See GET /models for the full routing table.',
+    });
   }
+
+  const streaming = req.body?.stream === true;
+  const route = resolveModelRoute(model, streaming);
+  if (!route) {
+    return res.status(400).json({
+      error: `Cannot route model "${model}". Use "provider/model-name" format or a recognised model name. Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}. See GET /models for the full routing table.`,
+    });
+  }
+
+  const { provider, path: forwardPath, modelName } = route;
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
@@ -227,14 +343,114 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
     });
   }
 
-  // Build the path to forward (everything after /relay/:provider)
-  const forwardPath = '/' + (req.params[0] || '');
+  // Strip provider prefix from model field before forwarding.
+  // "anthropic/claude-3-5-haiku" → "claude-3-5-haiku" for the upstream request.
+  const forwardBody = { ...req.body, model: modelName };
 
   // Pass through provider-specific and relay headers
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer',
+    'http-referer', 'x-relay-e2e-base-url-token',
+  ];
+  for (const h of passthroughHeaders) {
+    if (req.headers[h]) extraHeaders[h] = req.headers[h];
+  }
+
+  const relayStart = Date.now();
+
+  try {
+    const providerResponse = await forwardRequest(
+      provider,
+      forwardPath,
+      req.method,
+      forwardBody,
+      apiKey,
+      extraHeaders,
+    );
+
+    res.status(providerResponse.status);
+    const contentType = providerResponse.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    const isStream = streaming ||
+      (contentType && contentType.includes('text/event-stream'));
+
+    const latency_ms = Date.now() - relayStart;
+    logRelayRequest(req, {
+      provider,
+      model,
+      status: providerResponse.status,
+      latency_ms,
+      streaming: isStream,
+    });
+
+    if (isStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      providerResponse.body.pipe(res);
+    } else {
+      const data = await providerResponse.json();
+      res.json(data);
+    }
+  } catch (err) {
+    if (err.code === 'INVALID_RELAY_BASE_URL') {
+      return res.status(400).json({ error: err.message });
+    }
+    const latency_ms = Date.now() - relayStart;
+    logRelayError(req, { err, provider, model, latency_ms });
+    res.status(502).json({ error: 'Failed to reach AI provider' });
+  }
+});
+
+/**
+ * POST /relay/:provider/*
+ * Forward a request to the AI provider using the user's stored API key.
+ * Headers: x-relay-token
+ * Body: provider-specific request body (e.g. Anthropic Messages API body)
+ *
+ * Supports streaming: if the request body has stream: true, the response
+ * is piped directly back to the client as SSE.
+ */
+app.post('/relay/:provider/*', requireToken, (req, res, next) => {
+  // ── Path traversal allowlist ────────────────────────────────────────────
+  // Checked before rate limiting: rejected paths must not consume quota.
+  // A stolen token should not be usable to probe non-inference endpoints.
+  const { provider } = req.params;
+  if (SUPPORTED_PROVIDERS.includes(provider)) {
+    const forwardPath = normalizeProviderPath('/' + (req.params[0] || ''));
+    req.forwardPath = forwardPath;
+    if (!isPathAllowed(provider, forwardPath)) {
+      return res.status(403).json({
+        error: `Path "${forwardPath}" is not permitted for provider "${provider}". Only inference endpoints are allowed.`,
+      });
+    }
+  }
+  next();
+}, relayLimiter, async (req, res) => {
+  const { provider } = req.params;
+  if (!SUPPORTED_PROVIDERS.includes(provider)) {
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
+  }
+
+  // Forward exactly the normalized path that passed the allowlist check.
+  // Do not reconstruct it from Express params here: validation and use must
+  // operate on the same value.
+  const forwardPath = req.forwardPath;
+
+  const apiKey = getDecryptedKey(req.user.id, provider);
+  if (!apiKey) {
+    return res.status(400).json({
+      error: `No API key stored for provider "${provider}". POST /keys/${provider} first.`,
+    });
+  }
+
+  // Pass through provider-specific and relay headers
+  const extraHeaders = {};
+  const passthroughHeaders = [
+    'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
+    'http-referer', 'x-relay-e2e-base-url-token',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
@@ -262,33 +478,13 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       (contentType && contentType.includes('text/event-stream'));
 
     const latency_ms = Date.now() - relayStart;
-
-    // Structured relay log
-    req.log.info({
-      event: 'relay_request',
-      user_id: req.user.id,
-      app_id: req.user.app_id,
+    logRelayRequest(req, {
       provider,
       model,
       status: providerResponse.status,
       latency_ms,
       streaming: isStream,
-    }, 'relay');
-
-    // Persist to request_logs for /stats
-    try {
-      logRequest({
-        user_id: req.user.id,
-        app_id: req.user.app_id,
-        provider,
-        model,
-        status: providerResponse.status,
-        latency_ms,
-      });
-    } catch (logErr) {
-      // Never let logging failure affect the response
-      req.log.warn({ err: logErr }, 'request log write failed');
-    }
+    });
 
     if (isStream) {
       // Pipe the SSE stream directly to the client
@@ -308,21 +504,29 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
       return res.status(400).json({ error: err.message });
     }
     const latency_ms = Date.now() - relayStart;
-    req.log.error({ err, event: 'relay_error', user_id: req.user.id, app_id: req.user.app_id, provider, model, latency_ms }, 'relay error');
-    try {
-      logRequest({ user_id: req.user.id, app_id: req.user.app_id, provider, model, status: 502, latency_ms });
-    } catch (_) {}
+    logRelayError(req, { err, provider, model, latency_ms });
     res.status(502).json({ error: 'Failed to reach AI provider' });
   }
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
-// When run directly (node src/index.js or npm start), start the HTTP server.
-// When imported by Vercel's @vercel/node runtime, export the app instead.
-if (require.main === module) {
-  app.listen(PORT, '0.0.0.0', () => {
+
+/**
+ * Start the HTTP server and return the server instance.
+ * Called by the CLI bin (npx byok-relay) and when run directly.
+ * Not called when imported by Vercel's @vercel/node runtime.
+ */
+function startServer() {
+  return app.listen(PORT, '0.0.0.0', () => {
     logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
   });
 }
 
+// When run directly (node src/index.js or npm start), start immediately.
+// When imported (Vercel runtime, CLI bin, tests), let the caller decide.
+if (require.main === module) {
+  startServer();
+}
+
 module.exports = app;
+module.exports.startServer = startServer;

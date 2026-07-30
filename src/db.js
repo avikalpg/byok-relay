@@ -1,7 +1,8 @@
 /**
  * SQLite database layer.
  * Schema:
- *   users(id TEXT PK, token_hash TEXT UNIQUE, app_id TEXT, created_at INTEGER)
+ *   users(id TEXT PK, token_hash TEXT UNIQUE, token_hmac_version INTEGER,
+ *         app_id TEXT, created_at INTEGER)
  *   keys(id TEXT PK, user_id TEXT FK, provider TEXT, encrypted_key TEXT, created_at INTEGER)
  *
  * Keys are encrypted with AES-256-GCM using ENCRYPTION_SECRET from env.
@@ -33,6 +34,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     token_hash TEXT UNIQUE NOT NULL,
+    token_hmac_version INTEGER NOT NULL DEFAULT 2,
     app_id TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );
@@ -65,9 +67,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_request_logs_app ON request_logs(app_id);
   CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);
 `);
-// NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() below,
-// because on legacy databases the token_hash column doesn't exist yet at this
-// point and SQLite would throw "no such column: token_hash".
+// NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
+// On a legacy DB the users table still has 'token', not 'token_hash', so
+// creating the index here would throw "no such column: token_hash".
 
 // ── Migration: rename legacy `token` column → `token_hash` and hash values ─
 //
@@ -81,50 +83,80 @@ db.exec(`
 
 function _migrateTokenColumn() {
   const cols = db.pragma('table_info(users)').map(c => c.name);
-  if (!cols.includes('token')) return; // already migrated
+  if (!cols.includes('token')) return; // no legacy column — already migrated
 
-  // Guard against a crash between the ALTER TABLE and migrate() completing:
-  // if token_hash column already exists, skip the ALTER TABLE.
-  if (!cols.includes('token_hash')) {
-    db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
-  }
+  // Idempotent: if a previous run crashed after ALTER TABLE but before the
+  // table rebuild, token_hash already exists. Skip the ALTER in that case.
+  const alreadyHasTokenHash = cols.includes('token_hash');
 
-  const hmacKey = _getHmacKey();
+  // Dropping a referenced table applies ON DELETE actions when foreign-key
+  // enforcement is enabled. Disable it outside the transaction so rebuilding
+  // users cannot cascade-delete existing provider keys.
+  db.pragma('foreign_keys = OFF');
 
-  // Wrap backfill + table rebuild in one transaction so a crash mid-way
-  // cannot leave the database without a `users` table.
+  // Wrap everything (DDL + DML + rebuild) in a single transaction so that a
+  // crash mid-migration leaves the DB unchanged and the next startup retries.
   const migrate = db.transaction(() => {
-    // Backfill hash values into the new column
-    const rows = db.prepare('SELECT id, token FROM users').all();
+    // 1. Add the new column (skip if it was added by a prior interrupted run)
+    if (!alreadyHasTokenHash) {
+      db.exec('ALTER TABLE users ADD COLUMN token_hash TEXT');
+    }
+
+    // 2. Backfill hash values into the new column. Only rows whose token_hash
+    //    is still NULL need updating, which keeps the migration idempotent.
+    const hmacKey = _getHmacKey();
+    const rows = db.prepare('SELECT id, token FROM users WHERE token_hash IS NULL').all();
     const update = db.prepare('UPDATE users SET token_hash = ? WHERE id = ?');
     for (const row of rows) {
       update.run(_hmac(row.token, hmacKey), row.id);
     }
 
-    // 2. Rebuild the table without the old `token` column
+    // 3. Rebuild the table without the old `token` column
     //    (SQLite does not support DROP COLUMN before 3.35.0)
-    //    All three statements run atomically — no window where `users` is absent.
+    //    All statements run atomically — no window where `users` is absent.
     db.exec(`
       CREATE TABLE users_new (
         id TEXT PRIMARY KEY,
         token_hash TEXT UNIQUE NOT NULL,
+        token_hmac_version INTEGER NOT NULL DEFAULT 1,
         app_id TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
-      INSERT INTO users_new (id, token_hash, app_id, created_at)
-        SELECT id, token_hash, app_id, created_at FROM users;
+      INSERT INTO users_new (id, token_hash, token_hmac_version, app_id, created_at)
+        SELECT id, token_hash, 1, app_id, created_at FROM users;
       DROP TABLE users;
       ALTER TABLE users_new RENAME TO users;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
     `);
   });
-  migrate();
+
+  try {
+    migrate();
+    const violations = db.pragma('foreign_key_check');
+    if (violations.length > 0) {
+      throw new Error('Legacy token migration left invalid foreign-key references');
+    }
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 _migrateTokenColumn();
 
-// Create the token_hash index here — after migration — so token_hash is
-// guaranteed to exist on both fresh installs and legacy databases.
+// Existing token_hash rows predate key-version tracking and are conservatively
+// marked legacy/unconfirmed. A successful authentication confirms and updates
+// them to version 2. Fresh databases already include this column above.
+function _ensureTokenHmacVersionColumn() {
+  const cols = db.pragma('table_info(users)').map(c => c.name);
+  if (!cols.includes('token_hmac_version')) {
+    db.exec('ALTER TABLE users ADD COLUMN token_hmac_version INTEGER NOT NULL DEFAULT 1');
+  }
+}
+
+_ensureTokenHmacVersionColumn();
+
+// Create the token_hash index AFTER migration so it works on both
+// fresh installs (table was just created with token_hash) and legacy
+// installs (migration just renamed the column).
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);');
 
 // ── Encryption helpers ──────────────────────────────────────────────────────
@@ -195,6 +227,19 @@ function hashToken(token) {
   return _hmac(token, _getHmacKey());
 }
 
+/**
+ * Return the previous HMAC key when production is moving from the historical
+ * ENCRYPTION_SECRET fallback to a dedicated TOKEN_HMAC_SECRET.
+ *
+ * Once every stored token has been upgraded, ENCRYPTION_SECRET remains
+ * available for API-key decryption but is no longer used for new token hashes.
+ */
+function _getLegacyHmacKey() {
+  const current = process.env.TOKEN_HMAC_SECRET;
+  const legacy = process.env.ENCRYPTION_SECRET;
+  return current && legacy && current !== legacy ? legacy : null;
+}
+
 // ── User helpers ────────────────────────────────────────────────────────────
 
 /**
@@ -210,7 +255,7 @@ function createUser(appId) {
   const token_hash = hashToken(token);
   const now = Date.now();
   db.prepare(
-    'INSERT INTO users (id, token_hash, app_id, created_at) VALUES (?, ?, ?, ?)'
+    'INSERT INTO users (id, token_hash, token_hmac_version, app_id, created_at) VALUES (?, ?, 2, ?, ?)'
   ).run(id, token_hash, appId, now);
   // Return plaintext token to caller — this is the only time it leaves memory.
   return { id, token };
@@ -222,9 +267,56 @@ function createUser(appId) {
  */
 function getUserByToken(token) {
   const token_hash = hashToken(token);
-  return db
-    .prepare('SELECT id, app_id, created_at FROM users WHERE token_hash = ?')
-    .get(token_hash);
+  const selectUser = db
+    .prepare('SELECT id, app_id, created_at, token_hmac_version FROM users WHERE token_hash = ?');
+  let user = selectUser.get(token_hash);
+  if (user) {
+    if (user.token_hmac_version !== 2) {
+      db.prepare('UPDATE users SET token_hmac_version = 2 WHERE id = ?').run(user.id);
+    }
+    const { token_hmac_version: _version, ...publicUser } = user;
+    return publicUser;
+  }
+
+  // Existing installations historically used ENCRYPTION_SECRET as the token
+  // HMAC key. During key separation, accept that digest once and atomically
+  // replace it with the dedicated-key digest. The plaintext token is still
+  // never persisted.
+  const legacyKey = _getLegacyHmacKey();
+  if (!legacyKey) return undefined;
+
+  const legacyHash = _hmac(token, legacyKey);
+  user = selectUser.get(legacyHash);
+  if (!user) return undefined;
+
+  db.prepare('UPDATE users SET token_hash = ?, token_hmac_version = 2 WHERE id = ? AND token_hash = ?')
+    .run(token_hash, user.id, legacyHash);
+  const { token_hmac_version: _version, ...publicUser } = user;
+  return publicUser;
+}
+
+/**
+ * Return conservative HMAC migration progress without exposing user records.
+ * "current" means confirmed by a successful authentication or created after
+ * tracking was introduced; "legacy" includes all still-unconfirmed rows.
+ */
+function getTokenHmacMigrationProgress() {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN token_hmac_version = 2 THEN 1 ELSE 0 END) AS current,
+      SUM(CASE WHEN token_hmac_version = 2 THEN 0 ELSE 1 END) AS legacy
+    FROM users
+  `).get();
+  const total = Number(row.total || 0);
+  const current = Number(row.current || 0);
+  const legacy = Number(row.legacy || 0);
+  return {
+    total,
+    current,
+    legacy,
+    percent: total === 0 ? 100 : Number(((current / total) * 100).toFixed(1)),
+  };
 }
 
 // ── Key helpers ─────────────────────────────────────────────────────────────
@@ -380,4 +472,16 @@ function getStatsForApp(appId) {
   };
 }
 
-module.exports = { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, logRequest, getStatsForUser, getStatsForApp };
+module.exports = {
+  createUser,
+  getUserByToken,
+  getTokenHmacMigrationProgress,
+  upsertKey,
+  getDecryptedKey,
+  deleteKey,
+  listProviders,
+  logRequest,
+  getStatsForUser,
+  getStatsForApp,
+};
+
