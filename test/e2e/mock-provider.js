@@ -47,6 +47,18 @@ function createMockProvider(options = {}) {
           return;
         }
 
+        if (body.forceJsonDespiteStream) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'chatcmpl-json-despite-stream', ok: true }));
+          return;
+        }
+
+        if (body.forceNoContent) {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+
         if (body.stream) {
           // Server-Sent Events stream
           res.writeHead(200, {

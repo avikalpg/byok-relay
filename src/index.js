@@ -45,6 +45,14 @@ if (!process.env.TOKEN_HMAC_SECRET) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
+const DEFAULT_REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
+const configuredRequestBodyLimitBytes = Number.parseInt(
+  process.env.REQUEST_BODY_LIMIT_BYTES || String(DEFAULT_REQUEST_BODY_LIMIT_BYTES),
+  10,
+);
+const REQUEST_BODY_LIMIT_BYTES = Number.isFinite(configuredRequestBodyLimitBytes) && configuredRequestBodyLimitBytes > 0
+  ? configuredRequestBodyLimitBytes
+  : DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 
@@ -73,14 +81,31 @@ app.use((req, res, next) => {
   const ct = req.headers['content-type'] || '';
   if (req.path.startsWith('/relay/') && !ct.includes('application/json')) {
     const chunks = [];
-    req.on('data', chunk => chunks.push(chunk));
+    let totalBytes = 0;
+    let rejected = false;
+
+    req.on('data', (chunk) => {
+      if (rejected) return;
+      totalBytes += chunk.length;
+      if (totalBytes > REQUEST_BODY_LIMIT_BYTES) {
+        rejected = true;
+        chunks.length = 0;
+        res.status(413).json({ error: 'Request body too large' });
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
-      req.rawBodyBuffer = chunks.length ? Buffer.concat(chunks) : null;
+      if (rejected) return;
+      req.rawBodyBuffer = chunks.length ? Buffer.concat(chunks, totalBytes) : null;
       next();
     });
-    req.on('error', next);
+    req.on('error', (err) => {
+      if (!rejected) next(err);
+    });
   } else {
-    express.json({ limit: '10mb' })(req, res, next);
+    express.json({ limit: REQUEST_BODY_LIMIT_BYTES })(req, res, next);
   }
 });
 
@@ -250,17 +275,31 @@ async function forwardRelayRequest({
 
     res.status(providerResponse.status);
     const contentType = providerResponse.headers.get('content-type');
+    const contentTypeLower = contentType ? contentType.toLowerCase() : '';
     if (contentType) res.setHeader('Content-Type', contentType);
 
-    const isStream = (contentType && contentType.includes('text/event-stream')) ||
-      (streamingRequested && providerResponse.ok);
+    if (providerResponse.status === 204 || providerResponse.status === 304) {
+      const latency_ms = Date.now() - relayStart;
+      logRelayRequestOnce({
+        provider,
+        model,
+        status: providerResponse.status,
+        latency_ms,
+        streaming: false,
+      });
+      return res.end();
+    }
+
+    const isStream = contentTypeLower
+      ? contentTypeLower.includes('text/event-stream')
+      : (streamingRequested && providerResponse.ok);
     const { binaryResponse: providerIsBinary } = getProviderMeta(provider);
     const isBinary = providerIsBinary ||
-      (contentType && (
-        contentType.startsWith('audio/') ||
-        contentType.startsWith('image/') ||
-        contentType.startsWith('video/') ||
-        contentType === 'application/octet-stream'
+      (contentTypeLower && (
+        contentTypeLower.startsWith('audio/') ||
+        contentTypeLower.startsWith('image/') ||
+        contentTypeLower.startsWith('video/') ||
+        contentTypeLower === 'application/octet-stream'
       ));
 
     if (isStream) {
@@ -326,7 +365,7 @@ async function forwardRelayRequest({
     }
 
     let responseBody;
-    if (contentType && !contentType.includes('application/json')) {
+    if (!contentTypeLower || !contentTypeLower.includes('application/json')) {
       responseBody = await providerResponse.text();
     } else {
       responseBody = await providerResponse.json();
@@ -340,7 +379,7 @@ async function forwardRelayRequest({
       streaming: false,
     });
 
-    if (contentType && !contentType.includes('application/json')) {
+    if (!contentTypeLower || !contentTypeLower.includes('application/json')) {
       return res.send(responseBody);
     }
     res.json(responseBody);

@@ -349,6 +349,22 @@ describe('byok-relay — example product end-to-end', () => {
     assert.equal(r.status, 200, `Expected to store test key for ${provider}, got ${r.status}`);
   }
 
+  async function createRelayTokenWithKey(provider = 'openai-compatible') {
+    const created = await request(relayPort, 'POST', '/users', {
+      app_id: `e2e-extra-${provider}-${Date.now()}-${Math.random()}`,
+    });
+    assert.equal(created.status, 200, `Expected to create extra relay token, got ${created.status}`);
+
+    const token = created.body.token;
+    const stored = await request(
+      relayPort, 'POST', `/keys/${provider}`,
+      { key: FAKE_API_KEY },
+      { 'x-relay-token': token },
+    );
+    assert.equal(stored.status, 200, `Expected to store test key for extra ${provider}, got ${stored.status}`);
+    return token;
+  }
+
   // Shared session state — persists across tests within this suite,
   // exactly as a frontend app would persist state in localStorage
   let relayToken;
@@ -387,6 +403,7 @@ describe('byok-relay — example product end-to-end', () => {
           ENCRYPTION_SECRET: 'e2e-test-secret-at-least-32-characters-long',
           DB_PATH:           tmpDb,
           ALLOWED_ORIGINS:   '*',
+          REQUEST_BODY_LIMIT_BYTES: '4096',
           NODE_ENV:          'test',
           NODE_TLS_REJECT_UNAUTHORIZED: '0',
           E2E_OPENAI_COMPATIBLE_BASE_URL: mockBaseUrl,
@@ -626,6 +643,72 @@ describe('byok-relay — example product end-to-end', () => {
       'JSON upstream errors must not be mislabeled as SSE',
     );
     assert.equal(r.body.error, 'mock rate limited');
+  });
+
+  it('POST /relay/openai-compatible — JSON 200 responses stay JSON even when stream is requested', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Stream fallback test' }],
+        stream: true,
+        forceJsonDespiteStream: true,
+      },
+      {
+        'x-relay-token': extraRelayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 200);
+    assert.ok(
+      r.headers['content-type']?.includes('application/json'),
+      'Content-Type should stay application/json when upstream declares JSON',
+    );
+    assert.ok(
+      !r.headers['content-type']?.includes('text/event-stream'),
+      'JSON upstream success must not be mislabeled as SSE',
+    );
+    assert.equal(r.body.ok, true);
+  });
+
+  it('POST /relay/openai-compatible — no-content upstream success is preserved', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+
+    const r = await requestRaw(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'No content test' }],
+        forceNoContent: true,
+      },
+      {
+        'x-relay-token': extraRelayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 204);
+    assert.equal(r.body, '');
+  });
+
+  it('POST /relay/:provider/* — rejects raw bodies above the configured limit', async () => {
+    const r = await requestRaw(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      'x'.repeat(5000),
+      {
+        'Content-Type': 'application/octet-stream',
+        'x-relay-token': relayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 413);
+    assert.ok(r.body.includes('Request body too large'));
   });
 
   // ── 7. Relay — error paths ───────────────────────────────────────────────
