@@ -3,8 +3,19 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders, logRequest, getStatsForUser, getStatsForApp } = require('./db');
-const { forwardRequest, getProviderMeta, isPathAllowed, SUPPORTED_PROVIDERS } = require('./providers');
+const {
+  createUser,
+  getUserByToken,
+  upsertKey,
+  getDecryptedKey,
+  deleteKey,
+  listProviders,
+  logRequest,
+  getStatsForUser,
+  getStatsForApp,
+} = require('./db');
+const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
+const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
 const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -40,18 +51,27 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o =>
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-relay-token', 'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title', 'http-referer', 'xi-api-key'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-relay-token',
+    'anthropic-version',
+    'x-relay-base-url',
+    'x-relay-referer',
+    'x-title',
+    'http-referer',
+    'x-relay-e2e-base-url-token',
+    'xi-api-key',
+  ],
   credentials: false,
 }));
 
 app.use((req, res, next) => {
-  // For relay routes targeting providers that accept raw binary bodies (e.g. Deepgram STT),
-  // skip JSON parsing when the Content-Type is not application/json so that the raw Buffer
-  // is preserved for pass-through. All other routes use express.json as normal.
-  const provider = req.params && req.params.provider;
+  // Preserve raw binary bodies for direct provider relay routes that support
+  // audio/image uploads. Unified /relay still expects JSON because it needs a
+  // model field for routing.
   const ct = req.headers['content-type'] || '';
   if (req.path.startsWith('/relay/') && !ct.includes('application/json')) {
-    // Collect raw body as Buffer; will be passed to forwardRequest as-is.
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
@@ -132,6 +152,212 @@ function requireToken(req, res, next) {
   if (!user) return res.status(401).json({ error: 'Invalid or expired token' });
   req.user = user;
   next();
+}
+
+function logRelayRequest(req, details) {
+  const { provider, model, status, latency_ms, streaming } = details;
+
+  req.log.info({
+    event: 'relay_request',
+    user_id: req.user.id,
+    app_id: req.user.app_id,
+    provider,
+    model,
+    status,
+    latency_ms,
+    streaming,
+  }, 'relay');
+
+  try {
+    logRequest({
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status,
+      latency_ms,
+    });
+  } catch (logErr) {
+    // Never let logging failure affect the response
+    req.log.warn({ err: logErr }, 'request log write failed');
+  }
+}
+
+function logRelayError(req, details) {
+  const { err, provider, model, latency_ms } = details;
+  req.log.error({
+    err,
+    event: 'relay_error',
+    user_id: req.user.id,
+    app_id: req.user.app_id,
+    provider,
+    model,
+    latency_ms,
+  }, 'relay error');
+
+  try {
+    logRequest({
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status: 502,
+      latency_ms,
+    });
+  } catch (_) {}
+}
+
+function createRelayLogger(req) {
+  let relayMetricLogged = false;
+
+  return {
+    logRelayRequestOnce(details) {
+      if (relayMetricLogged) return;
+      relayMetricLogged = true;
+      logRelayRequest(req, details);
+    },
+    logRelayErrorOnce(details) {
+      if (relayMetricLogged) return;
+      relayMetricLogged = true;
+      logRelayError(req, details);
+    },
+  };
+}
+
+async function forwardRelayRequest({
+  req,
+  res,
+  provider,
+  forwardPath,
+  body,
+  apiKey,
+  extraHeaders,
+  model,
+  streamingRequested,
+}) {
+  const relayStart = Date.now();
+  const { logRelayRequestOnce, logRelayErrorOnce } = createRelayLogger(req);
+
+  try {
+    const providerResponse = await forwardRequest(
+      provider,
+      forwardPath,
+      req.method,
+      body,
+      apiKey,
+      extraHeaders,
+    );
+
+    res.status(providerResponse.status);
+    const contentType = providerResponse.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    const isStream = (contentType && contentType.includes('text/event-stream')) ||
+      (streamingRequested && providerResponse.ok);
+    const { binaryResponse: providerIsBinary } = getProviderMeta(provider);
+    const isBinary = providerIsBinary ||
+      (contentType && (
+        contentType.startsWith('audio/') ||
+        contentType.startsWith('image/') ||
+        contentType.startsWith('video/') ||
+        contentType === 'application/octet-stream'
+      ));
+
+    if (isStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      providerResponse.body.on('error', (streamErr) => {
+        const latency_ms = Date.now() - relayStart;
+        logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
+        if (!res.writableEnded) {
+          res.write('event: error\ndata: {"error":"Stream interrupted by provider"}\n\n');
+          res.end();
+        }
+      });
+      providerResponse.body.on('end', () => {
+        const latency_ms = Date.now() - relayStart;
+        logRelayRequestOnce({
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: true,
+        });
+      });
+      res.on('close', () => {
+        if (providerResponse.body && !providerResponse.body.destroyed) {
+          providerResponse.body.destroy();
+        }
+      });
+      providerResponse.body.pipe(res);
+      return;
+    }
+
+    if (isBinary) {
+      const contentLength = providerResponse.headers.get('content-length');
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      const contentDisposition = providerResponse.headers.get('content-disposition');
+      if (contentDisposition) res.setHeader('Content-Disposition', contentDisposition);
+
+      providerResponse.body.on('error', (binaryErr) => {
+        const latency_ms = Date.now() - relayStart;
+        logRelayErrorOnce({ err: binaryErr, provider, model, latency_ms });
+        if (!res.writableEnded) res.end();
+      });
+      providerResponse.body.on('end', () => {
+        const latency_ms = Date.now() - relayStart;
+        logRelayRequestOnce({
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: false,
+        });
+      });
+      res.on('close', () => {
+        if (providerResponse.body && !providerResponse.body.destroyed) {
+          providerResponse.body.destroy();
+        }
+      });
+      providerResponse.body.pipe(res);
+      return;
+    }
+
+    let responseBody;
+    if (contentType && !contentType.includes('application/json')) {
+      responseBody = await providerResponse.text();
+    } else {
+      responseBody = await providerResponse.json();
+    }
+    const latency_ms = Date.now() - relayStart;
+    logRelayRequestOnce({
+      provider,
+      model,
+      status: providerResponse.status,
+      latency_ms,
+      streaming: false,
+    });
+
+    if (contentType && !contentType.includes('application/json')) {
+      return res.send(responseBody);
+    }
+    res.json(responseBody);
+  } catch (err) {
+    // SSRF / input validation errors are client mistakes — return 400.
+    // All other relay failures return 502 with a generic message so we don't
+    // leak internal hostnames, IPs, or stack traces to the client.
+    if (err.code === 'INVALID_RELAY_BASE_URL') {
+      return res.status(400).json({ error: err.message });
+    }
+    const latency_ms = Date.now() - relayStart;
+    logRelayErrorOnce({ err, provider, model, latency_ms });
+    if (!res.headersSent) {
+      return res.status(502).json({ error: 'Failed to reach AI provider' });
+    }
+    res.destroy(err);
+  }
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -219,8 +445,102 @@ app.get('/stats', requireToken, (req, res) => {
  *   { app_id, user_count, total, last_7d, last_30d, error_count, error_rate, providers, top_models }
  */
 app.get('/stats/:app_id', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'Operator stats require APP_SECRET to be configured.' });
+  }
   const stats = getStatsForApp(req.params.app_id);
   res.json(stats);
+});
+
+/**
+ * GET /models
+ * Returns the routing table so clients can discover which model names / prefixes
+ * are routable without specifying an explicit provider path.
+ */
+app.get('/models', (req, res) => {
+  res.json({
+    providers: SUPPORTED_PROVIDERS,
+    providerPrefixes: Object.keys(PROVIDER_DEFAULT_PATHS),
+    patterns: MODEL_PATTERNS.map(({ pattern, provider }) => ({
+      pattern: pattern.source,
+      flags: pattern.flags,
+      provider,
+    })),
+    usage: 'POST /relay with { model: "provider/model-name", ...providerBody }',
+    examples: [
+      '{ "model": "anthropic/claude-3-5-haiku", "max_tokens": 256, "messages": [{"role":"user","content":"Hello"}] }',
+      '{ "model": "gpt-4o", "messages": [{"role":"user","content":"Hello"}] }',
+      '{ "model": "google/gemini-2.0-flash", "contents": [{"parts":[{"text":"Hello"}]}] }',
+    ],
+  });
+});
+
+/**
+ * POST /relay
+ * Unified model routing — resolve provider from the `model` field in the body.
+ *
+ * The request body is forwarded as-is to the resolved provider endpoint.
+ * Use "provider/model-name" for an explicit route, or a bare model name
+ * that matches one of the patterns in GET /models.
+ *
+ * Streaming: pass `stream: true` in the body; SSE is piped back to the client.
+ *
+ * Per-provider bodies:
+ *   anthropic — { model, max_tokens, messages: [{role, content}] }
+ *   openai    — { model, messages: [{role, content}] }
+ *   google    — { model, contents: [{parts:[{text}]}] }
+ *   groq/mistral/openrouter — OpenAI-compatible
+ */
+app.post('/relay', requireToken, relayLimiter, async (req, res) => {
+  const { model } = req.body || {};
+  if (!model) {
+    return res.status(400).json({
+      error: 'model field is required. Use "provider/model-name" (e.g. "anthropic/claude-3-5-haiku") or a recognised model name (e.g. "gpt-4o"). See GET /models for the full routing table.',
+    });
+  }
+
+  const streaming = req.body?.stream === true;
+  const route = resolveModelRoute(model, streaming);
+  if (!route) {
+    return res.status(400).json({
+      error: `Cannot route model "${model}". Use "provider/model-name" format or a recognised model name. Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}. See GET /models for the full routing table.`,
+    });
+  }
+
+  const { provider, path: forwardPath, modelName } = route;
+
+  const apiKey = getDecryptedKey(req.user.id, provider);
+  if (!apiKey) {
+    return res.status(400).json({
+      error: `No API key stored for provider "${provider}". POST /keys/${provider} first.`,
+    });
+  }
+
+  // Strip provider prefix from model field before forwarding.
+  // "anthropic/claude-3-5-haiku" → "claude-3-5-haiku" for the upstream request.
+  const forwardBody = { ...req.body, model: modelName };
+
+  // Pass through provider-specific and relay headers
+  const extraHeaders = {};
+  const passthroughHeaders = [
+    'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
+    'http-referer', 'x-relay-e2e-base-url-token', 'content-type',
+  ];
+  for (const h of passthroughHeaders) {
+    if (req.headers[h]) extraHeaders[h] = req.headers[h];
+  }
+
+  return forwardRelayRequest({
+    req,
+    res,
+    provider,
+    forwardPath,
+    body: forwardBody,
+    apiKey,
+    extraHeaders,
+    model,
+    streamingRequested: streaming,
+  });
 });
 
 /**
@@ -232,21 +552,31 @@ app.get('/stats/:app_id', requireAppSecret, (req, res) => {
  * Supports streaming: if the request body has stream: true, the response
  * is piped directly back to the client as SSE.
  */
-app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
+app.post('/relay/:provider/*', requireToken, (req, res, next) => {
+  // ── Path traversal allowlist ────────────────────────────────────────────
+  // Checked before rate limiting: rejected paths must not consume quota.
+  // A stolen token should not be usable to probe non-inference endpoints.
+  const { provider } = req.params;
+  if (SUPPORTED_PROVIDERS.includes(provider)) {
+    const forwardPath = normalizeProviderPath('/' + (req.params[0] || ''));
+    req.forwardPath = forwardPath;
+    if (!isPathAllowed(provider, forwardPath)) {
+      return res.status(403).json({
+        error: `Path "${forwardPath}" is not permitted for provider "${provider}". Only inference endpoints are allowed.`,
+      });
+    }
+  }
+  next();
+}, relayLimiter, async (req, res) => {
   const { provider } = req.params;
   if (!SUPPORTED_PROVIDERS.includes(provider)) {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
-  // Build the forwarded path early so we can check it BEFORE key decryption.
-  // This prevents a token holder from probing provider account structure via
-  // paths that are not in the allowlist (fine-tuning, billing, model deletion, etc.)
-  const forwardPath = '/' + (req.params[0] || '');
-  if (!isPathAllowed(provider, forwardPath)) {
-    return res.status(403).json({
-      error: `Path not permitted for provider "${provider}". Only inference endpoints are allowed.`,
-    });
-  }
+  // Forward exactly the normalized path that passed the allowlist check.
+  // Do not reconstruct it from Express params here: validation and use must
+  // operate on the same value.
+  const forwardPath = req.forwardPath;
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
@@ -259,175 +589,48 @@ app.post('/relay/:provider/*', requireToken, relayLimiter, async (req, res) => {
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer', 'content-type',
+    'http-referer', 'x-relay-e2e-base-url-token', 'content-type',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
-  // Determine body to forward: raw Buffer for binary-upload providers, else parsed JSON.
+  const model = req.body?.model || null;
   const { rawBody: providerWantsRawBody } = getProviderMeta(provider);
-  const relayBody = (providerWantsRawBody && req.rawBodyBuffer)
+  const relayBody = providerWantsRawBody && req.rawBodyBuffer
     ? req.rawBodyBuffer
     : req.body;
 
-  const model = req.body?.model || null;
-  const relayStart = Date.now();
-
-  try {
-    const providerResponse = await forwardRequest(
-      provider,
-      forwardPath,
-      req.method,
-      relayBody,
-      apiKey,
-      extraHeaders,
-    );
-
-    // Forward status and relevant headers
-    res.status(providerResponse.status);
-    const contentType = providerResponse.headers.get('content-type');
-    if (contentType) res.setHeader('Content-Type', contentType);
-
-    const isStream = req.body?.stream === true ||
-      (contentType && contentType.includes('text/event-stream'));
-
-    const latency_ms = Date.now() - relayStart;
-
-    // Structured relay log
-    req.log.info({
-      event: 'relay_request',
-      user_id: req.user.id,
-      app_id: req.user.app_id,
-      provider,
-      model,
-      status: providerResponse.status,
-      latency_ms,
-      streaming: isStream,
-    }, 'relay');
-
-    // Persist to request_logs for /stats
-    try {
-      logRequest({
-        user_id: req.user.id,
-        app_id: req.user.app_id,
-        provider,
-        model,
-        status: providerResponse.status,
-        latency_ms,
-      });
-    } catch (logErr) {
-      // Never let logging failure affect the response
-      req.log.warn({ err: logErr }, 'request log write failed');
-    }
-
-    // Determine how to return the response body.
-    // Binary providers (audio, image) or binary content-type responses are
-    // piped through directly. JSON providers are parsed and re-serialised.
-    // SSE streams are piped with SSE headers.
-    const { binaryResponse: providerIsBinary } = getProviderMeta(provider);
-    const isBinary = providerIsBinary ||
-      (contentType && (
-        contentType.startsWith('audio/') ||
-        contentType.startsWith('image/') ||
-        contentType.startsWith('video/') ||
-        contentType === 'application/octet-stream'
-      ));
-
-    if (isStream) {
-      // Pipe the SSE stream directly to the client
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      // If the upstream provider drops the connection mid-stream, emit an error
-      // event on the SSE channel and close cleanly rather than crashing the process.
-      providerResponse.body.on('error', (streamErr) => {
-        req.log.warn(
-          { err: streamErr, event: 'stream_pipe_error', user_id: req.user.id, app_id: req.user.app_id, provider },
-          'upstream SSE stream error'
-        );
-        if (!res.writableEnded) {
-          // Send a terminal SSE error event so the client knows the stream died.
-          res.write('event: error\ndata: {"error":"Stream interrupted by provider"}\n\n');
-          res.end();
-        }
-      });
-
-      // If the client disconnects before the stream finishes, destroy the
-      // upstream connection so we don't keep consuming provider bandwidth.
-      res.on('close', () => {
-        if (providerResponse.body && !providerResponse.body.destroyed) {
-          providerResponse.body.destroy();
-        }
-      });
-
-      providerResponse.body.pipe(res);
-    } else if (isBinary) {
-      // Binary response (audio, image, video) — pipe bytes through without parsing.
-      // Content-Type is already set above from providerResponse headers.
-      const contentLength = providerResponse.headers.get('content-length');
-      if (contentLength) res.setHeader('Content-Length', contentLength);
-      const contentDisp = providerResponse.headers.get('content-disposition');
-      if (contentDisp) res.setHeader('Content-Disposition', contentDisp);
-
-      // Same safety net for binary pipes: log + end cleanly on upstream error,
-      // and destroy upstream on client disconnect.
-      providerResponse.body.on('error', (binaryErr) => {
-        req.log.warn(
-          { err: binaryErr, event: 'binary_pipe_error', user_id: req.user.id, app_id: req.user.app_id, provider },
-          'upstream binary stream error'
-        );
-        if (!res.writableEnded) res.end();
-      });
-      res.on('close', () => {
-        if (providerResponse.body && !providerResponse.body.destroyed) {
-          providerResponse.body.destroy();
-        }
-      });
-
-      providerResponse.body.pipe(res);
-    } else {
-      // JSON response: check Content-Type before calling .json() to avoid
-      // throwing on HTML error pages (e.g. Cloudflare 502).
-      if (contentType && !contentType.includes('application/json')) {
-        const text = await providerResponse.text();
-        res.setHeader('Content-Type', contentType);
-        res.send(text);
-      } else {
-        const data = await providerResponse.json();
-        res.json(data);
-      }
-    }
-  } catch (err) {
-    // SSRF / input validation errors are client mistakes — return 400.
-    // All other relay failures return 502 with a generic message so we don't
-    // leak internal hostnames, IPs, or stack traces to the client.
-    if (err.code === 'INVALID_RELAY_BASE_URL') {
-      return res.status(400).json({ error: err.message });
-    }
-    const latency_ms = Date.now() - relayStart;
-    req.log.error({ err, event: 'relay_error', user_id: req.user.id, app_id: req.user.app_id, provider, model, latency_ms }, 'relay error');
-    try {
-      logRequest({ user_id: req.user.id, app_id: req.user.app_id, provider, model, status: 502, latency_ms });
-    } catch (_) {}
-    res.status(502).json({ error: 'Failed to reach AI provider' });
-  }
+  return forwardRelayRequest({
+    req,
+    res,
+    provider,
+    forwardPath,
+    body: relayBody,
+    apiKey,
+    extraHeaders,
+    model,
+    streamingRequested: req.body?.stream === true,
+  });
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
-// When run directly (node src/index.js or npm start), start the HTTP server.
-// When imported by Vercel's @vercel/node runtime, export the app instead.
-if (require.main === module) {
+
+/**
+ * Start the HTTP server and return the server instance.
+ * Called by the CLI bin (npx byok-relay) and when run directly.
+ * Not called when imported by Vercel's @vercel/node runtime.
+ */
+function startServer() {
   const server = app.listen(PORT, '0.0.0.0', () => {
     logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
   });
 
   // Graceful shutdown on SIGTERM (Docker stop, systemd, Kubernetes rolling deploy).
   // server.close() stops accepting new connections and waits for in-flight
-  // requests to finish. Force-exits after 30 s in case a streaming request
-  // never completes (e.g. a runaway SSE connection).
-  process.on('SIGTERM', () => {
+  // requests to finish. Force-exit after 30 s in case a streaming request
+  // never completes.
+  process.once('SIGTERM', () => {
     logger.info('SIGTERM received — starting graceful shutdown');
     server.close((err) => {
       if (err) {
@@ -441,8 +644,17 @@ if (require.main === module) {
       logger.warn('graceful shutdown timed out after 30 s — forcing exit');
       process.exit(1);
     }, 30_000);
-    forceExit.unref(); // Don't prevent Node from exiting if nothing else is pending.
+    forceExit.unref();
   });
+
+  return server;
+}
+
+// When run directly (node src/index.js or npm start), start immediately.
+// When imported (Vercel runtime, CLI bin, tests), let the caller decide.
+if (require.main === module) {
+  startServer();
 }
 
 module.exports = app;
+module.exports.startServer = startServer;

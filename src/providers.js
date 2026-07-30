@@ -1,7 +1,7 @@
 /**
  * Provider-specific request forwarding.
  *
- * Built-in providers: anthropic, openai, google, groq, elevenlabs, huggingface, deepgram
+ * Built-in providers: anthropic, openai, google, groq
  *
  * Generic OpenAI-compatible passthrough:
  *   Any provider registered as `openai-compatible:<base-url>` will be forwarded
@@ -9,18 +9,15 @@
  *   OpenRouter, LiteLLM, Groq, Mistral, Ollama, etc.
  *
  * Adding a new built-in provider: add an entry to PROVIDERS below.
- *   - allowedPaths: array of permitted path prefixes (string match). Required.
- *   - binaryResponse: true if provider may return non-JSON binary responses
- *     (audio, images). The relay will stream binary responses to the client
- *     without calling .json().
- *   - rawBody: true if the provider may receive raw binary request bodies
- *     (e.g. audio file uploads). The relay will pass the raw buffer through
- *     instead of JSON-serialising req.body.
  * Adding a custom OpenAI-compatible endpoint: no code change needed —
  *   the user stores their key under a name like `openrouter` and passes
  *   the base URL as a header `x-relay-base-url`.
  */
+const dns = require('node:dns').promises;
+const https = require('node:https');
+const net = require('node:net');
 const fetch = require('node-fetch');
+const nodePath = require('path');
 
 // ── SSRF protection ──────────────────────────────────────────────────────────
 // Blocked IP ranges: RFC-1918 private, loopback, link-local, and cloud IMDS
@@ -70,6 +67,30 @@ function isBlockedIp(ipStr) {
   // Use `>>> 0` to coerce the bitwise-AND result back to an unsigned 32-bit
   // integer before comparing, because JS `&` returns a signed 32-bit value.
   return BLOCKED_CIDRS.some(({ baseInt, mask }) => ((ipInt & mask) >>> 0) === baseInt);
+}
+
+function stripIpv6Brackets(hostname) {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
+function isBlockedAddress(address, family) {
+  if (family === 4) return isBlockedIp(address);
+  if (family === 6) return isBlockedIpv6(address);
+  return false;
+}
+
+function createPinnedHttpsAgent({ address, family }) {
+  return new https.Agent({
+    lookup(_hostname, options, callback) {
+      if (options?.all) {
+        callback(null, [{ address, family }]);
+        return;
+      }
+      callback(null, address, family);
+    },
+  });
 }
 
 // ── IPv6 blocked ranges ──────────────────────────────────────────────────────
@@ -157,14 +178,15 @@ class RelayUrlValidationError extends Error {
  * Rules enforced:
  *  1. Must be a valid URL.
  *  2. Must use HTTPS.
- *  3. IPv4 hostname must not fall in a private/reserved CIDR range.
- *  4. IPv6 hostname must not fall in a blocked range (::1, fe80::/10,
+ *  3. Must not include embedded credentials.
+ *  4. IPv4 hostname must not fall in a private/reserved CIDR range.
+ *  5. IPv6 hostname must not fall in a blocked range (::1, fe80::/10,
  *     fc00::/7, ::ffff:0:0/96).
- *  5. 'localhost' (and *.localhost) is blocked by name.
- *  6. Normalised to url.origin — path/credentials/query stripped to
- *     prevent path-injection.
+ *  6. 'localhost' (and *.localhost) is blocked by name.
+ *  7. Hostnames must resolve only to public IP ranges.
+ *  8. Normalised to url.origin — path/query stripped to prevent path-injection.
  */
-function validateAndNormaliseBaseUrl(raw) {
+async function validateAndNormaliseBaseUrl(raw) {
   let parsed;
   try {
     parsed = new URL(raw);
@@ -176,30 +198,29 @@ function validateAndNormaliseBaseUrl(raw) {
     throw new RelayUrlValidationError('x-relay-base-url must use HTTPS');
   }
 
-  const hostname = parsed.hostname;
+  if (parsed.username || parsed.password) {
+    throw new RelayUrlValidationError('x-relay-base-url must not include embedded credentials');
+  }
 
-  // Block raw IPv4 addresses in private / link-local / reserved ranges
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
-    if (isBlockedIp(hostname)) {
+  const hostname = parsed.hostname;
+  const ipv6Bare = stripIpv6Brackets(hostname);
+  let approvedAddress;
+
+  // Block raw IP addresses in private / link-local / reserved ranges.
+  const literalFamily = net.isIP(ipv6Bare);
+  if (literalFamily !== 0) {
+    if (isBlockedAddress(ipv6Bare, literalFamily)) {
       throw new RelayUrlValidationError(
         'x-relay-base-url must not target a private or reserved IP address',
       );
     }
+    approvedAddress = { address: ipv6Bare, family: literalFamily };
   }
 
   // Block IPv6 literals.  WHATWG URL preserves brackets in hostname
   // (e.g. new URL('https://[::1]').hostname === '[::1]'), so strip them
-  // before passing to the parser.
-  const ipv6Bare = hostname.startsWith('[') && hostname.endsWith(']')
-    ? hostname.slice(1, -1)
-    : hostname;
-  if (ipv6Bare.includes(':')) {
-    if (isBlockedIpv6(ipv6Bare)) {
-      throw new RelayUrlValidationError(
-        'x-relay-base-url must not target a private or reserved IP address',
-      );
-    }
-  }
+  // before passing to the parser. The literalFamily branch above handles both
+  // IPv4 and IPv6 literals.
 
   // Block localhost by name.
   // Strip trailing dot first: 'localhost.' parses as-is in Node but still
@@ -209,15 +230,115 @@ function validateAndNormaliseBaseUrl(raw) {
     throw new RelayUrlValidationError('x-relay-base-url must not target localhost');
   }
 
-  // Return only the origin (scheme + host + port) — strip any path the
-  // client may have embedded to prevent path-injection attacks.
-  return parsed.origin;
+  // Hostname SSRF protection: reject DNS names that resolve to private,
+  // loopback, link-local, reserved, or IMDS ranges. IP literals were already
+  // checked above, so only perform resolver work for real hostnames.
+  if (literalFamily === 0) {
+    let addresses;
+    try {
+      addresses = await dns.lookup(hostForNameCheck, { all: true });
+    } catch {
+      throw new RelayUrlValidationError('x-relay-base-url hostname could not be resolved safely');
+    }
+
+    if (!addresses.length) {
+      throw new RelayUrlValidationError('x-relay-base-url hostname could not be resolved safely');
+    }
+
+    for (const { address, family } of addresses) {
+      if (isBlockedAddress(address, family)) {
+        throw new RelayUrlValidationError(
+          'x-relay-base-url must not resolve to a private or reserved IP address',
+        );
+      }
+    }
+
+    // Pin the actual request to one address that passed validation so a later
+    // DNS answer cannot rebind the approved hostname to a private target.
+    approvedAddress = addresses[0];
+  }
+
+  // Return only the origin (scheme + host + port) and a pinned agent — strip
+  // any path the client may have embedded to prevent path-injection attacks.
+  return {
+    origin: parsed.origin,
+    agent: createPinnedHttpsAgent(approvedAddress),
+  };
+}
+
+function getE2eBaseUrlOverride(extraHeaders) {
+  if (process.env.NODE_ENV !== 'test') return null;
+
+  const overrideBaseUrl = process.env.E2E_OPENAI_COMPATIBLE_BASE_URL;
+  const overrideToken = process.env.E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN;
+  if (!overrideBaseUrl || !overrideToken) return null;
+
+  return extraHeaders['x-relay-e2e-base-url-token'] === overrideToken
+    ? overrideBaseUrl
+    : null;
+}
+
+// ── Path traversal allowlist ────────────────────────────────────────────────
+// Each provider defines the path prefixes that are permitted to be forwarded.
+// Any path not matching an allowed prefix is rejected with 403.
+// This prevents a stolen relay token from being used to access non-inference
+// endpoints (fine-tuning, file uploads, billing, model deletion, etc.).
+//
+// Rules:
+// - Paths are matched as prefixes (startsWith), case-sensitive.
+// - A trailing '*' is symbolic only — matching is always prefix-based.
+// - For 'openai-compatible', a broad inference set covers the common case;
+//   callers that need more paths should use named providers.
+
+/**
+ * Check whether a request path is allowed for the given provider.
+ * Returns true if allowed, false if it should be blocked.
+ *
+ * @param {string} provider - Provider name from PROVIDERS
+ * @param {string} path - Forward path starting with '/'
+ */
+function safeDecodePath(path) {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+function normalizeProviderPath(path) {
+  const withLeadingSlash = path.startsWith('/') ? path : `/${path}`;
+  const decodedPath = safeDecodePath(withLeadingSlash);
+  const normalizedPath = nodePath.posix.normalize(decodedPath);
+  return normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+}
+
+function isPathAllowed(provider, path) {
+  const config = PROVIDERS[provider];
+  if (!config) return false;
+
+  // If provider defines no allowedPaths, default to deny
+  const allowed = config.allowedPaths;
+  if (!allowed || allowed.length === 0) return false;
+
+  // Normalize the path to collapse dot-segments before prefix matching.
+  // This prevents traversal payloads like '/v1/chat/completions/../files'
+  // from bypassing the allowlist by starting with an allowed prefix.
+  const normalizedPath = normalizeProviderPath(path);
+
+  return allowed.some(prefix => {
+    const normalizedPrefix = normalizeProviderPath(prefix);
+    return normalizedPath === normalizedPrefix || normalizedPath.startsWith(normalizedPrefix + '/') || normalizedPath.startsWith(normalizedPrefix + '?');
+  });
 }
 
 const PROVIDERS = {
   anthropic: {
     baseUrl: 'https://api.anthropic.com',
-    allowedPaths: ['/v1/messages', '/v1/complete'],
+    // Allowed inference paths for Anthropic
+    allowedPaths: [
+      '/v1/messages',
+      '/v1/complete',
+    ],
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
@@ -232,7 +353,13 @@ const PROVIDERS = {
 
   openai: {
     baseUrl: 'https://api.openai.com',
-    allowedPaths: ['/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/responses'],
+    // Allowed inference paths for OpenAI
+    allowedPaths: [
+      '/v1/chat/completions',
+      '/v1/completions',
+      '/v1/embeddings',
+      '/v1/responses',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -242,7 +369,12 @@ const PROVIDERS = {
   google: {
     // Gemini API — key is passed as query param; ?alt=sse required for SSE streaming
     baseUrl: 'https://generativelanguage.googleapis.com',
-    allowedPaths: ['/v1beta/models/', '/v1/models/'],
+    // Allowed inference paths for Google Gemini
+    // Paths are like /v1beta/models/{model}:generateContent
+    allowedPaths: [
+      '/v1beta/models',
+      '/v1/models',
+    ],
     buildHeaders: () => ({ 'Content-Type': 'application/json' }),
     buildUrl: (baseUrl, path, apiKey) => {
       // Add alt=sse for streaming endpoints, plus the API key
@@ -256,7 +388,12 @@ const PROVIDERS = {
 
   groq: {
     baseUrl: 'https://api.groq.com',
-    allowedPaths: ['/openai/v1/chat/completions', '/openai/v1/completions', '/openai/v1/embeddings'],
+    // Allowed inference paths for Groq
+    allowedPaths: [
+      '/openai/v1/chat/completions',
+      '/openai/v1/completions',
+      '/openai/v1/embeddings',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -265,7 +402,12 @@ const PROVIDERS = {
 
   openrouter: {
     baseUrl: 'https://openrouter.ai',
-    allowedPaths: ['/api/v1/chat/completions', '/api/v1/completions', '/api/v1/embeddings'],
+    // Allowed inference paths for OpenRouter
+    allowedPaths: [
+      '/api/v1/chat/completions',
+      '/api/v1/completions',
+      '/api/v1/embeddings',
+    ],
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -277,7 +419,13 @@ const PROVIDERS = {
 
   mistral: {
     baseUrl: 'https://api.mistral.ai',
-    allowedPaths: ['/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/fim/completions'],
+    // Allowed inference paths for Mistral
+    allowedPaths: [
+      '/v1/chat/completions',
+      '/v1/completions',
+      '/v1/embeddings',
+      '/v1/fim/completions',
+    ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
@@ -293,17 +441,16 @@ const PROVIDERS = {
   elevenlabs: {
     baseUrl: 'https://api.elevenlabs.io',
     allowedPaths: [
-      '/v1/text-to-speech/',
-      '/v1/speech-to-speech/',
+      '/v1/text-to-speech',
+      '/v1/speech-to-speech',
       '/v1/sound-generation',
       '/v1/audio-isolation',
       '/v1/voice-generation',
       '/v1/voices',
     ],
-    binaryResponse: true,  // TTS returns audio/mpeg or audio/pcm
+    binaryResponse: true,
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'xi-api-key': apiKey,
-      // Content-Type is forwarded from the caller; default to JSON for TTS
       'Content-Type': extraHeaders['content-type'] || 'application/json',
     }),
   },
@@ -316,8 +463,8 @@ const PROVIDERS = {
    */
   huggingface: {
     baseUrl: 'https://api-inference.huggingface.co',
-    allowedPaths: ['/models/'],
-    binaryResponse: true,  // image/audio models return binary; relay detects Content-Type
+    allowedPaths: ['/models'],
+    binaryResponse: true,
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': extraHeaders['content-type'] || 'application/json',
@@ -337,8 +484,8 @@ const PROVIDERS = {
       '/v1/speak',
       '/v1/read',
     ],
-    binaryResponse: true,  // /v1/speak returns audio/mpeg
-    rawBody: true,         // /v1/listen may receive raw audio binary upload
+    binaryResponse: true,
+    rawBody: true,
     buildHeaders: (apiKey, extraHeaders = {}) => ({
       'Authorization': `Token ${apiKey}`,
       'Content-Type': extraHeaders['content-type'] || 'application/json',
@@ -352,10 +499,20 @@ const PROVIDERS = {
    */
   'openai-compatible': {
     baseUrl: null, // determined per-request from x-relay-base-url header
+    // Allowed inference paths for generic OpenAI-compatible endpoints
+    // Covers the most common inference APIs; non-inference paths are blocked.
     allowedPaths: [
-      '/v1/chat/completions', '/v1/completions', '/v1/embeddings',
-      '/api/v1/chat/completions', '/api/v1/completions', '/api/v1/embeddings',
-      '/openai/v1/chat/completions', '/openai/v1/completions',
+      '/v1/chat/completions',
+      '/v1/completions',
+      '/v1/embeddings',
+      '/v1/messages',
+      '/v1/responses',
+      '/api/v1/chat/completions',
+      '/api/v1/completions',
+      '/api/v1/embeddings',
+      '/openai/v1/chat/completions',
+      '/openai/v1/completions',
+      '/openai/v1/embeddings',
     ],
     buildHeaders: (apiKey) => ({
       'Content-Type': 'application/json',
@@ -365,33 +522,13 @@ const PROVIDERS = {
 };
 
 /**
- * Return true if `path` starts with any allowed prefix for `provider`.
- * Applies path.posix.normalize() to neutralise dot-segment traversal before
- * matching (e.g. '/v1/messages/../files' normalises to '/v1/files' which is
- * then correctly blocked).
- *
- * Providers without an allowedPaths array pass all paths.
- *
- * @param {string} provider
- * @param {string} path
- * @returns {boolean}
- */
-function isPathAllowed(provider, path) {
-  const config = PROVIDERS[provider];
-  if (!config || !config.allowedPaths) return true; // no allowlist → allow all
-  const { posix } = require('path');
-  const normalised = posix.normalize(path);
-  return config.allowedPaths.some(prefix => normalised.startsWith(prefix));
-}
-
-/**
  * Forward a request to the AI provider.
  * Returns a node-fetch Response (streaming-capable).
  *
  * @param {string} provider - Provider name from PROVIDERS
  * @param {string} path - URL path to forward (e.g. /v1/messages)
  * @param {string} method - HTTP method
- * @param {object|Buffer|null} body - Parsed JSON body, raw Buffer, or null
+ * @param {object} body - Request body
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
  */
@@ -400,6 +537,8 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
   let baseUrl = config.baseUrl;
+  const fetchOptions = {};
+  const e2eBaseUrl = getE2eBaseUrlOverride(extraHeaders);
 
   // For openai-compatible, the base URL comes from the request header.
   // Validate and normalise it to prevent SSRF attacks.
@@ -409,8 +548,25 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
       throw new RelayUrlValidationError('x-relay-base-url header is required for openai-compatible provider');
     }
     // validateAndNormaliseBaseUrl throws on any policy violation and returns
-    // url.origin (scheme + host + port), stripping any path the client embedded.
-    baseUrl = validateAndNormaliseBaseUrl(rawBaseUrl);
+    // url.origin (scheme + host + port), stripping any path the client embedded,
+    // plus a custom agent pinned to the DNS result that passed validation.
+    const validatedBaseUrl = await validateAndNormaliseBaseUrl(rawBaseUrl);
+    baseUrl = validatedBaseUrl.origin;
+    fetchOptions.agent = validatedBaseUrl.agent;
+    fetchOptions.redirect = 'manual';
+
+    // E2E tests need a loopback HTTPS mock provider, but production requests
+    // must reject hostnames such as localtest.me that resolve to loopback. Keep
+    // the public header validation path intact, then swap in the mock base URL
+    // only when the test runner supplies a one-off process-local token.
+    if (e2eBaseUrl) {
+      baseUrl = e2eBaseUrl;
+      delete fetchOptions.agent;
+    }
+  } else if (e2eBaseUrl) {
+    // E2E tests may route built-in providers to the local mock server so
+    // allowlist smoke tests never contact real vendor APIs.
+    baseUrl = e2eBaseUrl;
   }
 
   const headers = config.buildHeaders(apiKey, extraHeaders);
@@ -428,12 +584,13 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
   if (method === 'GET' || body === null || body === undefined) {
     fetchBody = undefined;
   } else if (Buffer.isBuffer(body)) {
-    fetchBody = body; // raw binary pass-through (e.g. Deepgram STT audio)
+    fetchBody = body;
   } else {
     fetchBody = JSON.stringify(body);
   }
 
   const response = await fetch(url, {
+    ...fetchOptions,
     method,
     headers,
     body: fetchBody,
@@ -458,4 +615,11 @@ function getProviderMeta(provider) {
 
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
-module.exports = { forwardRequest, getProviderMeta, isPathAllowed, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl };
+module.exports = {
+  forwardRequest,
+  getProviderMeta,
+  SUPPORTED_PROVIDERS,
+  validateAndNormaliseBaseUrl,
+  isPathAllowed,
+  normalizeProviderPath,
+};
