@@ -51,6 +51,21 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_keys_user_provider ON keys(user_id, provider);
+
+  CREATE TABLE IF NOT EXISTS request_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT,
+    status INTEGER NOT NULL,
+    latency_ms REAL NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_request_logs_user ON request_logs(user_id);
+  CREATE INDEX IF NOT EXISTS idx_request_logs_app ON request_logs(app_id);
+  CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);
 `);
 // NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
 // On a legacy DB the users table still has 'token', not 'token_hash', so
@@ -336,6 +351,127 @@ function listProviders(userId) {
     .map(r => r.provider);
 }
 
+// ── Request log helpers ─────────────────────────────────────────────────────
+
+/**
+ * Append one relay request to the request_logs table.
+ * Called from the relay route handlers after the upstream response completes.
+ *
+ * @param {object} entry
+ * @param {string}  entry.user_id
+ * @param {string}  entry.app_id
+ * @param {string}  entry.provider
+ * @param {string}  [entry.model]
+ * @param {number}  entry.status     - HTTP status returned to client
+ * @param {number}  entry.latency_ms - wall-clock ms for the upstream request
+ */
+function logRequest({ user_id, app_id, provider, model, status, latency_ms }) {
+  db.prepare(
+    'INSERT INTO request_logs (id, user_id, app_id, provider, model, status, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(uuidv4(), user_id, app_id, provider, model || null, status, latency_ms, Date.now());
+}
+
+/**
+ * Return aggregate stats for a single user (identified by user_id).
+ *
+ * Returns:
+ *   total          - all-time request count
+ *   last_7d        - requests in the last 7 days
+ *   last_30d       - requests in the last 30 days
+ *   providers      - per-provider breakdown: { [provider]: { total, errors } }
+ *   models         - top 10 models by request count
+ *   error_count    - total non-2xx responses (all time)
+ *   error_rate     - error_count / total (0 when total === 0)
+ *   last_request   - ISO timestamp of most-recent request, or null
+ */
+function getStatsForUser(userId) {
+  const now = Date.now();
+  const ms7d  = 7  * 24 * 60 * 60 * 1000;
+  const ms30d = 30 * 24 * 60 * 60 * 1000;
+
+  const total   = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE user_id = ?').get(userId).n;
+  const last7d  = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE user_id = ? AND created_at >= ?').get(userId, now - ms7d).n;
+  const last30d = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE user_id = ? AND created_at >= ?').get(userId, now - ms30d).n;
+  const errCount = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE user_id = ? AND (status < 200 OR status >= 300)').get(userId).n;
+
+  const provRows = db.prepare(
+    `SELECT provider,
+            COUNT(*) AS total,
+            SUM(CASE WHEN status < 200 OR status >= 300 THEN 1 ELSE 0 END) AS errors
+     FROM request_logs WHERE user_id = ? GROUP BY provider ORDER BY total DESC`
+  ).all(userId);
+
+  const providers = {};
+  for (const r of provRows) {
+    providers[r.provider] = { total: r.total, errors: r.errors };
+  }
+
+  const topModels = db.prepare(
+    `SELECT model, COUNT(*) AS total FROM request_logs
+     WHERE user_id = ? AND model IS NOT NULL
+     GROUP BY model ORDER BY total DESC LIMIT 10`
+  ).all(userId).map(r => ({ model: r.model, total: r.total }));
+
+  const lastRow = db.prepare('SELECT created_at FROM request_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(userId);
+
+  return {
+    total,
+    last_7d:    last7d,
+    last_30d:   last30d,
+    error_count: errCount,
+    error_rate: total > 0 ? +(errCount / total).toFixed(4) : 0,
+    providers,
+    top_models: topModels,
+    last_request: lastRow ? new Date(lastRow.created_at).toISOString() : null,
+  };
+}
+
+/**
+ * Return aggregate stats for all users belonging to a given app_id.
+ * Used by an operator-level /stats/:app_id endpoint (guarded by APP_SECRET).
+ */
+function getStatsForApp(appId) {
+  const now = Date.now();
+  const ms7d  = 7  * 24 * 60 * 60 * 1000;
+  const ms30d = 30 * 24 * 60 * 60 * 1000;
+
+  const total    = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE app_id = ?').get(appId).n;
+  const last7d   = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE app_id = ? AND created_at >= ?').get(appId, now - ms7d).n;
+  const last30d  = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE app_id = ? AND created_at >= ?').get(appId, now - ms30d).n;
+  const errCount = db.prepare('SELECT COUNT(*) AS n FROM request_logs WHERE app_id = ? AND (status < 200 OR status >= 300)').get(appId).n;
+  const userCount = db.prepare('SELECT COUNT(DISTINCT user_id) AS n FROM request_logs WHERE app_id = ?').get(appId).n;
+
+  const provRows = db.prepare(
+    `SELECT provider,
+            COUNT(*) AS total,
+            SUM(CASE WHEN status < 200 OR status >= 300 THEN 1 ELSE 0 END) AS errors
+     FROM request_logs WHERE app_id = ? GROUP BY provider ORDER BY total DESC`
+  ).all(appId);
+
+  const providers = {};
+  for (const r of provRows) {
+    providers[r.provider] = { total: r.total, errors: r.errors };
+  }
+
+  const topModels = db.prepare(
+    `SELECT model, COUNT(*) AS total FROM request_logs
+     WHERE app_id = ? AND model IS NOT NULL
+     GROUP BY model ORDER BY total DESC LIMIT 10`
+  ).all(appId).map(r => ({ model: r.model, total: r.total }));
+
+  return {
+    app_id: appId,
+    user_count: userCount,
+    total,
+    last_7d:    last7d,
+    last_30d:   last30d,
+    error_count: errCount,
+    error_rate: total > 0 ? +(errCount / total).toFixed(4) : 0,
+    providers,
+    top_models: topModels,
+  };
+}
+
 module.exports = {
   createUser,
   getUserByToken,
@@ -344,4 +480,8 @@ module.exports = {
   getDecryptedKey,
   deleteKey,
   listProviders,
+  logRequest,
+  getStatsForUser,
+  getStatsForApp,
 };
+

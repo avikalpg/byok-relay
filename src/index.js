@@ -1,40 +1,46 @@
 require('dotenv').config();
 const crypto = require('crypto');
+const { pipeline } = require('stream');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
+const {
+  createUser,
+  getUserByToken,
+  upsertKey,
+  getDecryptedKey,
+  deleteKey,
+  listProviders,
+  logRequest,
+  getStatsForUser,
+  getStatsForApp,
+} = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
+const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
-  console.error('ERROR: ENCRYPTION_SECRET env var is not set.');
-  console.error('Generate one with: openssl rand -hex 32');
-  console.error('Then add it to your .env file or environment.');
+  logger.error('ENCRYPTION_SECRET env var is not set. Generate one with: openssl rand -hex 32');
   process.exit(1);
 }
 if (process.env.ENCRYPTION_SECRET.length < 32) {
-  console.error('ERROR: ENCRYPTION_SECRET must be at least 32 characters.');
+  logger.error('ENCRYPTION_SECRET must be at least 32 characters.');
   process.exit(1);
 }
 if (process.env.APP_SECRET && process.env.APP_SECRET.includes(' ')) {
-  console.error('ERROR: APP_SECRET must not contain spaces. Generate a safe value with: openssl rand -hex 32');
+  logger.error('APP_SECRET must not contain spaces. Generate a safe value with: openssl rand -hex 32');
   process.exit(1);
 }
 if (!process.env.APP_SECRET) {
-  console.warn('WARNING: APP_SECRET is not set. POST /users is open — anyone can register.');
-  console.warn('Set APP_SECRET to restrict registration to authorised callers only.');
-  console.warn('Generate one with: openssl rand -hex 32');
+  logger.warn('APP_SECRET is not set — POST /users is open. Set APP_SECRET to restrict registration.');
 }
 if (process.env.TOKEN_HMAC_SECRET && process.env.TOKEN_HMAC_SECRET.length < 32) {
-  console.error('ERROR: TOKEN_HMAC_SECRET must be at least 32 characters.');
+  logger.error('TOKEN_HMAC_SECRET must be at least 32 characters.');
   process.exit(1);
 }
 if (!process.env.TOKEN_HMAC_SECRET) {
-  console.warn('WARNING: TOKEN_HMAC_SECRET is not set. Falling back to ENCRYPTION_SECRET for token hashing.');
-  console.warn('Set TOKEN_HMAC_SECRET to use a dedicated key per best practice.');
-  console.warn('Generate one with: openssl rand -hex 32');
+  logger.warn('TOKEN_HMAC_SECRET is not set — falling back to ENCRYPTION_SECRET for token hashing.');
 }
 
 const app = express();
@@ -46,11 +52,24 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o =>
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-relay-token', 'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title', 'http-referer'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-relay-token',
+    'anthropic-version',
+    'x-relay-base-url',
+    'x-relay-referer',
+    'x-title',
+    'http-referer',
+    'x-relay-e2e-base-url-token',
+  ],
   credentials: false,
 }));
 
 app.use(express.json({ limit: '1mb' }));
+
+// Structured HTTP request logging (must come after express.json so body is parsed)
+app.use(httpLogger);
 
 // Global rate limit: 100 requests per minute per IP
 const globalLimiter = rateLimit({
@@ -119,6 +138,154 @@ function requireToken(req, res, next) {
   next();
 }
 
+function logRelayRequest(req, details) {
+  const { provider, model, status, latency_ms, streaming } = details;
+
+  req.log.info({
+    event: 'relay_request',
+    user_id: req.user.id,
+    app_id: req.user.app_id,
+    provider,
+    model,
+    status,
+    latency_ms,
+    streaming,
+  }, 'relay');
+
+  try {
+    logRequest({
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status,
+      latency_ms,
+    });
+  } catch (logErr) {
+    // Never let logging failure affect the response
+    req.log.warn({ err: logErr }, 'request log write failed');
+  }
+}
+
+function logRelayError(req, details) {
+  const { err, provider, model, latency_ms } = details;
+  req.log.error({
+    err,
+    event: 'relay_error',
+    user_id: req.user.id,
+    app_id: req.user.app_id,
+    provider,
+    model,
+    latency_ms,
+  }, 'relay error');
+
+  try {
+    logRequest({
+      user_id: req.user.id,
+      app_id: req.user.app_id,
+      provider,
+      model,
+      status: 502,
+      latency_ms,
+    });
+  } catch (_) {}
+}
+
+function createRelayLogger(req) {
+  let relayMetricLogged = false;
+
+  return {
+    logRelayRequestOnce(details) {
+      if (relayMetricLogged) return;
+      relayMetricLogged = true;
+      logRelayRequest(req, details);
+    },
+    logRelayErrorOnce(details) {
+      if (relayMetricLogged) return;
+      relayMetricLogged = true;
+      logRelayError(req, details);
+    },
+  };
+}
+
+async function forwardRelayRequest({
+  req,
+  res,
+  provider,
+  forwardPath,
+  body,
+  apiKey,
+  extraHeaders,
+  model,
+  streamingRequested,
+}) {
+  const relayStart = Date.now();
+  const { logRelayRequestOnce, logRelayErrorOnce } = createRelayLogger(req);
+
+  try {
+    const providerResponse = await forwardRequest(
+      provider,
+      forwardPath,
+      req.method,
+      body,
+      apiKey,
+      extraHeaders,
+    );
+
+    res.status(providerResponse.status);
+    const contentType = providerResponse.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    const isStream = (contentType && contentType.includes('text/event-stream')) ||
+      (streamingRequested && providerResponse.ok);
+
+    if (isStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      pipeline(providerResponse.body, res, (streamErr) => {
+        const latency_ms = Date.now() - relayStart;
+        if (streamErr) {
+          logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
+          return;
+        }
+        logRelayRequestOnce({
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: true,
+        });
+      });
+      return;
+    }
+
+    const data = await providerResponse.json();
+    const latency_ms = Date.now() - relayStart;
+    logRelayRequestOnce({
+      provider,
+      model,
+      status: providerResponse.status,
+      latency_ms,
+      streaming: false,
+    });
+    res.json(data);
+  } catch (err) {
+    // SSRF / input validation errors are client mistakes — return 400.
+    // All other relay failures return 502 with a generic message so we don't
+    // leak internal hostnames, IPs, or stack traces to the client.
+    if (err.code === 'INVALID_RELAY_BASE_URL') {
+      return res.status(400).json({ error: err.message });
+    }
+    const latency_ms = Date.now() - relayStart;
+    logRelayErrorOnce({ err, provider, model, latency_ms });
+    if (!res.headersSent) {
+      return res.status(502).json({ error: 'Failed to reach AI provider' });
+    }
+    res.destroy(err);
+  }
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // Health check
@@ -180,6 +347,35 @@ app.delete('/keys/:provider', requireToken, (req, res) => {
 app.get('/keys', requireToken, (req, res) => {
   const providers = listProviders(req.user.id);
   res.json({ providers });
+});
+
+/**
+ * GET /stats
+ * Return per-user request statistics for the authenticated relay token.
+ * Headers: x-relay-token
+ *
+ * Response:
+ *   { total, last_7d, last_30d, error_count, error_rate, providers, top_models, last_request }
+ */
+app.get('/stats', requireToken, (req, res) => {
+  const stats = getStatsForUser(req.user.id);
+  res.json(stats);
+});
+
+/**
+ * GET /stats/:app_id
+ * Return aggregate statistics for all users of a given app_id.
+ * Requires APP_SECRET — operator-level endpoint.
+ *
+ * Response:
+ *   { app_id, user_count, total, last_7d, last_30d, error_count, error_rate, providers, top_models }
+ */
+app.get('/stats/:app_id', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'Operator stats require APP_SECRET to be configured.' });
+  }
+  const stats = getStatsForApp(req.params.app_id);
+  res.json(stats);
 });
 
 /**
@@ -254,45 +450,23 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer',
+    'http-referer', 'x-relay-e2e-base-url-token',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
-  try {
-    const providerResponse = await forwardRequest(
-      provider,
-      forwardPath,
-      req.method,
-      forwardBody,
-      apiKey,
-      extraHeaders,
-    );
-
-    res.status(providerResponse.status);
-    const contentType = providerResponse.headers.get('content-type');
-    if (contentType) res.setHeader('Content-Type', contentType);
-
-    const isStream = streaming ||
-      (contentType && contentType.includes('text/event-stream'));
-
-    if (isStream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      providerResponse.body.pipe(res);
-    } else {
-      const data = await providerResponse.json();
-      res.json(data);
-    }
-  } catch (err) {
-    if (err.code === 'INVALID_RELAY_BASE_URL') {
-      return res.status(400).json({ error: err.message });
-    }
-    console.error('Relay error (unified):', err);
-    res.status(502).json({ error: 'Failed to reach AI provider' });
-  }
+  return forwardRelayRequest({
+    req,
+    res,
+    provider,
+    forwardPath,
+    body: forwardBody,
+    apiKey,
+    extraHeaders,
+    model,
+    streamingRequested: streaming,
+  });
 });
 
 /**
@@ -347,44 +521,19 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
-  try {
-    const providerResponse = await forwardRequest(
-      provider,
-      forwardPath,
-      req.method,
-      req.body,
-      apiKey,
-      extraHeaders,
-    );
+  const model = req.body?.model || null;
 
-    // Forward status and relevant headers
-    res.status(providerResponse.status);
-    const contentType = providerResponse.headers.get('content-type');
-    if (contentType) res.setHeader('Content-Type', contentType);
-
-    const isStream = req.body?.stream === true ||
-      (contentType && contentType.includes('text/event-stream'));
-
-    if (isStream) {
-      // Pipe the SSE stream directly to the client
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      providerResponse.body.pipe(res);
-    } else {
-      const data = await providerResponse.json();
-      res.json(data);
-    }
-  } catch (err) {
-    // SSRF / input validation errors are client mistakes — return 400.
-    // All other relay failures return 502 with a generic message so we don't
-    // leak internal hostnames, IPs, or stack traces to the client.
-    if (err.code === 'INVALID_RELAY_BASE_URL') {
-      return res.status(400).json({ error: err.message });
-    }
-    console.error('Relay error:', err);
-    res.status(502).json({ error: 'Failed to reach AI provider' });
-  }
+  return forwardRelayRequest({
+    req,
+    res,
+    provider,
+    forwardPath,
+    body: req.body,
+    apiKey,
+    extraHeaders,
+    model,
+    streamingRequested: req.body?.stream === true,
+  });
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
@@ -396,9 +545,7 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
  */
 function startServer() {
   return app.listen(PORT, '0.0.0.0', () => {
-    console.log(`byok-relay listening on port ${PORT}`);
-    console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
-    console.log(`Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`);
+    logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
   });
 }
 
