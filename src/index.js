@@ -5,6 +5,7 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { createUser, getUserByToken, upsertKey, getDecryptedKey, deleteKey, listProviders } = require('./db');
 const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
+const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
 
 // ── Startup validation ──────────────────────────────────────────────────────
 if (!process.env.ENCRYPTION_SECRET) {
@@ -179,6 +180,119 @@ app.delete('/keys/:provider', requireToken, (req, res) => {
 app.get('/keys', requireToken, (req, res) => {
   const providers = listProviders(req.user.id);
   res.json({ providers });
+});
+
+/**
+ * GET /models
+ * Returns the routing table so clients can discover which model names / prefixes
+ * are routable without specifying an explicit provider path.
+ */
+app.get('/models', (req, res) => {
+  res.json({
+    providers: SUPPORTED_PROVIDERS,
+    providerPrefixes: Object.keys(PROVIDER_DEFAULT_PATHS),
+    patterns: MODEL_PATTERNS.map(({ pattern, provider }) => ({
+      pattern: pattern.source,
+      flags: pattern.flags,
+      provider,
+    })),
+    usage: 'POST /relay with { model: "provider/model-name", ...providerBody }',
+    examples: [
+      '{ "model": "anthropic/claude-3-5-haiku", "max_tokens": 256, "messages": [{"role":"user","content":"Hello"}] }',
+      '{ "model": "gpt-4o", "messages": [{"role":"user","content":"Hello"}] }',
+      '{ "model": "google/gemini-2.0-flash", "contents": [{"parts":[{"text":"Hello"}]}] }',
+    ],
+  });
+});
+
+/**
+ * POST /relay
+ * Unified model routing — resolve provider from the `model` field in the body.
+ *
+ * The request body is forwarded as-is to the resolved provider endpoint.
+ * Use "provider/model-name" for an explicit route, or a bare model name
+ * that matches one of the patterns in GET /models.
+ *
+ * Streaming: pass `stream: true` in the body; SSE is piped back to the client.
+ *
+ * Per-provider bodies:
+ *   anthropic — { model, max_tokens, messages: [{role, content}] }
+ *   openai    — { model, messages: [{role, content}] }
+ *   google    — { model, contents: [{parts:[{text}]}] }
+ *   groq/mistral/openrouter — OpenAI-compatible
+ */
+app.post('/relay', requireToken, relayLimiter, async (req, res) => {
+  const { model } = req.body || {};
+  if (!model) {
+    return res.status(400).json({
+      error: 'model field is required. Use "provider/model-name" (e.g. "anthropic/claude-3-5-haiku") or a recognised model name (e.g. "gpt-4o"). See GET /models for the full routing table.',
+    });
+  }
+
+  const streaming = req.body?.stream === true;
+  const route = resolveModelRoute(model, streaming);
+  if (!route) {
+    return res.status(400).json({
+      error: `Cannot route model "${model}". Use "provider/model-name" format or a recognised model name. Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}. See GET /models for the full routing table.`,
+    });
+  }
+
+  const { provider, path: forwardPath, modelName } = route;
+
+  const apiKey = getDecryptedKey(req.user.id, provider);
+  if (!apiKey) {
+    return res.status(400).json({
+      error: `No API key stored for provider "${provider}". POST /keys/${provider} first.`,
+    });
+  }
+
+  // Strip provider prefix from model field before forwarding.
+  // "anthropic/claude-3-5-haiku" → "claude-3-5-haiku" for the upstream request.
+  const forwardBody = { ...req.body, model: modelName };
+
+  // Pass through provider-specific and relay headers
+  const extraHeaders = {};
+  const passthroughHeaders = [
+    'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
+    'http-referer',
+  ];
+  for (const h of passthroughHeaders) {
+    if (req.headers[h]) extraHeaders[h] = req.headers[h];
+  }
+
+  try {
+    const providerResponse = await forwardRequest(
+      provider,
+      forwardPath,
+      req.method,
+      forwardBody,
+      apiKey,
+      extraHeaders,
+    );
+
+    res.status(providerResponse.status);
+    const contentType = providerResponse.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    const isStream = streaming ||
+      (contentType && contentType.includes('text/event-stream'));
+
+    if (isStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      providerResponse.body.pipe(res);
+    } else {
+      const data = await providerResponse.json();
+      res.json(data);
+    }
+  } catch (err) {
+    if (err.code === 'INVALID_RELAY_BASE_URL') {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error('Relay error (unified):', err);
+    res.status(502).json({ error: 'Failed to reach AI provider' });
+  }
 });
 
 /**

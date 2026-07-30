@@ -104,12 +104,17 @@ curl -X POST http://localhost:3000/keys/anthropic \
   -H "x-relay-token: $TOKEN" \
   -d '{"key":"sk-ant-YOUR-KEY-HERE"}'
 
-# 6. Relay a request (streaming)
-curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
+# 6. Relay a request — unified endpoint
+curl -X POST http://localhost:3000/relay \
   -H "Content-Type: application/json" \
-  -H "anthropic-version: 2023-06-01" \
   -H "x-relay-token: $TOKEN" \
-  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"anthropic/claude-3-5-haiku","max_tokens":256,"messages":[{"role":"user","content":"Hello!"}]}'
+
+# Or with streaming
+curl -X POST http://localhost:3000/relay \
+  -H "Content-Type: application/json" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 ## Supported providers
@@ -127,6 +132,17 @@ curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
 Adding a new built-in provider is ~5 lines in `src/providers.js`.
 
 ## API
+
+| Endpoint | Description |
+|---|---|
+| `POST /users` | Register app user, get relay token |
+| `POST /keys/:provider` | Store encrypted API key |
+| `GET /keys` | List stored providers |
+| `DELETE /keys/:provider` | Remove a stored key |
+| `POST /relay` | **Unified routing** — `model` field selects provider |
+| `GET /models` | Routing table (patterns + provider prefixes) |
+| `POST /relay/:provider/*` | Per-provider relay (backward-compat) |
+| `GET /health` | Health check + version |
 
 ### Register a user
 ```http
@@ -168,7 +184,39 @@ DELETE /keys/anthropic
 x-relay-token: <token>
 ```
 
-### Relay a request
+### Relay a request — unified endpoint (recommended)
+
+Send a single request to `POST /relay` with a `model` field; the relay resolves
+the provider automatically.
+
+Use `"provider/model-name"` for an explicit route, or just the model name if it
+matches a known pattern:
+
+```http
+POST /relay
+x-relay-token: <token>
+Content-Type: application/json
+
+{ "model": "anthropic/claude-3-5-haiku", "max_tokens": 256, "messages": [{"role":"user","content":"Hello"}] }
+```
+
+```http
+POST /relay
+x-relay-token: <token>
+Content-Type: application/json
+
+{ "model": "gpt-4o", "messages": [{"role":"user","content":"Hello"}] }
+```
+
+Full streaming (SSE) is supported — pass `"stream": true` in the body.
+
+**Discovery:** `GET /models` returns the full routing table.
+
+**Body format note:** the request body must match the target provider's native
+API format (`messages` for OpenAI/Anthropic/Groq/Mistral, `contents` for Google).
+The provider prefix is stripped from the `model` field before forwarding.
+
+### Relay a request — per-provider path (backward-compatible)
 ```http
 POST /relay/anthropic/v1/messages
 x-relay-token: <token>
