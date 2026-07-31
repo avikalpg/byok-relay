@@ -433,6 +433,66 @@ const PROVIDERS = {
   },
 
   /**
+   * ElevenLabs — text-to-speech, speech-to-speech, sound generation.
+   * API key: xi-api-key header.
+   * TTS responses are binary audio (mp3/pcm/ulaw). STT requests may send raw audio.
+   * Docs: https://elevenlabs.io/docs/api-reference
+   */
+  elevenlabs: {
+    baseUrl: 'https://api.elevenlabs.io',
+    allowedPaths: [
+      '/v1/text-to-speech',
+      '/v1/speech-to-speech',
+      '/v1/sound-generation',
+      '/v1/audio-isolation',
+      '/v1/voice-generation',
+      '/v1/voices',
+    ],
+    binaryResponse: true,
+    buildHeaders: (apiKey, extraHeaders = {}) => ({
+      'xi-api-key': apiKey,
+      'Content-Type': extraHeaders['content-type'] || 'application/json',
+    }),
+  },
+
+  /**
+   * HuggingFace Inference API — NLP, image, audio, multimodal models.
+   * API key: Bearer token.
+   * Response varies: JSON for NLP/classification, binary for image/audio generation.
+   * Docs: https://huggingface.co/docs/api-inference/index
+   */
+  huggingface: {
+    baseUrl: 'https://api-inference.huggingface.co',
+    allowedPaths: ['/models'],
+    binaryResponse: true,
+    buildHeaders: (apiKey, extraHeaders = {}) => ({
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': extraHeaders['content-type'] || 'application/json',
+    }),
+  },
+
+  /**
+   * Deepgram — speech-to-text (transcription) and text-to-speech.
+   * API key: Token scheme (not Bearer).
+   * /v1/listen accepts audio binary body; /v1/speak returns audio binary.
+   * Docs: https://developers.deepgram.com/reference
+   */
+  deepgram: {
+    baseUrl: 'https://api.deepgram.com',
+    allowedPaths: [
+      '/v1/listen',
+      '/v1/speak',
+      '/v1/read',
+    ],
+    binaryResponse: true,
+    rawBody: true,
+    buildHeaders: (apiKey, extraHeaders = {}) => ({
+      'Authorization': `Token ${apiKey}`,
+      'Content-Type': extraHeaders['content-type'] || 'application/json',
+    }),
+  },
+
+  /**
    * Generic OpenAI-compatible passthrough.
    * Client must pass `x-relay-base-url` header with the target base URL.
    * Key name in storage can be anything (e.g. "my-ollama", "company-llm").
@@ -472,7 +532,7 @@ const PROVIDERS = {
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
  */
-async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}) {
+async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}, options = {}) {
   const config = PROVIDERS[provider];
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
@@ -516,16 +576,51 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     ? config.buildUrl(baseUrl, path, apiKey)
     : `${baseUrl}${path}`;
 
+  // Determine the request body to forward.
+  // - If body is already a Buffer (raw binary, e.g. audio upload), pass through.
+  // - If there is no body or method is GET, send nothing.
+  // - Otherwise JSON-serialise the parsed body object.
+  let fetchBody;
+  if (method === 'GET' || body === null || body === undefined) {
+    fetchBody = undefined;
+  } else if (Buffer.isBuffer(body)) {
+    fetchBody = body;
+  } else {
+    fetchBody = JSON.stringify(body);
+  }
+
   const response = await fetch(url, {
     ...fetchOptions,
     method,
     headers,
-    body: method !== 'GET' ? JSON.stringify(body) : undefined,
+    body: fetchBody,
+    signal: options.signal,
   });
 
   return response;
 }
 
+/**
+ * Return provider config metadata flags used by the relay handler.
+ *
+ * @param {string} provider
+ * @returns {{ binaryResponse: boolean, rawBody: boolean }}
+ */
+function getProviderMeta(provider) {
+  const config = PROVIDERS[provider] || {};
+  return {
+    binaryResponse: config.binaryResponse === true,
+    rawBody: config.rawBody === true,
+  };
+}
+
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
-module.exports = { forwardRequest, SUPPORTED_PROVIDERS, validateAndNormaliseBaseUrl, isPathAllowed, normalizeProviderPath };
+module.exports = {
+  forwardRequest,
+  getProviderMeta,
+  SUPPORTED_PROVIDERS,
+  validateAndNormaliseBaseUrl,
+  isPathAllowed,
+  normalizeProviderPath,
+};

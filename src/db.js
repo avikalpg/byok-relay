@@ -484,4 +484,3 @@ module.exports = {
   getStatsForUser,
   getStatsForApp,
 };
-

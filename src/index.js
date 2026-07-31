@@ -1,6 +1,5 @@
 require('dotenv').config();
 const crypto = require('crypto');
-const { pipeline } = require('stream');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -15,7 +14,7 @@ const {
   getStatsForUser,
   getStatsForApp,
 } = require('./db');
-const { forwardRequest, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
+const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
 const { logger, httpLogger } = require('./logger');
 
@@ -46,6 +45,18 @@ if (!process.env.TOKEN_HMAC_SECRET) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
+const DEFAULT_REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
+function parseRequestBodyLimitBytes(rawValue) {
+  const value = String(rawValue ?? DEFAULT_REQUEST_BODY_LIMIT_BYTES).trim();
+  if (!/^\d+$/.test(value)) return DEFAULT_REQUEST_BODY_LIMIT_BYTES;
+
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_REQUEST_BODY_LIMIT_BYTES;
+}
+
+const REQUEST_BODY_LIMIT_BYTES = parseRequestBodyLimitBytes(process.env.REQUEST_BODY_LIMIT_BYTES);
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 
@@ -62,11 +73,45 @@ app.use(cors({
     'x-title',
     'http-referer',
     'x-relay-e2e-base-url-token',
+    'xi-api-key',
   ],
   credentials: false,
 }));
 
-app.use(express.json({ limit: '1mb' }));
+app.use((req, res, next) => {
+  // Preserve raw binary bodies for direct provider relay routes that support
+  // audio/image uploads. Unified /relay still expects JSON because it needs a
+  // model field for routing.
+  const ct = req.headers['content-type'] || '';
+  if (req.path.startsWith('/relay/') && !ct.includes('application/json')) {
+    const chunks = [];
+    let totalBytes = 0;
+    let rejected = false;
+
+    req.on('data', (chunk) => {
+      if (rejected) return;
+      totalBytes += chunk.length;
+      if (totalBytes > REQUEST_BODY_LIMIT_BYTES) {
+        rejected = true;
+        chunks.length = 0;
+        res.status(413).json({ error: 'Request body too large' });
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (rejected) return;
+      req.rawBodyBuffer = chunks.length ? Buffer.concat(chunks, totalBytes) : null;
+      next();
+    });
+    req.on('error', (err) => {
+      if (!rejected) next(err);
+    });
+  } else {
+    express.json({ limit: REQUEST_BODY_LIMIT_BYTES })(req, res, next);
+  }
+});
 
 // Structured HTTP request logging (must come after express.json so body is parsed)
 app.use(httpLogger);
@@ -221,34 +266,76 @@ async function forwardRelayRequest({
 }) {
   const relayStart = Date.now();
   const { logRelayRequestOnce, logRelayErrorOnce } = createRelayLogger(req);
+  const upstreamAbortController = new AbortController();
+  let providerResponse;
+
+  function abortUpstreamBody() {
+    if (providerResponse?.body && !providerResponse.body.destroyed) {
+      providerResponse.body.destroy();
+    }
+    if (!res.writableEnded && !upstreamAbortController.signal.aborted) {
+      upstreamAbortController.abort();
+    }
+  }
+
+  res.on('close', abortUpstreamBody);
 
   try {
-    const providerResponse = await forwardRequest(
+    providerResponse = await forwardRequest(
       provider,
       forwardPath,
       req.method,
       body,
       apiKey,
       extraHeaders,
+      { signal: upstreamAbortController.signal },
     );
 
     res.status(providerResponse.status);
     const contentType = providerResponse.headers.get('content-type');
+    const contentTypeLower = contentType ? contentType.toLowerCase() : '';
     if (contentType) res.setHeader('Content-Type', contentType);
 
-    const isStream = (contentType && contentType.includes('text/event-stream')) ||
-      (streamingRequested && providerResponse.ok);
+    if (providerResponse.status === 204 || providerResponse.status === 304) {
+      const latency_ms = Date.now() - relayStart;
+      logRelayRequestOnce({
+        provider,
+        model,
+        status: providerResponse.status,
+        latency_ms,
+        streaming: false,
+      });
+      return res.end();
+    }
+
+    const isStream = contentTypeLower
+      ? contentTypeLower.includes('text/event-stream')
+      : (streamingRequested && providerResponse.ok);
+    const { binaryResponse: providerIsBinary } = getProviderMeta(provider);
+    const isBinary = providerIsBinary ||
+      (contentTypeLower && (
+        contentTypeLower.startsWith('audio/') ||
+        contentTypeLower.startsWith('image/') ||
+        contentTypeLower.startsWith('video/') ||
+        contentTypeLower === 'application/octet-stream'
+      ));
 
     if (isStream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      pipeline(providerResponse.body, res, (streamErr) => {
+
+      providerResponse.body.on('error', (streamErr) => {
+        if (upstreamAbortController.signal.aborted || res.destroyed) return;
         const latency_ms = Date.now() - relayStart;
-        if (streamErr) {
-          logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
-          return;
+        logRelayErrorOnce({ err: streamErr, provider, model, latency_ms });
+        if (!res.writableEnded) {
+          res.write('event: error\ndata: {"error":"Stream interrupted by provider"}\n\n');
+          res.end();
         }
+      });
+      providerResponse.body.on('end', () => {
+        const latency_ms = Date.now() - relayStart;
         logRelayRequestOnce({
           provider,
           model,
@@ -257,10 +344,51 @@ async function forwardRelayRequest({
           streaming: true,
         });
       });
+      providerResponse.body.pipe(res);
       return;
     }
 
-    const data = await providerResponse.json();
+    if (isBinary) {
+      const contentLength = providerResponse.headers.get('content-length');
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      const contentDisposition = providerResponse.headers.get('content-disposition');
+      if (contentDisposition) res.setHeader('Content-Disposition', contentDisposition);
+
+      providerResponse.body.on('error', (binaryErr) => {
+        if (upstreamAbortController.signal.aborted || res.destroyed) return;
+        const latency_ms = Date.now() - relayStart;
+        logRelayErrorOnce({ err: binaryErr, provider, model, latency_ms });
+        if (res.writableEnded) return;
+        providerResponse.body.unpipe(res);
+        if (!res.headersSent) {
+          res.removeHeader('Content-Type');
+          res.removeHeader('Content-Length');
+          res.removeHeader('Content-Disposition');
+          res.status(502).json({ error: 'Failed to reach AI provider' });
+        } else {
+          res.destroy(binaryErr);
+        }
+      });
+      providerResponse.body.on('end', () => {
+        const latency_ms = Date.now() - relayStart;
+        logRelayRequestOnce({
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: false,
+        });
+      });
+      providerResponse.body.pipe(res);
+      return;
+    }
+
+    let responseBody;
+    if (!contentTypeLower || !contentTypeLower.includes('application/json')) {
+      responseBody = await providerResponse.text();
+    } else {
+      responseBody = await providerResponse.json();
+    }
     const latency_ms = Date.now() - relayStart;
     logRelayRequestOnce({
       provider,
@@ -269,8 +397,14 @@ async function forwardRelayRequest({
       latency_ms,
       streaming: false,
     });
-    res.json(data);
+
+    if (!contentTypeLower || !contentTypeLower.includes('application/json')) {
+      return res.send(responseBody);
+    }
+    res.json(responseBody);
   } catch (err) {
+    if (upstreamAbortController.signal.aborted || res.destroyed) return;
+
     // SSRF / input validation errors are client mistakes — return 400.
     // All other relay failures return 502 with a generic message so we don't
     // leak internal hostnames, IPs, or stack traces to the client.
@@ -450,7 +584,7 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer', 'x-relay-e2e-base-url-token',
+    'http-referer', 'x-relay-e2e-base-url-token', 'content-type',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
@@ -515,20 +649,24 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
-    'http-referer', 'x-relay-e2e-base-url-token',
+    'http-referer', 'x-relay-e2e-base-url-token', 'content-type',
   ];
   for (const h of passthroughHeaders) {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
   const model = req.body?.model || null;
+  const { rawBody: providerWantsRawBody } = getProviderMeta(provider);
+  const relayBody = providerWantsRawBody && req.rawBodyBuffer
+    ? req.rawBodyBuffer
+    : req.body;
 
   return forwardRelayRequest({
     req,
     res,
     provider,
     forwardPath,
-    body: req.body,
+    body: relayBody,
     apiKey,
     extraHeaders,
     model,
@@ -544,9 +682,32 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
  * Not called when imported by Vercel's @vercel/node runtime.
  */
 function startServer() {
-  return app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
   });
+
+  // Graceful shutdown on SIGTERM (Docker stop, systemd, Kubernetes rolling deploy).
+  // server.close() stops accepting new connections and waits for in-flight
+  // requests to finish. Force-exit after 30 s in case a streaming request
+  // never completes.
+  process.once('SIGTERM', () => {
+    logger.info('SIGTERM received — starting graceful shutdown');
+    server.close((err) => {
+      if (err) {
+        logger.error({ err }, 'error during graceful shutdown');
+        process.exit(1);
+      }
+      logger.info('server closed cleanly');
+      process.exit(0);
+    });
+    const forceExit = setTimeout(() => {
+      logger.warn('graceful shutdown timed out after 30 s — forcing exit');
+      process.exit(1);
+    }, 30_000);
+    forceExit.unref();
+  });
+
+  return server;
 }
 
 // When run directly (node src/index.js or npm start), start immediately.

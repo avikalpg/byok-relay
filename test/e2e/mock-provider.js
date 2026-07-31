@@ -24,6 +24,7 @@ const https = require('node:https');
  */
 function createMockProvider(options = {}) {
   const requests = [];
+  const streamEvents = [];
 
   const handler = (req, res) => {
     let raw = '';
@@ -44,6 +45,77 @@ function createMockProvider(options = {}) {
         if (body.forceJsonError) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'mock rate limited' }));
+          return;
+        }
+
+        if (body.forceJsonDespiteStream) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'chatcmpl-json-despite-stream', ok: true }));
+          return;
+        }
+
+        if (body.forceNoContent) {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+
+        if (body.forceBinaryStreamError) {
+          res.writeHead(200, {
+            'Content-Type':        'application/octet-stream',
+            'Content-Disposition': 'attachment; filename="mock.bin"',
+          });
+          res.write(Buffer.from('partial'));
+          setImmediate(() => res.destroy(new Error('mock binary stream failure')));
+          return;
+        }
+
+        if (body.forceSlowBinaryUntilClientClose) {
+          res.writeHead(200, {
+            'Content-Type':        'application/octet-stream',
+            'Content-Disposition': 'attachment; filename="mock.bin"',
+          });
+          const interval = setInterval(() => {
+            if (!res.destroyed) res.write(Buffer.from('more'));
+          }, 50);
+          res.on('close', () => {
+            clearInterval(interval);
+            streamEvents.push('slow-binary-response-closed');
+          });
+          res.write(Buffer.from('first'));
+          return;
+        }
+
+        if (body.forceSseStreamError) {
+          res.writeHead(200, {
+            'Content-Type':  'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection':    'keep-alive',
+          });
+          const chunk = JSON.stringify({
+            id:      'chatcmpl-mock-stream-error',
+            object:  'chat.completion.chunk',
+            choices: [{ index: 0, delta: { content: 'partial' }, finish_reason: null }],
+          });
+          res.write(`data: ${chunk}\n\n`);
+          setImmediate(() => res.destroy(new Error('mock SSE stream failure')));
+          return;
+        }
+
+        if (body.forceSlowSseUntilClientClose) {
+          res.writeHead(200, {
+            'Content-Type':  'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection':    'keep-alive',
+          });
+          const interval = setInterval(() => {
+            if (!res.destroyed) res.write(': keepalive\n\n');
+          }, 50);
+          res.on('close', () => {
+            clearInterval(interval);
+            streamEvents.push('slow-sse-response-closed');
+          });
+          res.write('data: {"delta":"first"}\n\n');
           return;
         }
 
@@ -92,6 +164,9 @@ function createMockProvider(options = {}) {
   return {
     /** The recorded request log. Read directly or call clearRequests(). */
     requests,
+
+    /** Streaming lifecycle events recorded by failure/disconnect tests. */
+    streamEvents,
 
     /** Empty the request log between test assertions. */
     clearRequests() {
