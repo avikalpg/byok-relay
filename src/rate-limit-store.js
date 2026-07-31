@@ -32,7 +32,9 @@ function getRedisClient() {
   _client = new Redis(url, {
     // Fail fast on misconfigured URL rather than retrying indefinitely
     enableReadyCheck: true,
+    connectTimeout: 2000,
     maxRetriesPerRequest: 3,
+    retryStrategy: (times) => (times <= 3 ? Math.min(times * 250, 1000) : null),
     lazyConnect: false,
   });
 

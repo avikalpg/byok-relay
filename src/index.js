@@ -144,6 +144,7 @@ const globalLimiter = rateLimit({
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
   message: { error: 'Too many requests, please slow down.' },
   store: makeStore('global'),
 });
@@ -156,6 +157,7 @@ const relayLimiter = rateLimit({
   keyGenerator: (req) => req.headers['x-relay-token'] || req.ip,
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
   message: { error: 'AI request rate limit exceeded (20/min).' },
   store: makeStore('relay'),
 });
@@ -166,6 +168,7 @@ const registrationLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
   message: { error: 'Too many registrations from this IP, please try again later.' },
   store: makeStore('reg'),
 });
