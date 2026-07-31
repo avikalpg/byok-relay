@@ -2,6 +2,7 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const {
   createUser,
@@ -59,6 +60,9 @@ function parseRequestBodyLimitBytes(rawValue) {
 const REQUEST_BODY_LIMIT_BYTES = parseRequestBodyLimitBytes(process.env.REQUEST_BODY_LIMIT_BYTES);
 
 // ── Middleware ──────────────────────────────────────────────────────────────
+
+// Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
+app.use(helmet());
 
 app.use(cors({
   origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
@@ -413,6 +417,9 @@ async function forwardRelayRequest({
     }
     const latency_ms = Date.now() - relayStart;
     logRelayErrorOnce({ err, provider, model, latency_ms });
+    if (!res.headersSent && err.name === 'AbortError') {
+      return res.status(504).json({ error: 'AI provider timed out (30 s). Please retry.' });
+    }
     if (!res.headersSent) {
       return res.status(502).json({ error: 'Failed to reach AI provider' });
     }

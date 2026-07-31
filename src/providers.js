@@ -532,6 +532,27 @@ const PROVIDERS = {
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
  */
+/**
+ * Strip CRLF and null bytes from a header value to prevent header injection.
+ * Returns the sanitised string.
+ */
+function sanitiseHeaderValue(value) {
+  if (typeof value !== 'string') return value;
+  // Remove CR (\r), LF (\n), and null (\0) — the classic header injection chars.
+  return value.replace(/[\r\n\0]/g, '');
+}
+
+/**
+ * Return a copy of extraHeaders with all values sanitised against CRLF injection.
+ */
+function sanitiseHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    out[k] = sanitiseHeaderValue(v);
+  }
+  return out;
+}
+
 async function forwardRequest(provider, path, method, body, apiKey, extraHeaders = {}, options = {}) {
   const config = PROVIDERS[provider];
   if (!config) throw new Error(`Unknown provider: ${provider}`);
@@ -540,10 +561,15 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
   const fetchOptions = {};
   const e2eBaseUrl = getE2eBaseUrlOverride(extraHeaders);
 
+  // Sanitise all passthrough header values before they touch any downstream call.
+  // Prevents CRLF injection: a \r\n in a header value can inject arbitrary
+  // headers into the outbound request to the AI provider.
+  const safeExtraHeaders = sanitiseHeaders(extraHeaders);
+
   // For openai-compatible, the base URL comes from the request header.
   // Validate and normalise it to prevent SSRF attacks.
   if (provider === 'openai-compatible') {
-    const rawBaseUrl = extraHeaders['x-relay-base-url'];
+    const rawBaseUrl = safeExtraHeaders['x-relay-base-url'];
     if (!rawBaseUrl) {
       throw new RelayUrlValidationError('x-relay-base-url header is required for openai-compatible provider');
     }
@@ -569,7 +595,7 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     baseUrl = e2eBaseUrl;
   }
 
-  const headers = config.buildHeaders(apiKey, extraHeaders);
+  const headers = config.buildHeaders(apiKey, safeExtraHeaders);
 
   // Some providers (Google) put the key in the URL
   const url = config.buildUrl
@@ -589,13 +615,50 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
     fetchBody = JSON.stringify(body);
   }
 
-  const response = await fetch(url, {
-    ...fetchOptions,
-    method,
-    headers,
-    body: fetchBody,
-    signal: options.signal,
-  });
+  // Hard 30-second timeout on every upstream provider request. Combine it with
+  // any caller-supplied abort signal so hung providers and disconnected clients
+  // both tear down the upstream fetch promptly.
+  const controller = new AbortController();
+  const timeoutMs = Number.isSafeInteger(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : 30_000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const abortFromCaller = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener('abort', abortFromCaller, { once: true });
+    }
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      ...fetchOptions,
+      method,
+      headers,
+      body: fetchBody,
+      signal: controller.signal,
+    });
+  } finally {
+    // Always clear the timeout — whether the fetch succeeded, threw, or aborted.
+    clearTimeout(timeoutId);
+    if (!response && options.signal) {
+      options.signal.removeEventListener('abort', abortFromCaller);
+    }
+  }
+
+  if (options.signal && response.body) {
+    const cleanupAbortListener = () => {
+      options.signal.removeEventListener('abort', abortFromCaller);
+    };
+    response.body.once('close', cleanupAbortListener);
+    response.body.once('end', cleanupAbortListener);
+    response.body.once('error', cleanupAbortListener);
+  } else if (options.signal) {
+    options.signal.removeEventListener('abort', abortFromCaller);
+  }
 
   return response;
 }
