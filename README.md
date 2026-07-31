@@ -224,6 +224,20 @@ DELETE /keys/anthropic
 x-relay-token: <token>
 ```
 
+### Revoke a relay token
+```http
+POST /tokens/revoke
+x-relay-token: <token>
+```
+Immediately invalidates the token. Stored keys remain in the database but are no longer accessible. To regain access, register a new token (`POST /users`) and re-enter your keys.
+
+### Delete account (GDPR erasure)
+```http
+DELETE /users
+x-relay-token: <token>
+```
+Permanently deletes the user account **and all associated API keys**. This action is irreversible.
+
 ### Relay a request — unified endpoint (recommended)
 
 Send a single request to `POST /relay` with a `model` field; the relay resolves
