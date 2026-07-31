@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { makeStore } = require('./rate-limit-store');
 const {
   createUser,
   getUserByToken,
@@ -122,13 +123,30 @@ app.use((req, res, next) => {
 // Structured HTTP request logging (must come after express.json so body is parsed)
 app.use(httpLogger);
 
+// ── Rate limiting ──────────────────────────────────────────────────────────
+// If REDIS_URL is set, all limiters use a shared Redis store so limits are
+// enforced consistently across multiple processes and Vercel cold-starts.
+// Without REDIS_URL the default in-memory store is used, which is fine for
+// single-process self-hosted deployments but silently ineffective on Vercel
+// or any multi-worker setup (each worker has its own independent counter).
+if (!process.env.REDIS_URL) {
+  const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.FUNCTION_NAME;
+  if (isServerless) {
+    console.warn('WARNING: REDIS_URL is not set. Rate limiting is INEFFECTIVE on serverless/multi-process deployments.');
+    console.warn('  Set REDIS_URL to a Redis connection string to enable persistent, multi-process-safe rate limits.');
+    console.warn('  Example: REDIS_URL=redis://your-redis-host:6379');
+  }
+}
+
 // Global rate limit: 100 requests per minute per IP
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
   message: { error: 'Too many requests, please slow down.' },
+  store: makeStore('global'),
 });
 app.use(globalLimiter);
 
@@ -139,7 +157,9 @@ const relayLimiter = rateLimit({
   keyGenerator: (req) => req.headers['x-relay-token'] || req.ip,
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
   message: { error: 'AI request rate limit exceeded (20/min).' },
+  store: makeStore('relay'),
 });
 
 // Registration rate limit: 10 new users per hour per IP (prevents DB spam)
@@ -148,7 +168,9 @@ const registrationLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
   message: { error: 'Too many registrations from this IP, please try again later.' },
+  store: makeStore('reg'),
 });
 
 // ── Auth middleware ─────────────────────────────────────────────────────────
