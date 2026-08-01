@@ -35,6 +35,86 @@ https://byokrelay.com/skill
 
 > Prompt: *"Read the byok-relay skill at https://byokrelay.com/skill and integrate byok-relay into this project using the hosted relay at https://relay.byokrelay.com"*
 
+## Express integration (`@byok-relay/express`)
+
+For **Node.js servers running Express 4+ or 5+**. `RELAY_URL` stays in `process.env` — the browser only calls your own Express server:
+
+```bash
+npm install @byok-relay/express
+```
+
+```js
+const express = require('express');
+const { createByokRelayMiddleware } = require('@byok-relay/express');
+
+const app = express();
+// Mount before your routes — RELAY_URL is server-only, never in the browser bundle
+app.use(createByokRelayMiddleware({ relayUrl: process.env.RELAY_URL }));
+app.listen(3000);
+```
+
+Or mount as a dedicated Router with full Express Router capabilities:
+
+```js
+const { createRelayRouter } = require('@byok-relay/express');
+app.use('/relay', createRelayRouter({ relayUrl: process.env.RELAY_URL }));
+```
+
+Also includes `ByokRelayClient` for server-side usage in route handlers — accepts a custom session-storage adapter to persist the relay token in `req.session` instead of `localStorage`. [Full docs →](packages/express/README.md)
+
+## Fastify integration (`@byok-relay/fastify`)
+
+For **Node.js servers running Fastify 4+ or 5+**. `RELAY_URL` stays in `process.env` — the browser only calls your own Fastify server:
+
+```bash
+npm install @byok-relay/fastify
+```
+
+```js
+const Fastify = require('fastify');
+const { byokRelayPlugin } = require('@byok-relay/fastify');
+
+const fastify = Fastify({ logger: true });
+// Register before your routes — RELAY_URL is server-only, never in the browser bundle
+await fastify.register(byokRelayPlugin, { relayUrl: process.env.RELAY_URL });
+await fastify.listen({ port: 3000 });
+```
+
+Or use the standalone route handler factory:
+
+```js
+const { createRelayRouteHandler } = require('@byok-relay/fastify');
+fastify.all('/relay/*', createRelayRouteHandler({ relayUrl: process.env.RELAY_URL }));
+```
+
+The plugin decorates `fastify.byokRelayClient` for server-side usage in other routes. Includes `ByokRelayClient` with custom session-storage adapter support. [Full docs →](packages/fastify/README.md)
+
+## Elysia integration (`@byok-relay/elysia`)
+
+For **Bun-native servers running Elysia 1.x** (also works on Node.js 18+). `RELAY_URL` stays in `Bun.env` — the browser only calls your own Elysia server:
+
+```bash
+bun add @byok-relay/elysia elysia
+```
+
+```js
+const { Elysia } = require('elysia');
+const { byokRelayPlugin } = require('@byok-relay/elysia');
+
+const app = new Elysia()
+  .use(byokRelayPlugin({ relayUrl: Bun.env.RELAY_URL }))
+  .listen(3000);
+```
+
+Or use the standalone handler for explicit route registration:
+
+```js
+const { createRelayRouteHandler } = require('@byok-relay/elysia');
+app.all('/relay/*', createRelayRouteHandler({ relayUrl: Bun.env.RELAY_URL }));
+```
+
+Returns a native `Response` with the upstream `ReadableStream` piped directly — SSE streaming works out of the box on Bun. Includes `ByokRelayClient` with custom storage adapter support. [Full docs →](packages/elysia/README.md)
+
 ## The problem
 
 Browser apps can't call AI APIs directly:
