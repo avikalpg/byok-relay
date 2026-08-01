@@ -35,6 +35,33 @@ https://byokrelay.com/skill
 
 > Prompt: *"Read the byok-relay skill at https://byokrelay.com/skill and integrate byok-relay into this project using the hosted relay at https://relay.byokrelay.com"*
 
+## Express integration (`@byok-relay/express`)
+
+For **Node.js servers running Express 4+ or 5+**. `RELAY_URL` stays in `process.env` — the browser only calls your own Express server:
+
+```bash
+npm install @byok-relay/express
+```
+
+```js
+const express = require('express');
+const { createByokRelayMiddleware } = require('@byok-relay/express');
+
+const app = express();
+// Mount before your routes — RELAY_URL is server-only, never in the browser bundle
+app.use(createByokRelayMiddleware({ relayUrl: process.env.RELAY_URL }));
+app.listen(3000);
+```
+
+Or mount as a dedicated Router with full Express Router capabilities:
+
+```js
+const { createRelayRouter } = require('@byok-relay/express');
+app.use('/relay', createRelayRouter({ relayUrl: process.env.RELAY_URL }));
+```
+
+Also includes `ByokRelayClient` for server-side usage in route handlers — accepts a custom session-storage adapter to persist the relay token in `req.session` instead of `localStorage`. [Full docs →](packages/express/README.md)
+
 ## The problem
 
 Browser apps can't call AI APIs directly:
