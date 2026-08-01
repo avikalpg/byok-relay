@@ -11,4 +11,15 @@ if [[ -f .env ]]; then
 fi
 
 DB_PATH="${DB_PATH:-/home/ubuntu/byok-relay/data/relay.db}"
-chmod 600 "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" 2>/dev/null || true
+
+if [[ ! -f "$DB_PATH" ]]; then
+  printf 'Database not found: %s\n' "$DB_PATH" >&2
+  exit 1
+fi
+
+chmod 600 -- "$DB_PATH"
+for sidecar in "$DB_PATH-wal" "$DB_PATH-shm"; do
+  if [[ -e "$sidecar" ]]; then
+    chmod 600 -- "$sidecar"
+  fi
+done
