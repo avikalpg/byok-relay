@@ -425,6 +425,11 @@ sudo systemctl enable --now byok-relay
 sudo apt install nginx
 sudo snap install --classic certbot
 sudo certbot --nginx -d relay.yourdomain.com
+
+# Add a deny block to your nginx site config to block direct DB file access:
+# Inside your server {} block, add:
+#   location ~* \.db(-wal|-shm)?$ { deny all; return 404; }
+# Then: sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ## Security
@@ -439,6 +444,8 @@ sudo certbot --nginx -d relay.yourdomain.com
 - **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
 - **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
 - **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
+- **SQLite file permissions** — the systemd service file applies `chmod 600` to `data/relay.db`, `relay.db-wal`, and `relay.db-shm` on every start via `ExecStartPost`. If deploying without systemd, run `chmod 600 data/relay.db*` manually after first start.
+- **WAL file exposure** — SQLite WAL mode creates `.db-wal` and `.db-shm` sibling files. If nginx serves the project root, add `location ~* \.db(-wal|-shm)?$ { deny all; return 404; }` to your server block to prevent direct download. Alternatively, move the `data/` directory outside the web root and update `DB_PATH` in `.env`.
 
 ## BYOK — your users pay for what they use
 
