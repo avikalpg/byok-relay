@@ -12,6 +12,13 @@ fi
 
 DB_PATH="${DB_PATH:-/home/ubuntu/byok-relay/data/relay.db}"
 
+for _ in {1..20}; do
+  if [[ -f "$DB_PATH" ]]; then
+    break
+  fi
+  sleep 0.5
+done
+
 if [[ ! -f "$DB_PATH" ]]; then
   printf 'Database not found: %s\n' "$DB_PATH" >&2
   exit 1
