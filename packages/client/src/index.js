@@ -146,7 +146,8 @@ function createClient({
       headers: { 'x-relay-token': token },
     })
     if (!res.ok) return []
-    return res.json()
+    const data = await res.json().catch(() => ({}))
+    return Array.isArray(data.providers) ? data.providers : []
   }
 
   /**
@@ -171,10 +172,14 @@ function createClient({
   async function deleteAccount() {
     const token = getToken()
     if (!token) return
-    await fetch(`${base}/users`, {
+    const res = await fetch(`${base}/users`, {
       method: 'DELETE',
       headers: { 'x-relay-token': token },
     })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `Delete account failed: ${res.status}`)
+    }
     clearToken()
   }
 
@@ -300,6 +305,31 @@ function createClient({
     let fullText = ''
     let buffer = ''
 
+    function processSSELine(line) {
+      if (!line.startsWith('data:')) return
+      const data = line.slice(5).trim()
+      if (data === '[DONE]') return
+
+      try {
+        const json = JSON.parse(data)
+
+        // Anthropic SSE
+        if (json.type === 'content_block_delta' && json.delta?.text) {
+          fullText += json.delta.text
+          onChunk?.(json.delta.text)
+        }
+
+        // OpenAI SSE
+        const delta = json.choices?.[0]?.delta?.content
+        if (delta) {
+          fullText += delta
+          onChunk?.(delta)
+        }
+      } catch {
+        // skip malformed SSE frames
+      }
+    }
+
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -308,31 +338,11 @@ function createClient({
       const lines = buffer.split('\n')
       buffer = lines.pop() // keep incomplete line
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const data = line.slice(6).trim()
-        if (data === '[DONE]') continue
-
-        try {
-          const json = JSON.parse(data)
-
-          // Anthropic SSE
-          if (json.type === 'content_block_delta' && json.delta?.text) {
-            fullText += json.delta.text
-            onChunk?.(json.delta.text)
-          }
-
-          // OpenAI SSE
-          const delta = json.choices?.[0]?.delta?.content
-          if (delta) {
-            fullText += delta
-            onChunk?.(delta)
-          }
-        } catch {
-          // skip malformed SSE frames
-        }
-      }
+      for (const line of lines) processSSELine(line)
     }
+
+    buffer += decoder.decode()
+    for (const line of buffer.split('\n')) processSSELine(line)
 
     return fullText
   }
