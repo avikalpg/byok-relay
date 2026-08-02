@@ -158,10 +158,14 @@ function createClient({
   async function deleteKey(provider) {
     const token = getToken()
     if (!token) return
-    await fetch(`${base}/keys/${encodeURIComponent(provider)}`, {
+    const res = await fetch(`${base}/keys/${encodeURIComponent(provider)}`, {
       method: 'DELETE',
       headers: { 'x-relay-token': token },
     })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `Delete key failed: ${res.status}`)
+    }
   }
 
   /**
