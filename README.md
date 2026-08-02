@@ -79,6 +79,37 @@ Browser                  byok-relay              AI Provider
 
 The `token` (not the API key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM.
 
+## JavaScript client
+
+The easiest way to integrate byok-relay into a JavaScript app:
+
+```bash
+npm install @byok-relay/client
+```
+
+```js
+import { createClient } from '@byok-relay/client'
+
+const relay = createClient({
+  relayUrl: import.meta.env.VITE_RELAY_URL ?? 'https://relay.byokrelay.com',
+})
+
+// Your user enters their API key once
+await relay.storeKey('openai', userApiKey)
+
+// Then stream — no backend required
+const text = await relay.streamChat({
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Hello!' }],
+  onChunk: (delta) => console.log(delta),
+})
+```
+
+Works in browsers (localStorage default), Node.js (in-memory default), and any custom storage adapter. See [`packages/client/README.md`](packages/client/README.md) for full API reference.
+
+---
+
 ## Quickstart (60 seconds)
 
 ```bash
