@@ -21,7 +21,7 @@ yarn add @byok-relay/client
 
 ## Quick start
 
-### Browser (Vite / CRA / Next.js)
+### Browser (Vite)
 
 ```js
 import { createClient } from '@byok-relay/client'
@@ -30,7 +30,24 @@ const relay = createClient({
   relayUrl: import.meta.env.VITE_RELAY_URL ?? 'https://relay.byokrelay.com',
   appId: 'my-app',
 })
+```
 
+### Browser (CRA / Next.js)
+
+```js
+import { createClient } from '@byok-relay/client'
+
+const relay = createClient({
+  // CRA: process.env.REACT_APP_RELAY_URL
+  // Next.js client code: process.env.NEXT_PUBLIC_RELAY_URL
+  relayUrl: process.env.REACT_APP_RELAY_URL ?? process.env.NEXT_PUBLIC_RELAY_URL ?? 'https://relay.byokrelay.com',
+  appId: 'my-app',
+})
+```
+
+Once configured, use the client the same way in any browser app:
+
+```js
 // Let your user enter their API key once
 await relay.storeKey('openai', userApiKey)
 

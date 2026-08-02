@@ -679,11 +679,146 @@ function getProviderMeta(provider) {
 
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDERS);
 
+// ── Per-provider API key format validation ──────────────────────────────────────────
+//
+// Each entry has:
+//   test(key)  → true if the key looks valid
+//   hint       → human-readable error shown when the test fails
+
+const PROVIDER_KEY_VALIDATORS = {
+  openai: {
+    // OpenAI keys start with `sk-` but NOT `sk-ant-` (Anthropic prefix).
+    // Accept both legacy `sk-<20+>` and newer `sk-proj-` / `sk-svcacct-` formats.
+    test: (k) => k.startsWith('sk-') && !k.startsWith('sk-ant-'),
+    hint: 'OpenAI API keys start with sk- (e.g. sk-proj-... or sk-...); make sure you are not pasting an Anthropic key',
+  },
+  anthropic: {
+    test: (k) => k.startsWith('sk-ant-'),
+    hint: 'Anthropic API keys start with sk-ant-',
+  },
+  google: {
+    // API keys are AIza followed by 35 alphanumeric chars (39 total).
+    // Service-account JSON and OAuth tokens are much longer; accept those too.
+    test: (k) => /^AIza[\w-]{35}$/.test(k) || k.length > 50,
+    hint: 'Google API keys start with AIza and are 39 characters long',
+  },
+  groq: {
+    test: (k) => k.startsWith('gsk_'),
+    hint: 'Groq API keys start with gsk_',
+  },
+  openrouter: {
+    test: (k) => k.startsWith('sk-or-'),
+    hint: 'OpenRouter API keys start with sk-or-',
+  },
+  mistral: {
+    // Mistral uses random alphanumeric strings with no enforced prefix.
+    // Validate only that it’s at least 32 characters to catch obvious mistakes.
+    test: (k) => k.length >= 32,
+    hint: 'Mistral API keys are at least 32 characters long',
+  },
+  // openai-compatible: any string passes; provider is user-defined.
+};
+
+/**
+ * Validate that a plaintext API key looks correct for the given provider.
+ *
+ * @param {string} provider  - Provider name from SUPPORTED_PROVIDERS
+ * @param {string} key       - Trimmed plaintext API key
+ * @returns {{ valid: boolean, hint: string | null }}
+ *   `valid: true` + `hint: null`  → format looks correct
+ *   `valid: false` + `hint: '…'` → format looks wrong; hint explains expected format
+ */
+function validateProviderKeyFormat(provider, key) {
+  const validator = PROVIDER_KEY_VALIDATORS[provider];
+  if (!validator) {
+    // No specific validator for this provider — accept any non-empty key.
+    return { valid: true, hint: null };
+  }
+  if (validator.test(key)) {
+    return { valid: true, hint: null };
+  }
+  return { valid: false, hint: validator.hint };
+}
+
+// ── Per-provider lightweight key verification (live ping) ────────────────────
+//
+// Used by POST /keys/:provider/rotate to confirm the new key is accepted
+// before replacing the old one.  Each ping is a lightweight read-only
+// request that does not trigger any charges.
+//
+// Returns { ok: boolean, status: number, message?: string }
+
+const PROVIDER_VERIFY = {
+  openai: {
+    url: 'https://api.openai.com/v1/models',
+    headers: (key) => ({ Authorization: `Bearer ${key}` }),
+  },
+  anthropic: {
+    url: 'https://api.anthropic.com/v1/models',
+    headers: (key) => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
+  },
+  google: {
+    url: (key) => `https://generativelanguage.googleapis.com/v1/models?key=${key}`,
+    headers: () => ({}),
+  },
+  groq: {
+    url: 'https://api.groq.com/openai/v1/models',
+    headers: (key) => ({ Authorization: `Bearer ${key}` }),
+  },
+  openrouter: {
+    url: 'https://openrouter.ai/api/v1/models',
+    headers: (key) => ({
+      Authorization: `Bearer ${key}`,
+      'HTTP-Referer': 'https://github.com/avikalpg/byok-relay',
+    }),
+  },
+  mistral: {
+    url: 'https://api.mistral.ai/v1/models',
+    headers: (key) => ({ Authorization: `Bearer ${key}` }),
+  },
+};
+
+/**
+ * Verify a provider API key by making a lightweight read-only request.
+ *
+ * @param {string} provider   - Provider name from SUPPORTED_PROVIDERS
+ * @param {string} apiKey     - Plaintext API key to test
+ * @returns {Promise<{ ok: boolean, status: number, message?: string }>}
+ *   `ok: true`  → key accepted by provider
+ *   `ok: false` → key rejected; `status` and `message` carry the provider response
+ */
+async function verifyProviderKey(provider, apiKey) {
+  const config = PROVIDER_VERIFY[provider];
+  if (!config) {
+    // No verification endpoint for this provider (e.g. openai-compatible).
+    // Skip live ping and trust the format check.
+    return { ok: true, status: 0, message: 'verification skipped (provider has no ping endpoint)' };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000); // 10 s
+  try {
+    const url = typeof config.url === 'function' ? config.url(apiKey) : config.url;
+    const headers = config.headers(apiKey);
+    const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok) return { ok: true, status: res.status };
+    const body = await res.text().catch(() => '');
+    return { ok: false, status: res.status, message: body.slice(0, 200) };
+  } catch (err) {
+    clearTimeout(timeout);
+    const message = err.name === 'AbortError' ? 'verification timed out' : err.message;
+    return { ok: false, status: 0, message };
+  }
+}
+
 module.exports = {
   forwardRequest,
   getProviderMeta,
   SUPPORTED_PROVIDERS,
   validateAndNormaliseBaseUrl,
+  validateProviderKeyFormat,
+  verifyProviderKey,
   isPathAllowed,
   normalizeProviderPath,
 };
