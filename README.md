@@ -229,7 +229,7 @@ Returns `HTTP 200` when the relay is healthy, `HTTP 503` when a critical check f
   "timestamp": "2026-06-11T03:00:00.000Z",
   "providers": ["openai", "anthropic", "google", "groq", "openrouter", "mistral", "elevenlabs", "deepgram", "openai-compatible"],
   "checks": {
-    "db": { "ok": true, "userCount": 12, "keyCount": 15 },
+    "db": { "ok": true },
     "config": { "ok": true, "encryption_key_set": true, "registration_gated": true }
   }
 }
@@ -239,7 +239,7 @@ Returns `HTTP 200` when the relay is healthy, `HTTP 503` when a critical check f
 ```http
 GET /health?deep=1&provider=openai
 ```
-Adds `checks.upstream: { ok, provider, statusCode }` to the response. Use this for post-deploy smoke tests, not per-request liveness probes because it makes an outbound network call.
+Adds `checks.upstream: { ok, provider, statusCode }` to the response and is rate-limited more tightly than the base liveness check. Use this for post-deploy smoke tests, not per-request liveness probes because it makes an outbound network call.
 
 Use `/health` as your **liveness probe** and `/health?deep=1` as your **readiness probe** in K8s / docker-compose healthchecks.
 

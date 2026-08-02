@@ -840,6 +840,11 @@ async function pingProvider(providerName) {
 
   const config = PROVIDERS[providerName];
   if (!config) throw new Error(`Unknown provider: ${providerName}`);
+  if (providerName === 'openai-compatible') {
+    const err = new Error('openai-compatible deep health probes require a validated relay base URL');
+    err.code = 'PING_UNSUPPORTED_PROVIDER';
+    throw err;
+  }
 
   const path = PING_PATHS[providerName] || '/v1/models';
   const baseUrl = config.baseUrl || 'https://api.openai.com';

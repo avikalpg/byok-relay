@@ -64,6 +64,11 @@ function parseRequestBodyLimitBytes(rawValue) {
 
 const REQUEST_BODY_LIMIT_BYTES = parseRequestBodyLimitBytes(process.env.REQUEST_BODY_LIMIT_BYTES);
 
+function isDeepHealthProbe(req) {
+  const deep = String(req.query.deep ?? '').toLowerCase();
+  return deep === '1' || deep === 'true';
+}
+
 // ── Middleware ──────────────────────────────────────────────────────────────
 
 // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
@@ -151,6 +156,19 @@ const globalLimiter = rateLimit({
   store: makeStore('global'),
 });
 app.use(globalLimiter);
+
+// Deep health probes can make outbound provider calls, so cap them more tightly
+// than cheap liveness checks while leaving plain /health on the global limiter.
+const deepHealthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  skip: (req) => !isDeepHealthProbe(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  passOnStoreError: true,
+  message: { error: 'Deep health probe rate limit exceeded (10/min).' },
+  store: makeStore('health-deep'),
+});
 
 // Relay rate limit: 20 AI requests per minute per token
 const relayLimiter = rateLimit({
@@ -463,7 +481,7 @@ async function forwardRelayRequest({
 // Returns HTTP 200 when all critical checks pass, 503 otherwise.
 // Non-critical warnings appear in the `warnings` array but do NOT affect the
 // HTTP status so load-balancers continue routing to the instance.
-app.get('/health', async (req, res) => {
+app.get('/health', deepHealthLimiter, async (req, res) => {
   const { version } = require('../package.json');
   const checks = {};
   const warnings = [];
@@ -471,8 +489,8 @@ app.get('/health', async (req, res) => {
 
   // ── 1. DB connectivity ─────────────────────────────────────────────────
   try {
-    const { userCount, keyCount } = dbHealthCheck();
-    checks.db = { ok: true, userCount, keyCount };
+    dbHealthCheck();
+    checks.db = { ok: true };
   } catch (err) {
     checks.db = { ok: false, error: 'Database unreachable' };
     healthy = false;
@@ -501,7 +519,7 @@ app.get('/health', async (req, res) => {
   // This is a readiness-style check. Only run when the caller explicitly
   // requests it (e.g. a post-deploy smoke test, not a per-request liveness
   // probe from a load balancer).
-  if (req.query.deep) {
+  if (isDeepHealthProbe(req)) {
     const provider = String(req.query.provider || 'openai');
     if (SUPPORTED_PROVIDERS.includes(provider)) {
       try {
@@ -512,7 +530,7 @@ app.get('/health', async (req, res) => {
         }
       } catch (err) {
         checks.upstream = { ok: false, provider, error: 'Ping failed' };
-        warnings.push(`Provider ${provider} unreachable: ${err.message}`);
+        warnings.push(`Provider ${provider} unreachable`);
         req.log?.warn({ err, provider }, 'health upstream ping failed');
       }
     } else {
