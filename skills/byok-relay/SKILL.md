@@ -247,6 +247,8 @@ async function smokeTest() {
   });
   if (!keysRes.ok) throw new Error(`Keys list failed: ${keysRes.status} ${keysRes.statusText}`);
   const { providers } = await keysRes.json();
+  if (!Array.isArray(providers)) throw new Error(`Keys list returned invalid providers: ${JSON.stringify(providers)}`);
+  if (providers.length !== 0) throw new Error(`Newly registered user unexpectedly has stored providers: ${providers.join(', ')}`);
   console.log('✓ Stored providers:', providers);
 
   // 4. (Optional) Store a real key and test a relay call
