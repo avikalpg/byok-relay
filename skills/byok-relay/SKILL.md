@@ -38,7 +38,7 @@ Browser apps can't call AI APIs directly:
 
 **Individuals / prosumers:** Each user registers their own personal API key. Common for developer tools, research UIs, AI power-user products.
 
-**Teams / B2B (company-managed key):** A company admin registers one shared company API key via `POST /keys/:provider` (e.g. `/keys/openai`). In the current implementation, keys are stored per relay-token (user); to share a key across team members, the admin can share their relay token or register the same company key under each member's account. Org-level key sharing (one stored key → multiple relay tokens) is on the roadmap. The developer doesn't touch the key — it belongs to the customer's organization.
+**Teams / B2B (company-managed key):** Keys are currently scoped per relay token. A company admin can register the same company API key via `POST /keys/:provider` (e.g. `/keys/openai`) under each member's relay token, or implement an explicit org-scoped design for one stored key serving multiple relay tokens. Do not share a relay token across team members: it shares all saved keys with every holder and is not a supported team feature. The developer doesn't touch the key — it belongs to the customer's organization.
 
 ## Setup — choose your path
 
@@ -224,23 +224,31 @@ const APP_ID    = 'smoke-test';
 
 async function smokeTest() {
   // 1. Health check
-  const health = await fetch(`${RELAY_URL}/health`).then(r => r.json());
-  console.assert(health.ok === true, 'Health check failed', health);
+  const healthRes = await fetch(`${RELAY_URL}/health`);
+  if (!healthRes.ok) throw new Error(`Health check failed: ${healthRes.status} ${healthRes.statusText}`);
+  const health = await healthRes.json();
+  if (health.ok !== true) throw new Error(`Health check failed: ${JSON.stringify(health)}`);
   console.log('✓ Health:', health);
 
   // 2. Register
-  const { token } = await fetch(`${RELAY_URL}/users`, {
+  const usersRes = await fetch(`${RELAY_URL}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: APP_ID })
-  }).then(r => r.json());
-  console.assert(token, 'Registration failed — no token returned');
+  });
+  if (!usersRes.ok) throw new Error(`Registration failed: ${usersRes.status} ${usersRes.statusText}`);
+  const { token } = await usersRes.json();
+  if (!token) throw new Error('Registration failed — no token returned');
   console.log('✓ Token obtained');
 
   // 3. List providers (should be empty before storing a key)
-  const { providers } = await fetch(`${RELAY_URL}/keys`, {
+  const keysRes = await fetch(`${RELAY_URL}/keys`, {
     headers: { 'x-relay-token': token }
-  }).then(r => r.json());
+  });
+  if (!keysRes.ok) throw new Error(`Keys list failed: ${keysRes.status} ${keysRes.statusText}`);
+  const { providers } = await keysRes.json();
+  if (!Array.isArray(providers)) throw new Error(`Keys list returned invalid providers: ${JSON.stringify(providers)}`);
+  if (providers.length !== 0) throw new Error(`Newly registered user unexpectedly has stored providers: ${providers.join(', ')}`);
   console.log('✓ Stored providers:', providers);
 
   // 4. (Optional) Store a real key and test a relay call
@@ -250,6 +258,7 @@ async function smokeTest() {
   //   headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
   //   body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'ping' }] })
   // });
+  // if (!res.ok) throw new Error(`Relay call failed: ${res.status} ${res.statusText}`);
   // const data = await res.json();
   // console.log('✓ Relay response:', data.choices?.[0]?.message?.content);
 
