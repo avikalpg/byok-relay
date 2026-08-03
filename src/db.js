@@ -551,6 +551,17 @@ function getStatsForApp(appId) {
   };
 }
 
+/**
+ * Lightweight DB connectivity probe for the /health endpoint.
+ * Runs a fast read-only query against both tables and returns basic counts.
+ * Throws if the database is inaccessible or corrupt.
+ */
+function dbHealthCheck() {
+  const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+  const keyCount  = db.prepare('SELECT COUNT(*) AS n FROM keys').get().n;
+  return { userCount, keyCount };
+}
+
 module.exports = {
   createUser,
   getUserByToken,
@@ -565,4 +576,5 @@ module.exports = {
   logRequest,
   getStatsForUser,
   getStatsForApp,
+  dbHealthCheck,
 };

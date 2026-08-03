@@ -812,6 +812,63 @@ async function verifyProviderKey(provider, apiKey) {
   }
 }
 
+/**
+ * pingProvider — unauthenticated GET to a provider's models listing.
+ * Used by GET /health?deep=1 to verify network reachability.
+ *
+ * We deliberately do NOT require an API key here — the purpose is connectivity
+ * verification, not auth. A 401/403 means the network path works; a timeout
+ * or 5xx means the provider is degraded.
+ *
+ * Returns { ok: boolean, statusCode: number }.
+ * Throws on network error / timeout (AbortError).
+ */
+async function pingProvider(providerName) {
+  const PING_PATHS = {
+    openai: '/v1/models',
+    anthropic: '/v1/models',
+    google: '/v1beta/models',
+    cohere: '/v2/models',
+    mistral: '/v1/models',
+    groq: '/openai/v1/models',
+    together: '/v1/models',
+    xai: '/v1/models',
+    deepseek: '/v1/models',
+    perplexity: '/models',
+    openrouter: '/api/v1/models',
+  };
+
+  const config = PROVIDERS[providerName];
+  if (!config) throw new Error(`Unknown provider: ${providerName}`);
+  if (providerName === 'openai-compatible') {
+    const err = new Error('openai-compatible deep health probes require a validated relay base URL');
+    err.code = 'PING_UNSUPPORTED_PROVIDER';
+    throw err;
+  }
+
+  const path = PING_PATHS[providerName] || '/v1/models';
+  const baseUrl = config.baseUrl || 'https://api.openai.com';
+  const url = `${baseUrl}${path}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    });
+    // 401/403 = auth required but network works = reachable
+    // 200/206 = public endpoint, fully reachable
+    // 5xx = provider degraded
+    const ok = response.status < 500;
+    return { ok, statusCode: response.status };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 module.exports = {
   forwardRequest,
   getProviderMeta,
@@ -819,6 +876,7 @@ module.exports = {
   validateAndNormaliseBaseUrl,
   validateProviderKeyFormat,
   verifyProviderKey,
+  pingProvider,
   isPathAllowed,
   normalizeProviderPath,
 };

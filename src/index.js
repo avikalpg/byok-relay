@@ -18,8 +18,9 @@ const {
   logRequest,
   getStatsForUser,
   getStatsForApp,
+  dbHealthCheck,
 } = require('./db');
-const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, isPathAllowed, normalizeProviderPath } = require('./providers');
+const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
 const { logger, httpLogger } = require('./logger');
 
@@ -62,6 +63,11 @@ function parseRequestBodyLimitBytes(rawValue) {
 }
 
 const REQUEST_BODY_LIMIT_BYTES = parseRequestBodyLimitBytes(process.env.REQUEST_BODY_LIMIT_BYTES);
+
+function isDeepHealthProbe(req) {
+  const deep = String(req.query.deep ?? '').toLowerCase();
+  return deep === '1' || deep === 'true';
+}
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 
@@ -150,6 +156,19 @@ const globalLimiter = rateLimit({
   store: makeStore('global'),
 });
 app.use(globalLimiter);
+
+// Deep health probes can make outbound provider calls, so cap them more tightly
+// than cheap liveness checks while leaving plain /health on the global limiter.
+const deepHealthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  skip: (req) => !isDeepHealthProbe(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  passOnStoreError: true,
+  message: { error: 'Deep health probe rate limit exceeded (10/min).' },
+  store: makeStore('health-deep'),
+});
 
 // Relay rate limit: 20 AI requests per minute per token
 const relayLimiter = rateLimit({
@@ -455,9 +474,81 @@ async function forwardRelayRequest({
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // Health check
-app.get('/health', (req, res) => {
+//
+// GET /health          — liveness probe: DB + config checks
+// GET /health?deep=1   — readiness probe: also pings one provider's models endpoint
+//
+// Returns HTTP 200 when all critical checks pass, 503 otherwise.
+// Non-critical warnings appear in the `warnings` array but do NOT affect the
+// HTTP status so load-balancers continue routing to the instance.
+app.get('/health', deepHealthLimiter, async (req, res) => {
   const { version } = require('../package.json');
-  res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
+  const checks = {};
+  const warnings = [];
+  let healthy = true;
+
+  // ── 1. DB connectivity ─────────────────────────────────────────────────
+  try {
+    dbHealthCheck();
+    checks.db = { ok: true };
+  } catch (err) {
+    checks.db = { ok: false, error: 'Database unreachable' };
+    healthy = false;
+    // Log detail server-side only — never leak internal error text to clients.
+    req.log?.error({ err }, 'health DB check failed');
+  }
+
+  // ── 2. Encryption key presence ────────────────────────────────────────
+  const encSecret = process.env.ENCRYPTION_SECRET || '';
+  const hmacSecret = process.env.TOKEN_HMAC_SECRET || '';
+  const encOk = encSecret.length >= 32;
+  const hmacOk = hmacSecret.length >= 32;
+  checks.config = { ok: encOk, encryption_key_set: encOk };
+  if (!encOk) {
+    healthy = false;
+    req.log?.error('ENCRYPTION_SECRET missing or too short');
+  }
+  if (!hmacOk) {
+    warnings.push('TOKEN_HMAC_SECRET not set — falling back to ENCRYPTION_SECRET for token hashing');
+  }
+
+  // ── 3. APP_SECRET gate status (informational) ─────────────────────────
+  checks.config.registration_gated = !!process.env.APP_SECRET;
+
+  // ── 4. Deep probe: live provider ping (opt-in via ?deep=1) ───────────
+  // This is a readiness-style check. Only run when the caller explicitly
+  // requests it (e.g. a post-deploy smoke test, not a per-request liveness
+  // probe from a load balancer).
+  if (isDeepHealthProbe(req)) {
+    const provider = String(req.query.provider || 'openai');
+    if (SUPPORTED_PROVIDERS.includes(provider)) {
+      try {
+        const pingResult = await pingProvider(provider);
+        checks.upstream = { ok: pingResult.ok, provider, statusCode: pingResult.statusCode };
+        if (!pingResult.ok) {
+          warnings.push(`Provider ${provider} returned ${pingResult.statusCode} — may be a key issue or provider outage`);
+        }
+      } catch (err) {
+        checks.upstream = { ok: false, provider, error: 'Ping failed' };
+        warnings.push(`Provider ${provider} unreachable`);
+        req.log?.warn({ err, provider }, 'health upstream ping failed');
+      }
+    } else {
+      checks.upstream = { ok: false, error: `Unknown provider '${provider}'` };
+    }
+  }
+
+  const body = {
+    ok: healthy,
+    version,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    providers: SUPPORTED_PROVIDERS,
+    checks,
+    ...(warnings.length ? { warnings } : {}),
+  };
+
+  res.status(healthy ? 200 : 503).json(body);
 });
 
 /**
