@@ -59,6 +59,15 @@ mem.setItem('byok-relay:relay-token:http://localhost:3000:app-b', 'tok_b')
 assert(appA.getToken() === 'tok_a', 'app-a reads only its scoped token')
 assert(appB.getToken() === 'tok_b', 'app-b reads only its scoped token')
 
+const legacyMem = createMemoryStorage()
+const defaultApp = createClient({ storage: legacyMem, appId: 'app-a' })
+legacyMem.setItem('byok_relay_token', 'tok_legacy')
+assert(defaultApp.getToken('app-b') === null, 'override app lookup does not migrate legacy global token')
+assert(legacyMem.getItem('byok_relay_token') === 'tok_legacy', 'override lookup leaves legacy global token untouched')
+assert(defaultApp.getToken() === 'tok_legacy', 'default app migrates legacy global token')
+assert(legacyMem.getItem('byok-relay:relay-token:http://localhost:3000:app-a') === 'tok_legacy', 'default migration stores legacy token under default app key')
+assert(legacyMem.getItem('byok_relay_token') === null, 'default migration removes legacy global token')
+
 // ── Test: isolated storage between two clients ────────────────────────────────
 
 console.log('\n3. Two clients with independent memory storage are isolated')

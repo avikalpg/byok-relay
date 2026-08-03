@@ -86,6 +86,8 @@ function createClient({
     const scopedToken = _storage.getItem(storageKey)
     if (scopedToken) return scopedToken
 
+    if (id && id !== appId) return null
+
     const legacyToken = _storage.getItem(TOKEN_KEY)
     if (!legacyToken) return null
 
