@@ -507,18 +507,91 @@ sudo certbot --nginx -d relay.yourdomain.com
 
 ## Security
 
-- **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
-- **Separated token hashing** — set `TOKEN_HMAC_SECRET` to use a dedicated HMAC key. Existing hashes made with the historical `ENCRYPTION_SECRET` fallback continue to authenticate and are upgraded lazily, provided the existing `ENCRYPTION_SECRET` remains unchanged until every legacy-token user has authenticated and been upgraded.
-- **Migration progress** — run `npm run token-migration-status` on the relay host to see conservative `current`, `legacy`, and percentage counts. Existing rows begin as legacy/unconfirmed and become current after successful authentication; no user identifiers or tokens are printed.
-- **Keys never returned** — after the initial POST, the key value is never sent over the wire again
-- **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
-- **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Set `REDIS_URL` for persistent limits across Vercel cold-starts and multi-process deployments (in-memory works fine for single-process self-hosted)
-- **SSRF and DNS rebinding protection** — the `openai-compatible` provider validates `x-relay-base-url` against private/reserved CIDR ranges (RFC-1918, link-local, IMDS, IPv6 loopback, IPv4-mapped IPv6). It also validates resolved DNS answers and pins the upstream request to an approved IP, blocking DNS rebinding techniques such as `127.0.0.1.nip.io` that pass hostname validation but resolve to a blocked address.
-- **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
-- **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
-- **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
-- **SQLite file permissions** — the systemd service file applies `chmod 600` to `data/relay.db`, `relay.db-wal`, and `relay.db-shm` on every start via `ExecStartPost`. If deploying without systemd, run `chmod 600 data/relay.db*` manually after first start.
-- **WAL file exposure** — SQLite WAL mode creates `.db-wal` and `.db-shm` sibling files. If nginx serves the project root, add `location ~* \.db(-wal|-shm)?$ { deny all; return 404; }` to your server block to prevent direct download. Alternatively, move the `data/` directory outside the web root and update `DB_PATH` in `.env`.
+### What byok-relay protects
+
+| Threat | Protection |
+|--------|------------|
+| API key leaked from DB backup or LFI | AES-256-GCM encryption at rest; key is never returned to clients or persisted in plaintext |
+| Relay token leaked from database | HMAC-SHA256 stored token hash; raw token sent to user exactly once at registration; legacy hashes are upgraded lazily. Browser-stolen raw tokens remain usable until expiry or revocation |
+| Unauthenticated registration abuse | `APP_SECRET` gate on `POST /users` when configured; rate-limited to 10 registrations/hour per IP while the limiter store is available |
+| SSRF via `openai-compatible` base URL | URL blocklist (RFC-1918, link-local, cloud IMDS, IPv6 loopback, IPv4-mapped IPv6); HTTPS-only; DNS rebinding protection via resolved-IP validation |
+| Request floods | Three-layer rate limiting: 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Redis-backed for serverless/multi-process deployments; limits fail open if Redis/store is unavailable |
+| Path traversal beyond inference | Allowlist of permitted path prefixes per provider (`/chat/completions`, `/completions`, `/embeddings`, `/messages`, etc.) |
+| Header injection into upstream requests | CRLF sanitisation on all forwarded header values |
+| Hung upstream connections | 30 s `AbortController` hard timeout on every `fetch()` to AI providers |
+| Token theft → permanent access | Tokens expire after 90 days (`TOKEN_EXPIRY_DAYS`); `POST /tokens/revoke` for immediate invalidation |
+| WAL file exposure via nginx misconfiguration | Nginx deny rules for `.db`, `.db-wal`, and `.db-shm` files; `DB_PATH` to move DB out of web root; systemd service tightens DB file permissions |
+
+### Encryption implementation
+
+**API key storage:**
+```
+scrypt(ENCRYPTION_SECRET + ENCRYPTION_SALT) → 32-byte derived key  (computed once at startup)
+aes-256-gcm(derived key, random 16-byte IV) → { iv, authTag, ciphertext }  stored as JSON in SQLite
+```
+- Derived key cached at module scope — `scrypt` runs exactly once per process startup, not per request
+- Each key encrypted with a fresh random IV
+- AES-GCM's `authTag` catches any tampering with the ciphertext
+- `ENCRYPTION_SECRET` is required at startup
+- `ENCRYPTION_SALT` is configurable (default fallback exists for backward compat; generate your own with `openssl rand -hex 32`)
+
+**Relay token storage:**
+```
+HMAC-SHA256(TOKEN_HMAC_SECRET, rawToken) → tokenHash  stored in SQLite
+```
+- The raw token is sent to the user exactly once (registration response) and never stored or logged
+- All subsequent lookups compare `HMAC(incoming_token)` against stored token hashes in SQLite
+- Set `TOKEN_HMAC_SECRET` to use a dedicated HMAC key. Existing hashes made with the historical `ENCRYPTION_SECRET` fallback continue to authenticate and are upgraded lazily, provided the existing `ENCRYPTION_SECRET` remains unchanged until every legacy-token user has authenticated and been upgraded.
+- Run `npm run token-migration-status` on the relay host to see conservative `current`, `legacy`, and percentage counts. Existing rows begin as legacy/unconfirmed and become current after successful authentication; no user identifiers or tokens are printed.
+- Tokens expire after 90 days and can be revoked immediately via `POST /tokens/revoke`
+
+### Threat model: what byok-relay does NOT protect against
+
+- **Prompt content confidentiality** — request bodies (prompts, conversation history) pass through the relay in plaintext on the way to AI providers. For production use with sensitive data, self-host on infrastructure you control.
+- **XSS in your app** — the relay token lives in your app's `localStorage`. An XSS vulnerability in *your* app can steal relay tokens. Scope tokens to IP, add CSP headers, and consider a short expiry.
+- **Compromised `ENCRYPTION_SECRET`** — if your server environment is fully compromised, the encryption key is accessible. Mitigate with a cloud KMS (AWS KMS, GCP Cloud KMS) for higher assurance.
+- **Multi-instance SQLite concurrency** — SQLite handles concurrent reads well but bottlenecks on concurrent writes. For high-traffic multi-replica deployments, use a Postgres backend.
+
+### Managed relay vs self-hosted — an honest comparison
+
+| | `relay.byokrelay.com` (managed) | Self-hosted |
+|---|---|---|
+| Setup time | Zero | ~5 min |
+| Control over `ENCRYPTION_SECRET` | **No** — operator holds the key | **Yes** — you hold it |
+| Request data flows through | Third-party infra | Your infra |
+| Uptime SLA | None | Your ops |
+| Good for | Prototypes, demos, development | Production, sensitive data |
+
+For production deployments or any app with paying users: **self-host**. The managed relay is an easy way to evaluate byok-relay, not a production dependency.
+
+### Hardening checklist for production
+
+```bash
+# Required
+ENCRYPTION_SECRET=$(openssl rand -hex 32)   # ≥32 chars, never reuse
+APP_SECRET=$(openssl rand -hex 32)           # gate POST /users
+TOKEN_HMAC_SECRET=$(openssl rand -hex 32)    # HMAC token storage
+ALLOWED_ORIGINS=https://yourdomain.com       # lock down CORS
+
+# Recommended
+ENCRYPTION_SALT=$(openssl rand -hex 32)      # unique per deployment; preserve with backups
+REDIS_URL=redis://...                        # persistent rate limiting
+TOKEN_EXPIRY_DAYS=30                         # shorter than default 90
+DB_PATH=/var/lib/byok-relay/relay.db         # outside web root
+```
+
+- Serve behind HTTPS (Let's Encrypt / Cloudflare)
+- Restrict `ALLOWED_ORIGINS` to your app's domain in production
+- Add nginx `deny` rules for `.db`, `.db-wal`, and `.db-shm` files if DB is in the project directory
+- The systemd service applies `chmod 600` to `data/relay.db`, `relay.db-wal`, and `relay.db-shm` on every start via `ExecStartPost`. If deploying without systemd, run `chmod 600 data/relay.db*` manually after first start.
+- Back up SQLite safely while WAL is enabled: use SQLite's online backup mechanism, or stop the service and checkpoint the WAL before copying `relay.db` (and any `relay.db-wal` / `relay.db-shm` files). The DB contains encrypted API keys; recovery requires preserving both `ENCRYPTION_SECRET` and `ENCRYPTION_SALT`.
+- Rotate `ENCRYPTION_SECRET` only after `npm run token-migration-status` reports zero legacy or unconfirmed relay-token rows, then re-encrypt all stored API keys. API-key re-encryption alone does not migrate legacy token HMAC rows. Automated rotation tooling is not available yet; deleting users is not a safe rotation substitute because it destroys stored keys.
+
+### Reporting vulnerabilities
+
+Report vulnerabilities through GitHub Security Advisories when available, or email the maintainer privately. Do not open public GitHub issues or post exploit details before a fix is available.
+
+---
 
 ## BYOK — your users pay for what they use
 
