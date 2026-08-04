@@ -7,7 +7,7 @@
 | Latest `main` | ✅ Supported |
 | Older commits | ❌ Unsupported — please update |
 
-byok-relay is pre-1.0. We do not backport fixes to older versions.
+byok-relay is post-1.0 (package version 1.5.1 on this branch). Security fixes are applied to latest `main`; backports to older release lines are best-effort and only provided through explicit patch releases.
 
 ---
 

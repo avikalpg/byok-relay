@@ -50,14 +50,14 @@ if (!process.env.TOKEN_HMAC_SECRET) {
 
 // ── Model allowlist ─────────────────────────────────────────────────────────
 // Parse ALLOWED_MODELS at startup. Supports exact names and glob-style
-// wildcards using '*' (e.g. "gpt-4o*" matches "gpt-4o-mini").
+// wildcards using '*' (e.g. "gpt-4o*" matches "gpt-4o" and "gpt-4o-mini").
 // Empty / unset = all models permitted.
 const ALLOWED_MODELS_RAW = process.env.ALLOWED_MODELS
   ? process.env.ALLOWED_MODELS.split(',').map((model) => model.trim()).filter(Boolean)
   : [];
 
 function patternToRegex(pattern) {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.+');
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
   return new RegExp(`^${escaped}$`, 'i');
 }
 
@@ -67,6 +67,18 @@ function isModelAllowed(modelName) {
   if (ALLOWED_MODEL_REGEXES.length === 0) return true;
   if (!modelName || typeof modelName !== 'string') return true;
   return ALLOWED_MODEL_REGEXES.some((regex) => regex.test(modelName));
+}
+
+function isModelAllowedForProvider(modelName, provider) {
+  if (isModelAllowed(modelName)) return true;
+  if (!provider || !modelName || typeof modelName !== 'string' || modelName.includes('/')) return false;
+  return isModelAllowed(`${provider}/${modelName}`);
+}
+
+function extractModelFromProviderPath(provider, forwardPath) {
+  if (provider !== 'google' || typeof forwardPath !== 'string') return undefined;
+  const match = forwardPath.match(/^\/(?:v1beta|v1)\/models\/([^/:?]+)(?::(?:generateContent|streamGenerateContent))?(?:[/?]|$)/);
+  return match?.[1];
 }
 
 if (ALLOWED_MODELS_RAW.length > 0) {
@@ -876,8 +888,9 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   }
 
   const relayBody = req.rawBodyBuffer || req.body;
-  const requestedModel = Buffer.isBuffer(relayBody) ? undefined : relayBody?.model;
-  if (!isModelAllowed(requestedModel)) {
+  const pathModel = extractModelFromProviderPath(provider, req.forwardPath);
+  const requestedModel = pathModel || (Buffer.isBuffer(relayBody) ? undefined : relayBody?.model);
+  if (!isModelAllowedForProvider(requestedModel, provider)) {
     return res.status(403).json({
       error: `Model "${requestedModel}" is not permitted on this relay.`,
       allowed_models: ALLOWED_MODELS_RAW,

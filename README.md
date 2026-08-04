@@ -339,7 +339,7 @@ Content-Type: application/json
 
 Full streaming (SSE) is supported — pass `"stream": true` in the body.
 
-**Discovery:** `GET /models` returns the full routing table plus the active model allowlist status.
+**Discovery:** `GET /models` returns the full routing table plus the active model allowlist status. When unrestricted, the allowlist status is `{ "restricted": false, "message": "All models are permitted on this relay." }`.
 
 **Body format note:** the request body must match the target provider's native
 API format (`messages` for OpenAI/Anthropic/Groq/Mistral, `contents` for Google).
@@ -368,18 +368,29 @@ Content-Type: application/json
 
 ### Restrict allowed models
 
-Set `ALLOWED_MODELS` to a comma-separated list of model names or wildcard patterns to prevent users from requesting expensive or unsupported models:
+Set `ALLOWED_MODELS` to a comma-separated list of model names or wildcard patterns to prevent users from requesting expensive or unsupported models. Configure the raw `model` value clients send, including provider prefixes for `POST /relay` requests that use them:
 
 ```bash
-ALLOWED_MODELS=gpt-4o-mini,claude-haiku*,gemini-2.0-flash*
+ALLOWED_MODELS=gpt-4o-mini,anthropic/claude-3-5-haiku*,google/gemini-2.0-flash*
 ```
 
-`GET /models` includes the routing table and the current allowlist status. If no allowlist is configured, it includes `"restricted": false`; otherwise it includes `"restricted": true` and `"allowed_models"`.
+Matching is case-insensitive. `*` matches zero or more characters.
+
+`GET /models` includes the routing table and the current allowlist status. If no allowlist is configured, the response includes:
+
+```json
+{ "restricted": false, "message": "All models are permitted on this relay." }
+```
+
+If an allowlist is configured, the response includes `"restricted": true` and `"allowed_models"`.
 
 If a relay request includes a `model` field not on the list, the relay returns:
-```json
-HTTP 403
-{ "error": "Model \"gpt-4o\" is not permitted on this relay.", "allowed_models": ["gpt-4o-mini", "claude-haiku*"] }
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{ "error": "Model \"gpt-4o\" is not permitted on this relay.", "allowed_models": ["gpt-4o-mini", "anthropic/claude-3-5-haiku*", "google/gemini-2.0-flash*"] }
 ```
 
 ## Deploy in one click
