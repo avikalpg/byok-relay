@@ -19,6 +19,8 @@ https://relay.byokrelay.com
 
 Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
 
+> **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
@@ -619,6 +621,11 @@ byok-relay handles both patterns today.
 ## License
 
 Apache 2.0
+
+## Legal
+
+- [SECURITY.md](SECURITY.md) — vulnerability reporting, incident response runbook, hardening checklist
+- [PRIVACY.md](PRIVACY.md) — privacy policy + template for operators running their own relay
 
 ---
 
