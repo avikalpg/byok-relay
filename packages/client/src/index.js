@@ -18,6 +18,11 @@
 
 const TOKEN_KEY = 'byok_relay_token'
 
+function relayTokenStorageKey(relayUrl, appId) {
+  const normalizedRelayUrl = new URL(relayUrl).origin
+  return `byok-relay:relay-token:${normalizedRelayUrl}:${appId}`
+}
+
 // ── Storage helpers ──────────────────────────────────────────────────────────
 
 /**
@@ -72,15 +77,31 @@ function createClient({
 
   // ── Token management ────────────────────────────────────────────────────────
 
-  function getToken() {
-    return _storage.getItem(TOKEN_KEY)
+  function storageKeyFor(id) {
+    return relayTokenStorageKey(base, id || appId)
   }
 
-  function saveToken(token) {
-    _storage.setItem(TOKEN_KEY, token)
+  function getToken(id) {
+    const storageKey = storageKeyFor(id)
+    const scopedToken = _storage.getItem(storageKey)
+    if (scopedToken) return scopedToken
+
+    if (id && id !== appId) return null
+
+    const legacyToken = _storage.getItem(TOKEN_KEY)
+    if (!legacyToken) return null
+
+    _storage.setItem(storageKey, legacyToken)
+    _storage.removeItem(TOKEN_KEY)
+    return legacyToken
   }
 
-  function clearToken() {
+  function saveToken(token, id) {
+    _storage.setItem(storageKeyFor(id), token)
+  }
+
+  function clearToken(id) {
+    _storage.removeItem(storageKeyFor(id))
     _storage.removeItem(TOKEN_KEY)
   }
 
@@ -92,20 +113,21 @@ function createClient({
    * @returns {Promise<string>} relay token
    */
   async function ensureToken(id) {
-    const existing = getToken()
+    const resolvedAppId = id || appId
+    const existing = getToken(resolvedAppId)
     if (existing) return existing
 
     const res = await fetch(`${base}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: id || appId }),
+      body: JSON.stringify({ app_id: resolvedAppId }),
     })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `Registration failed: ${res.status}`)
     }
     const { token } = await res.json()
-    saveToken(token)
+    saveToken(token, resolvedAppId)
     return token
   }
 

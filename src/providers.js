@@ -528,7 +528,7 @@ const PROVIDERS = {
  * @param {string} provider - Provider name from PROVIDERS
  * @param {string} path - URL path to forward (e.g. /v1/messages)
  * @param {string} method - HTTP method
- * @param {object} body - Request body
+ * @param {Buffer|object} body - Raw Buffer (pass-through) or parsed object (will be JSON-stringified)
  * @param {string} apiKey - Decrypted API key
  * @param {object} extraHeaders - Additional headers from the original request
  */
@@ -596,6 +596,11 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
   }
 
   const headers = config.buildHeaders(apiKey, safeExtraHeaders);
+  if (Buffer.isBuffer(body) && safeExtraHeaders['content-type']) {
+    // Raw multipart/audio/binary uploads must retain the original Content-Type,
+    // including multipart boundaries. JSON requests keep provider defaults.
+    headers['Content-Type'] = safeExtraHeaders['content-type'];
+  }
 
   // Some providers (Google) put the key in the URL
   const url = config.buildUrl

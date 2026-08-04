@@ -88,8 +88,16 @@ Use `RELAY_URL = 'https://relay.byokrelay.com'` for the managed relay, or your o
 ### Step 1: Register a user and get a relay token
 
 ```javascript
+function relayTokenStorageKey(relayUrl, appId) {
+  const normalizedRelayUrl = new URL(relayUrl).origin;
+  return `byok-relay:relay-token:${normalizedRelayUrl}:${appId}`;
+}
+
 async function getRelayToken(relayUrl, appId) {
-  const stored = localStorage.getItem('relay_token');
+  // Keep bearer tokens scoped to one relay/app. Do not reuse one global
+  // `relay_token` key across products, tenants, or relay URLs.
+  const storageKey = relayTokenStorageKey(relayUrl, appId);
+  const stored = localStorage.getItem(storageKey);
   if (stored) return stored;                          // reuse across page loads
   const res = await fetch(`${relayUrl}/users`, {
     method: 'POST',
@@ -97,7 +105,7 @@ async function getRelayToken(relayUrl, appId) {
     body: JSON.stringify({ app_id: appId })
   });
   const { token } = await res.json();
-  localStorage.setItem('relay_token', token);
+  localStorage.setItem(storageKey, token);
   return token;
 }
 ```

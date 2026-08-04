@@ -35,19 +35,38 @@ for (const m of expectedMethods) {
   assert(typeof relay[m] === 'function', `relay.${m} is a function`)
 }
 
-// ── Test: storage isolation ───────────────────────────────────────────────────
+// ── Test: scoped token persistence and migration ─────────────────────────────
 
-console.log('\n2. Token persistence with custom storage')
+console.log('\n2. Token persistence uses relay/app scoped keys')
 const mem = createMemoryStorage()
 const c1 = createClient({ storage: mem })
 const c2 = createClient({ storage: mem })
+const scopedKey = 'byok-relay:relay-token:http://localhost:3000:app'
 
 assert(c1.getToken() === null, 'fresh client has no token')
 mem.setItem('byok_relay_token', 'tok_test123')
-assert(c1.getToken() === 'tok_test123', 'c1 reads injected token')
-assert(c2.getToken() === 'tok_test123', 'c2 shares same storage — sees same token')
+assert(c1.getToken() === 'tok_test123', 'c1 migrates legacy global token')
+assert(mem.getItem(scopedKey) === 'tok_test123', 'migration stores token under scoped key')
+assert(mem.getItem('byok_relay_token') === null, 'migration removes legacy global token')
+assert(c2.getToken() === 'tok_test123', 'c2 shares same relay/app storage key')
 c1.clearToken()
-assert(c2.getToken() === null, 'clearToken via c1 removes token from c2')
+assert(c2.getToken() === null, 'clearToken via c1 removes scoped token from c2')
+
+const appA = createClient({ storage: mem, appId: 'app-a' })
+const appB = createClient({ storage: mem, appId: 'app-b' })
+mem.setItem('byok-relay:relay-token:http://localhost:3000:app-a', 'tok_a')
+mem.setItem('byok-relay:relay-token:http://localhost:3000:app-b', 'tok_b')
+assert(appA.getToken() === 'tok_a', 'app-a reads only its scoped token')
+assert(appB.getToken() === 'tok_b', 'app-b reads only its scoped token')
+
+const legacyMem = createMemoryStorage()
+const defaultApp = createClient({ storage: legacyMem, appId: 'app-a' })
+legacyMem.setItem('byok_relay_token', 'tok_legacy')
+assert(defaultApp.getToken('app-b') === null, 'override app lookup does not migrate legacy global token')
+assert(legacyMem.getItem('byok_relay_token') === 'tok_legacy', 'override lookup leaves legacy global token untouched')
+assert(defaultApp.getToken() === 'tok_legacy', 'default app migrates legacy global token')
+assert(legacyMem.getItem('byok-relay:relay-token:http://localhost:3000:app-a') === 'tok_legacy', 'default migration stores legacy token under default app key')
+assert(legacyMem.getItem('byok_relay_token') === null, 'default migration removes legacy global token')
 
 // ── Test: isolated storage between two clients ────────────────────────────────
 

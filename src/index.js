@@ -854,11 +854,8 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
-  const model = req.body?.model || null;
-  const { rawBody: providerWantsRawBody } = getProviderMeta(provider);
-  const relayBody = providerWantsRawBody && req.rawBodyBuffer
-    ? req.rawBodyBuffer
-    : req.body;
+  const relayBody = req.rawBodyBuffer || req.body;
+  const model = Buffer.isBuffer(relayBody) ? null : req.body?.model || null;
 
   return forwardRelayRequest({
     req,
@@ -869,7 +866,7 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     apiKey,
     extraHeaders,
     model,
-    streamingRequested: req.body?.stream === true,
+    streamingRequested: !Buffer.isBuffer(relayBody) && req.body?.stream === true,
   });
 });
 
