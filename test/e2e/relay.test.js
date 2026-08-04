@@ -986,6 +986,9 @@ describe('byok-relay — example product end-to-end', () => {
           ALLOWED_ORIGINS: '*',
           ALLOWED_MODELS: 'gpt-4o*,google/gemini-2.0-flash',
           NODE_ENV: 'test',
+          NODE_TLS_REJECT_UNAUTHORIZED: '0',
+          E2E_OPENAI_COMPATIBLE_BASE_URL: mockBaseUrl,
+          E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN: E2E_BASE_URL_OVERRIDE_TOKEN,
         },
         stdio: ['ignore', 'ignore', 'ignore'],
       },
@@ -1027,6 +1030,20 @@ describe('byok-relay — example product end-to-end', () => {
       assert.equal(blockedPathModel.status, 403);
       assert.equal(blockedPathModel.body.error, 'Model "gemini-2.0-pro" is not permitted on this relay.');
       assert.deepEqual(blockedPathModel.body.allowed_models, ['gpt-4o*', 'google/gemini-2.0-flash']);
+
+      mock.clearRequests();
+      const allowedGooglePathModel = await request(
+        restrictedPort, 'POST', '/relay/google/v1beta/models/gemini-2.0-flash:generateContent',
+        { contents: [{ parts: [{ text: 'hi' }] }] },
+        { 'x-relay-token': token, ...e2eRelayHeaders() },
+      );
+      assert.notEqual(
+        allowedGooglePathModel.status,
+        403,
+        `Expected provider-qualified Google allowlist match to avoid local 403, got ${JSON.stringify(allowedGooglePathModel.body)}`,
+      );
+      assert.equal(mock.requests.length, 1, 'allowed Google model path should be forwarded to the mock provider');
+      assert.ok(mock.requests[0].url.startsWith('/v1beta/models/gemini-2.0-flash:generateContent'));
     } finally {
       await stopChildProcess(restrictedProc);
       fs.rmSync(restrictedDb, { force: true });
