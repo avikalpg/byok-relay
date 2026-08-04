@@ -512,7 +512,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 | Threat | Protection |
 |--------|------------|
 | API key leaked from DB backup or LFI | AES-256-GCM encryption at rest; key is never returned to clients or persisted in plaintext |
-| Relay token stolen from browser | HMAC-SHA256 stored token hash; raw token sent to user exactly once at registration; legacy hashes are upgraded lazily |
+| Relay token leaked from database | HMAC-SHA256 stored token hash; raw token sent to user exactly once at registration; legacy hashes are upgraded lazily. Browser-stolen raw tokens remain usable until expiry or revocation |
 | Unauthenticated registration abuse | `APP_SECRET` gate on `POST /users` when configured; rate-limited to 10 registrations/hour per IP while the limiter store is available |
 | SSRF via `openai-compatible` base URL | URL blocklist (RFC-1918, link-local, cloud IMDS, IPv6 loopback, IPv4-mapped IPv6); HTTPS-only; DNS rebinding protection via resolved-IP validation |
 | Request floods | Three-layer rate limiting: 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Redis-backed for serverless/multi-process deployments; limits fail open if Redis/store is unavailable |
@@ -584,8 +584,8 @@ DB_PATH=/var/lib/byok-relay/relay.db         # outside web root
 - Restrict `ALLOWED_ORIGINS` to your app's domain in production
 - Add nginx `deny` rules for `.db`, `.db-wal`, and `.db-shm` files if DB is in the project directory
 - The systemd service applies `chmod 600` to `data/relay.db`, `relay.db-wal`, and `relay.db-shm` on every start via `ExecStartPost`. If deploying without systemd, run `chmod 600 data/relay.db*` manually after first start.
-- Back up `relay.db` — it contains encrypted API keys; recovery requires preserving both `ENCRYPTION_SECRET` and `ENCRYPTION_SALT`
-- Rotate `ENCRYPTION_SECRET` only by re-encrypting all stored keys. Automated rotation tooling is not available yet; deleting users is not a safe rotation substitute because it destroys stored keys.
+- Back up SQLite safely while WAL is enabled: use SQLite's online backup mechanism, or stop the service and checkpoint the WAL before copying `relay.db` (and any `relay.db-wal` / `relay.db-shm` files). The DB contains encrypted API keys; recovery requires preserving both `ENCRYPTION_SECRET` and `ENCRYPTION_SALT`.
+- Rotate `ENCRYPTION_SECRET` only after `npm run token-migration-status` reports zero legacy or unconfirmed relay-token rows, then re-encrypt all stored API keys. API-key re-encryption alone does not migrate legacy token HMAC rows. Automated rotation tooling is not available yet; deleting users is not a safe rotation substitute because it destroys stored keys.
 
 ### Reporting vulnerabilities
 
