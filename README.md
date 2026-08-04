@@ -339,7 +339,7 @@ Content-Type: application/json
 
 Full streaming (SSE) is supported — pass `"stream": true` in the body.
 
-**Discovery:** `GET /models` returns the full routing table.
+**Discovery:** `GET /models` returns the full routing table plus the active model allowlist status. When unrestricted, the allowlist status is `{ "restricted": false, "message": "All models are permitted on this relay." }`.
 
 **Body format note:** the request body must match the target provider's native
 API format (`messages` for OpenAI/Anthropic/Groq/Mistral, `contents` for Google).
@@ -364,6 +364,33 @@ x-relay-base-url: https://openrouter.ai
 Content-Type: application/json
 
 { "model": "...", "messages": [...] }
+```
+
+### Restrict allowed models
+
+Set `ALLOWED_MODELS` to a comma-separated list of model names or wildcard patterns to prevent users from requesting expensive or unsupported models. Configure the raw `model` value clients send, including provider prefixes for `POST /relay` requests that use them:
+
+```bash
+ALLOWED_MODELS=gpt-4o-mini,anthropic/claude-3-5-haiku*,google/gemini-2.0-flash*
+```
+
+Matching is case-insensitive. `*` matches zero or more characters.
+
+`GET /models` includes the routing table and the current allowlist status. If no allowlist is configured, the response includes:
+
+```json
+{ "restricted": false, "message": "All models are permitted on this relay." }
+```
+
+If an allowlist is configured, the response includes `"restricted": true` and `"allowed_models"`.
+
+If a relay request includes a `model` field not on the list, the relay returns:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{ "error": "Model \"gpt-4o\" is not permitted on this relay.", "allowed_models": ["gpt-4o-mini", "anthropic/claude-3-5-haiku*", "google/gemini-2.0-flash*"] }
 ```
 
 ## Deploy in one click
@@ -518,6 +545,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 | Unauthenticated registration abuse | `APP_SECRET` gate on `POST /users` when configured; rate-limited to 10 registrations/hour per IP while the limiter store is available |
 | SSRF via `openai-compatible` base URL | URL blocklist (RFC-1918, link-local, cloud IMDS, IPv6 loopback, IPv4-mapped IPv6); HTTPS-only; DNS rebinding protection via resolved-IP validation |
 | Request floods | Three-layer rate limiting: 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Redis-backed for serverless/multi-process deployments; limits fail open if Redis/store is unavailable |
+| Unexpected expensive model usage | Optional `ALLOWED_MODELS` allowlist with exact names and `*` wildcards; rejects configured JSON relay requests whose `model` is outside the list |
 | Path traversal beyond inference | Allowlist of permitted path prefixes per provider (`/chat/completions`, `/completions`, `/embeddings`, `/messages`, etc.) |
 | Header injection into upstream requests | CRLF sanitisation on all forwarded header values |
 | Hung upstream connections | 30 s `AbortController` hard timeout on every `fetch()` to AI providers |
@@ -579,6 +607,7 @@ ALLOWED_ORIGINS=https://yourdomain.com       # lock down CORS
 ENCRYPTION_SALT=$(openssl rand -hex 32)      # unique per deployment; preserve with backups
 REDIS_URL=redis://...                        # persistent rate limiting
 TOKEN_EXPIRY_DAYS=30                         # shorter than default 90
+ALLOWED_MODELS=gpt-4o-mini,claude-haiku*     # cap model access for shared/team relays
 DB_PATH=/var/lib/byok-relay/relay.db         # outside web root
 ```
 

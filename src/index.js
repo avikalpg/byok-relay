@@ -48,6 +48,45 @@ if (!process.env.TOKEN_HMAC_SECRET) {
   logger.warn('TOKEN_HMAC_SECRET is not set — falling back to ENCRYPTION_SECRET for token hashing.');
 }
 
+// ── Model allowlist ─────────────────────────────────────────────────────────
+// Parse ALLOWED_MODELS at startup. Supports exact names and glob-style
+// wildcards using '*' (e.g. "gpt-4o*" matches "gpt-4o" and "gpt-4o-mini").
+// Empty / unset = all models permitted.
+const ALLOWED_MODELS_RAW = process.env.ALLOWED_MODELS
+  ? process.env.ALLOWED_MODELS.split(',').map((model) => model.trim()).filter(Boolean)
+  : [];
+
+function patternToRegex(pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
+const ALLOWED_MODEL_REGEXES = ALLOWED_MODELS_RAW.map(patternToRegex);
+
+function isModelAllowed(modelName) {
+  if (ALLOWED_MODEL_REGEXES.length === 0) return true;
+  if (!modelName || typeof modelName !== 'string') return true;
+  return ALLOWED_MODEL_REGEXES.some((regex) => regex.test(modelName));
+}
+
+function isModelAllowedForProvider(modelName, provider) {
+  if (isModelAllowed(modelName)) return true;
+  if (!provider || !modelName || typeof modelName !== 'string' || modelName.includes('/')) return false;
+  return isModelAllowed(`${provider}/${modelName}`);
+}
+
+function extractModelFromProviderPath(provider, forwardPath) {
+  if (provider !== 'google' || typeof forwardPath !== 'string') return undefined;
+  const match = forwardPath.match(/^\/(?:v1beta|v1)\/models\/([^/:?]+)(?::(?:generateContent|streamGenerateContent))?(?:[/?]|$)/);
+  return match?.[1];
+}
+
+if (ALLOWED_MODELS_RAW.length > 0) {
+  logger.info({ allowedModels: ALLOWED_MODELS_RAW }, 'model allowlist active');
+} else {
+  logger.warn('ALLOWED_MODELS is not set — all models are permitted.');
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
@@ -512,8 +551,12 @@ app.get('/health', deepHealthLimiter, async (req, res) => {
     warnings.push('TOKEN_HMAC_SECRET not set — falling back to ENCRYPTION_SECRET for token hashing');
   }
 
-  // ── 3. APP_SECRET gate status (informational) ─────────────────────────
+  // ── 3. APP_SECRET gate + model allowlist status (informational) ───────
   checks.config.registration_gated = !!process.env.APP_SECRET;
+  checks.config.model_allowlist_restricted = ALLOWED_MODELS_RAW.length > 0;
+  if (ALLOWED_MODELS_RAW.length > 0) {
+    checks.config.allowed_models = ALLOWED_MODELS_RAW;
+  }
 
   // ── 4. Deep probe: live provider ping (opt-in via ?deep=1) ───────────
   // This is a readiness-style check. Only run when the caller explicitly
@@ -717,6 +760,7 @@ app.get('/stats/:app_id', requireAppSecret, (req, res) => {
  * are routable without specifying an explicit provider path.
  */
 app.get('/models', (req, res) => {
+  const restricted = ALLOWED_MODELS_RAW.length > 0;
   res.json({
     providers: SUPPORTED_PROVIDERS,
     providerPrefixes: Object.keys(PROVIDER_DEFAULT_PATHS),
@@ -725,6 +769,10 @@ app.get('/models', (req, res) => {
       flags: pattern.flags,
       provider,
     })),
+    restricted,
+    ...(restricted
+      ? { allowed_models: ALLOWED_MODELS_RAW }
+      : { message: 'All models are permitted on this relay.' }),
     usage: 'POST /relay with { model: "provider/model-name", ...providerBody }',
     examples: [
       '{ "model": "anthropic/claude-3-5-haiku", "max_tokens": 256, "messages": [{"role":"user","content":"Hello"}] }',
@@ -767,6 +815,13 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   }
 
   const { provider, path: forwardPath, modelName } = route;
+
+  if (!isModelAllowed(model)) {
+    return res.status(403).json({
+      error: `Model "${model}" is not permitted on this relay.`,
+      allowed_models: ALLOWED_MODELS_RAW,
+    });
+  }
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
@@ -832,6 +887,16 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
+  const relayBody = req.rawBodyBuffer || req.body;
+  const pathModel = extractModelFromProviderPath(provider, req.forwardPath);
+  const requestedModel = pathModel || (Buffer.isBuffer(relayBody) ? undefined : relayBody?.model);
+  if (!isModelAllowedForProvider(requestedModel, provider)) {
+    return res.status(403).json({
+      error: `Model "${requestedModel}" is not permitted on this relay.`,
+      allowed_models: ALLOWED_MODELS_RAW,
+    });
+  }
+
   // Forward exactly the normalized path that passed the allowlist check.
   // Do not reconstruct it from Express params here: validation and use must
   // operate on the same value.
@@ -854,7 +919,6 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
-  const relayBody = req.rawBodyBuffer || req.body;
   const model = Buffer.isBuffer(relayBody) ? null : req.body?.model || null;
 
   return forwardRelayRequest({
@@ -879,7 +943,12 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
  */
 function startServer() {
   const server = app.listen(PORT, '0.0.0.0', () => {
-    logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
+    logger.info({
+      port: PORT,
+      origins: ALLOWED_ORIGINS,
+      providers: SUPPORTED_PROVIDERS,
+      modelAllowlist: ALLOWED_MODELS_RAW.length > 0 ? ALLOWED_MODELS_RAW : 'unrestricted',
+    }, 'byok-relay started');
   });
 
   // Graceful shutdown on SIGTERM (Docker stop, systemd, Kubernetes rolling deploy).
