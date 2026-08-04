@@ -511,16 +511,16 @@ sudo certbot --nginx -d relay.yourdomain.com
 
 | Threat | Protection |
 |--------|------------|
-| API key leaked from DB backup or LFI | AES-256-GCM encryption at rest; key never leaves the server unencrypted |
+| API key leaked from DB backup or LFI | AES-256-GCM encryption at rest; key is never returned to clients or persisted in plaintext |
 | Relay token stolen from browser | HMAC-SHA256 stored token hash; raw token sent to user exactly once at registration; legacy hashes are upgraded lazily |
-| Unauthenticated registration abuse | `APP_SECRET` gate on `POST /users`; rate-limited to 10 registrations/hour per IP |
+| Unauthenticated registration abuse | `APP_SECRET` gate on `POST /users` when configured; rate-limited to 10 registrations/hour per IP while the limiter store is available |
 | SSRF via `openai-compatible` base URL | URL blocklist (RFC-1918, link-local, cloud IMDS, IPv6 loopback, IPv4-mapped IPv6); HTTPS-only; DNS rebinding protection via resolved-IP validation |
-| Request floods | Three-layer rate limiting: 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Redis-backed for serverless/multi-process deployments |
+| Request floods | Three-layer rate limiting: 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Redis-backed for serverless/multi-process deployments; limits fail open if Redis/store is unavailable |
 | Path traversal beyond inference | Allowlist of permitted path prefixes per provider (`/chat/completions`, `/completions`, `/embeddings`, `/messages`, etc.) |
 | Header injection into upstream requests | CRLF sanitisation on all forwarded header values |
 | Hung upstream connections | 30 s `AbortController` hard timeout on every `fetch()` to AI providers |
 | Token theft → permanent access | Tokens expire after 90 days (`TOKEN_EXPIRY_DAYS`); `POST /tokens/revoke` for immediate invalidation |
-| WAL file exposure via nginx misconfiguration | `location ~* \.db(-wal|-shm)?$` deny snippet in production docs; `DB_PATH` to move DB out of web root; systemd service tightens DB file permissions |
+| WAL file exposure via nginx misconfiguration | Nginx deny rules for `.db`, `.db-wal`, and `.db-shm` files; `DB_PATH` to move DB out of web root; systemd service tightens DB file permissions |
 
 ### Encryption implementation
 
@@ -540,7 +540,7 @@ aes-256-gcm(derived key, random 16-byte IV) → { iv, authTag, ciphertext }  sto
 HMAC-SHA256(TOKEN_HMAC_SECRET, rawToken) → tokenHash  stored in SQLite
 ```
 - The raw token is sent to the user exactly once (registration response) and never stored or logged
-- All subsequent lookups compare `HMAC(incoming_token)` against stored hashes — timing-safe comparison (`crypto.timingSafeEqual`)
+- All subsequent lookups compare `HMAC(incoming_token)` against stored token hashes in SQLite
 - Set `TOKEN_HMAC_SECRET` to use a dedicated HMAC key. Existing hashes made with the historical `ENCRYPTION_SECRET` fallback continue to authenticate and are upgraded lazily, provided the existing `ENCRYPTION_SECRET` remains unchanged until every legacy-token user has authenticated and been upgraded.
 - Run `npm run token-migration-status` on the relay host to see conservative `current`, `legacy`, and percentage counts. Existing rows begin as legacy/unconfirmed and become current after successful authentication; no user identifiers or tokens are printed.
 - Tokens expire after 90 days and can be revoked immediately via `POST /tokens/revoke`
@@ -571,10 +571,10 @@ For production deployments or any app with paying users: **self-host**. The mana
 ENCRYPTION_SECRET=$(openssl rand -hex 32)   # ≥32 chars, never reuse
 APP_SECRET=$(openssl rand -hex 32)           # gate POST /users
 TOKEN_HMAC_SECRET=$(openssl rand -hex 32)    # HMAC token storage
-ENCRYPTION_SALT=$(openssl rand -hex 32)      # per-deployment salt
 ALLOWED_ORIGINS=https://yourdomain.com       # lock down CORS
 
 # Recommended
+ENCRYPTION_SALT=$(openssl rand -hex 32)      # unique per deployment; preserve with backups
 REDIS_URL=redis://...                        # persistent rate limiting
 TOKEN_EXPIRY_DAYS=30                         # shorter than default 90
 DB_PATH=/var/lib/byok-relay/relay.db         # outside web root
@@ -584,12 +584,12 @@ DB_PATH=/var/lib/byok-relay/relay.db         # outside web root
 - Restrict `ALLOWED_ORIGINS` to your app's domain in production
 - Add nginx `deny` rules for `.db`, `.db-wal`, and `.db-shm` files if DB is in the project directory
 - The systemd service applies `chmod 600` to `data/relay.db`, `relay.db-wal`, and `relay.db-shm` on every start via `ExecStartPost`. If deploying without systemd, run `chmod 600 data/relay.db*` manually after first start.
-- Back up `relay.db` — it contains encrypted API keys; recovery requires the same `ENCRYPTION_SECRET`
-- Rotate `ENCRYPTION_SECRET` by re-encrypting all stored keys (tooling coming; for now: `DELETE /users` + re-register)
+- Back up `relay.db` — it contains encrypted API keys; recovery requires preserving both `ENCRYPTION_SECRET` and `ENCRYPTION_SALT`
+- Rotate `ENCRYPTION_SECRET` only by re-encrypting all stored keys. Automated rotation tooling is not available yet; deleting users is not a safe rotation substitute because it destroys stored keys.
 
 ### Reporting vulnerabilities
 
-Open a GitHub issue marked **[Security]** or email the maintainer directly. Do not post exploit details publicly before a fix is available.
+Report vulnerabilities through GitHub Security Advisories when available, or email the maintainer privately. Do not open public GitHub issues or post exploit details before a fix is available.
 
 ---
 
