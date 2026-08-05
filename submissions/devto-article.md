@@ -78,7 +78,7 @@ async function saveApiKey(relayToken, provider, apiKey) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${relayToken}`
+      'x-relay-token': relayToken
     },
     body: JSON.stringify({ key: apiKey })
   });
@@ -95,11 +95,11 @@ The key is encrypted with AES-256-GCM before it's stored. It never travels back 
 
 ```javascript
 async function chat(relayToken, messages) {
-  const res = await fetch(`${RELAY_URL}/relay/openai/chat/completions`, {
+  const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${relayToken}`
+      'x-relay-token': relayToken
     },
     body: JSON.stringify({
       model: 'gpt-4o',
@@ -123,11 +123,11 @@ The relay decrypts the user's stored key, injects it into the outbound request t
 
 ```javascript
 async function streamChat(relayToken, messages, onChunk) {
-  const res = await fetch(`${RELAY_URL}/relay/openai/chat/completions`, {
+  const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${relayToken}`
+      'x-relay-token': relayToken
     },
     body: JSON.stringify({
       model: 'gpt-4o',
@@ -277,17 +277,17 @@ await fetch(`${RELAY}/keys/openai`, {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`
+    'x-relay-token': token
   },
   body: JSON.stringify({ key: 'sk-...' })
 });
 
 // Then call AI normally:
-const reply = await fetch(`${RELAY}/relay/openai/chat/completions`, {
+const reply = await fetch(`${RELAY}/relay/openai/v1/chat/completions`, {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`
+    'x-relay-token': token
   },
   body: JSON.stringify({
     model: 'gpt-4o',
