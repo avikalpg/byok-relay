@@ -13,7 +13,7 @@ Browser apps can't call `api.openai.com` or `api.anthropic.com` directly — COR
 
 **Option A — Use our relay (zero setup):**
 
-```
+```text
 https://relay.byokrelay.com
 ```
 
@@ -65,7 +65,7 @@ Browser                  byok-relay              AI Provider
   │◄─ streamed response ──────┤◄─ streamed response ──┤
 ```
 
-The **token** (not the key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM. Users register once; every request uses their key, billed to their account.
+The **token** (not the key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM. In the individual flow, users register once; every request uses their key and is billed to their provider account. In the B2B flow, requests use the organization's registered key and provider billing account.
 
 ## How it compares
 
@@ -83,7 +83,7 @@ Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing
 
 ## JavaScript client
 
-The easiest way to integrate byok-relay into a JavaScript app:
+The easiest way to integrate byok-relay into a Vite/ESM browser app:
 
 ```bash
 npm install @byok-relay/client
@@ -93,7 +93,7 @@ npm install @byok-relay/client
 import { createClient } from '@byok-relay/client'
 
 const relay = createClient({
-  relayUrl: import.meta.env.VITE_RELAY_URL ?? 'https://relay.byokrelay.com',
+  relayUrl: import.meta.env.VITE_RELAY_URL ?? 'https://relay.byokrelay.com', // or your self-hosted relay URL
 })
 
 // Your user enters their API key once
@@ -120,16 +120,17 @@ git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm ins
 
 # 2. Configure
 echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
-echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+echo "ALLOWED_ORIGINS=http://localhost:5173" >> .env  # replace with your browser app's origin
 
 # 3. Start (add APP_SECRET for production to restrict who can register users)
 # echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
 npm start &
+i=0; until curl -fsS http://localhost:3000/health >/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && { echo "Relay did not become ready"; exit 1; }; sleep 1; done
 
 # 4. Register a user and get a token
 TOKEN=$(curl -s -X POST http://localhost:3000/users \
   -H "Content-Type: application/json" \
-  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
 
 # 5. Store your Anthropic key
 curl -X POST http://localhost:3000/keys/anthropic \
@@ -436,24 +437,28 @@ The fastest way to get byok-relay running is via Vercel:
 
 ## Quickstart (npm / CLI)
 
-> **Fastest path:** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) && npx byok-relay`
-> For the full walkthrough continue below, or see [Setup options](#setup) for `npm install -g` and clone paths.
+> **Fastest path (dev only):** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) ALLOWED_ORIGINS=http://localhost:5173 && npx byok-relay`
+> ⚠️ Keep the same `ENCRYPTION_SECRET` across restarts. If it changes, the relay cannot decrypt previously stored keys. For anything beyond a throwaway dev run, save it in a durable `.env`, shell profile, or secret manager.
+> For install options, see [Setup](#setup).
+
+**Clone-and-run walkthrough:**
 
 ```bash
-# 1. Clone and install (or skip this with: npx byok-relay)
+# 1. Clone and install
 git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
 
 # 2. Configure
 echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
-echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+echo "ALLOWED_ORIGINS=http://localhost:5173" >> .env  # replace with your browser app's origin
 
 # 3. Start
 npm start &
+i=0; until curl -fsS http://localhost:3000/health >/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && { echo "Relay did not become ready"; exit 1; }; sleep 1; done
 
 # 4. Register a user and get a token
 TOKEN=$(curl -s -X POST http://localhost:3000/users \
   -H "Content-Type: application/json" \
-  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
 
 # 5. Store your Anthropic key
 curl -X POST http://localhost:3000/keys/anthropic \
@@ -555,7 +560,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 ### Encryption implementation
 
 **API key storage:**
-```
+```text
 scrypt(ENCRYPTION_SECRET + ENCRYPTION_SALT) → 32-byte derived key  (computed once at startup)
 aes-256-gcm(derived key, random 16-byte IV) → { iv, authTag, ciphertext }  stored as JSON in SQLite
 ```
@@ -566,7 +571,7 @@ aes-256-gcm(derived key, random 16-byte IV) → { iv, authTag, ciphertext }  sto
 - `ENCRYPTION_SALT` is configurable (default fallback exists for backward compat; generate your own with `openssl rand -hex 32`)
 
 **Relay token storage:**
-```
+```text
 HMAC-SHA256(TOKEN_HMAC_SECRET, rawToken) → tokenHash  stored in SQLite
 ```
 - The raw token is sent to the user exactly once (registration response) and never stored or logged
@@ -628,7 +633,7 @@ Report vulnerabilities through GitHub Security Advisories when available, or ema
 
 Two patterns, one integration:
 
-**Prosumer / individual** — each user registers their own API key once. They use their own credits; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
+**Prosumer / individual** — each user registers their own API key once. Requests use their own credits and are billed to their provider account; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
 
 **Team / B2B** — a company admin registers the org's shared API key once. The relay token lives in your app's backend; all team members access AI through your app, which routes requests automatically. Billing, usage, and key rotation are managed inside the customer's organisation — not by you.
 
