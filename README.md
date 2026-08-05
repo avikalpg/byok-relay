@@ -121,16 +121,25 @@ git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm ins
 # 2. Configure
 echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
 echo "ALLOWED_ORIGINS=http://localhost:5173" >> .env  # replace with your browser app's origin
+# Production only: restrict who can register users, and keep this shell variable for step 4.
+# APP_SECRET=$(openssl rand -hex 32)
+# echo "APP_SECRET=$APP_SECRET" >> .env
 
-# 3. Start (add APP_SECRET for production to restrict who can register users)
-# echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
+# 3. Start
 npm start &
 i=0; until curl -fsS http://localhost:3000/health >/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && { echo "Relay did not become ready"; exit 1; }; sleep 1; done
 
 # 4. Register a user and get a token
+# Development, when APP_SECRET is not set:
 TOKEN=$(curl -s -X POST http://localhost:3000/users \
   -H "Content-Type: application/json" \
   -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
+
+# Production, when APP_SECRET is set:
+# TOKEN=$(curl -s -X POST http://localhost:3000/users \
+#   -H "Content-Type: application/json" \
+#   -H "Authorization: Bearer $APP_SECRET" \
+#   -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
 
 # 5. Store your Anthropic key
 curl -X POST http://localhost:3000/keys/anthropic \
