@@ -221,7 +221,7 @@ Bolt runs a full Node.js + Vite environment in StackBlitz WebContainers. byok-re
 
 Paste this into Bolt's prompt:
 
-```
+```text
 Read https://byokrelay.com/skill and integrate byok-relay into this project.
 Use the managed relay at https://relay.byokrelay.com (no self-hosting needed).
 Add:
@@ -257,7 +257,7 @@ await streamChat({
 
 If you self-host the relay, set in Bolt's environment panel:
 
-```
+```bash
 VITE_RELAY_URL=https://your-relay.example.com
 ```
 
@@ -331,7 +331,9 @@ export default function AIChatBox({ placeholder, accentColor }) {
       const { done, value } = await reader.read()
       if (done) break
       buf += dec.decode(value, { stream: true })
-      for (const line of buf.split("\n")) {
+      const lines = buf.split("\n")
+      buf = lines.pop() || ""
+      for (const line of lines) {
         if (!line.startsWith("data: ")) continue
         const d = line.slice(6).trim()
         if (d === "[DONE]") continue
@@ -340,7 +342,6 @@ export default function AIChatBox({ placeholder, accentColor }) {
           if (chunk) setOutput((p) => p + chunk)
         } catch {}
       }
-      buf = buf.split("\n").pop()
     }
     setLoading(false)
   }
