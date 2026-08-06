@@ -14,7 +14,7 @@ Browser apps can't call `api.openai.com` or `api.anthropic.com` directly — COR
 
 **Option A — Use our relay (zero setup):**
 
-```
+```text
 https://relay.byokrelay.com
 ```
 
@@ -29,6 +29,8 @@ docker compose up -d   # relay running at http://localhost:3000
 ```
 
 Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickstart →](#quickstart-60-seconds)
+
+> **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
 ## For AI coding agents
 
@@ -64,7 +66,7 @@ Browser                  byok-relay              AI Provider
   │◄─ streamed response ──────┤◄─ streamed response ──┤
 ```
 
-The **token** (not the key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM. Users register once; every request uses their key, billed to their account.
+The **token** (not the key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM. In the individual flow, users register once; every request uses their key and is billed to their provider account. In the B2B flow, requests use the organization's registered key and provider billing account.
 
 ## How it compares
 
@@ -80,6 +82,37 @@ The **token** (not the key) lives in the browser. The API key stays server-side,
 
 Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing + analytics. Use byok-relay when you want **users to bring their own keys**.
 
+## JavaScript client
+
+The easiest way to integrate byok-relay into a Vite/ESM browser app:
+
+```bash
+npm install @byok-relay/client
+```
+
+```js
+import { createClient } from '@byok-relay/client'
+
+const relay = createClient({
+  relayUrl: import.meta.env.VITE_RELAY_URL ?? 'https://relay.byokrelay.com', // or your self-hosted relay URL
+})
+
+// Your user enters their API key once
+await relay.storeKey('openai', userApiKey)
+
+// Then stream — no backend required
+const text = await relay.streamChat({
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Hello!' }],
+  onChunk: (delta) => console.log(delta),
+})
+```
+
+Works in browsers (localStorage default), Node.js (in-memory default), and any custom storage adapter. See [`packages/client/README.md`](packages/client/README.md) for full API reference.
+
+---
+
 ## Quickstart (60 seconds)
 
 ```bash
@@ -88,16 +121,26 @@ git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm ins
 
 # 2. Configure
 echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
-echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+echo "ALLOWED_ORIGINS=http://localhost:5173" >> .env  # replace with your browser app's origin
+# Production only: restrict who can register users, and keep this shell variable for step 4.
+# APP_SECRET=$(openssl rand -hex 32)
+# echo "APP_SECRET=$APP_SECRET" >> .env
 
-# 3. Start (add APP_SECRET for production to restrict who can register users)
-# echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
+# 3. Start
 npm start &
+i=0; until curl -fsS http://localhost:3000/health >/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && { echo "Relay did not become ready"; exit 1; }; sleep 1; done
 
 # 4. Register a user and get a token
+# Development, when APP_SECRET is not set:
 TOKEN=$(curl -s -X POST http://localhost:3000/users \
   -H "Content-Type: application/json" \
-  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
+
+# Production, when APP_SECRET is set:
+# TOKEN=$(curl -s -X POST http://localhost:3000/users \
+#   -H "Content-Type: application/json" \
+#   -H "Authorization: Bearer $APP_SECRET" \
+#   -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
 
 # 5. Store your Anthropic key
 curl -X POST http://localhost:3000/keys/anthropic \
@@ -105,15 +148,22 @@ curl -X POST http://localhost:3000/keys/anthropic \
   -H "x-relay-token: $TOKEN" \
   -d '{"key":"sk-ant-YOUR-KEY-HERE"}'
 
-# 6. Relay a request (streaming)
-curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
+# 6. Relay a request — unified endpoint
+curl -X POST http://localhost:3000/relay \
   -H "Content-Type: application/json" \
-  -H "anthropic-version: 2023-06-01" \
   -H "x-relay-token: $TOKEN" \
-  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"anthropic/claude-3-5-haiku","max_tokens":256,"messages":[{"role":"user","content":"Hello!"}]}'
+
+# Or with streaming
+curl -X POST http://localhost:3000/relay \
+  -H "Content-Type: application/json" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 ## Supported providers
+
+### LLM providers
 
 | Provider | Name | Notes |
 |---|---|---|
@@ -125,9 +175,86 @@ curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
 | Mistral | `mistral` | Mistral models |
 | Any OpenAI-compatible | `openai-compatible` | Pass `x-relay-base-url` header — covers LiteLLM, Ollama, Perplexity, Together AI, and any other OpenAI-compatible endpoint |
 
+### Non-LLM inference providers (audio, image, multimodal)
+
+byok-relay supports non-LLM APIs that return binary responses (audio, images) or accept raw audio uploads. The same BYOK model applies: your users bring their own key; byok-relay handles auth headers and binary pass-through.
+
+| Provider | Name | Key scheme | Use cases |
+|---|---|---|---|
+| ElevenLabs | `elevenlabs` | `xi-api-key` header | Text-to-speech (TTS), speech-to-speech, voice generation |
+| HuggingFace | `huggingface` | Bearer token | NLP, image generation, audio models (Inference API) |
+| Deepgram | `deepgram` | `Token` scheme | Speech-to-text (STT), text-to-speech |
+
+**Binary response handling:** Audio and image responses are piped through byte-for-byte — no JSON parsing. The relay preserves `Content-Type`, `Content-Length`, and `Content-Disposition` headers so the client receives the raw audio/image buffer directly.
+
+**Raw audio uploads (Deepgram STT):** When sending audio to `/v1/listen`, set `Content-Type` to the audio MIME type (e.g. `audio/wav`, `audio/mpeg`). The relay detects non-JSON content types and passes the raw binary body through to the provider without re-encoding.
+
+#### ElevenLabs example — text-to-speech
+
+```http
+POST /relay/elevenlabs/v1/text-to-speech/{voice_id}
+x-relay-token: <your-token>
+Content-Type: application/json
+
+{ "text": "Hello from byok-relay!", "model_id": "eleven_monolingual_v1" }
+```
+
+Response: `audio/mpeg` binary stream.
+
+#### Deepgram example — speech-to-text
+
+```http
+POST /relay/deepgram/v1/listen?model=nova-2
+x-relay-token: <your-token>
+Content-Type: audio/wav
+
+<raw audio bytes>
+```
+
+Response: JSON transcript from Deepgram.
+
 Adding a new built-in provider is ~5 lines in `src/providers.js`.
 
 ## API
+
+| Endpoint | Description |
+|---|---|
+| `POST /users` | Register app user, get relay token |
+| `POST /keys/:provider` | Store encrypted API key |
+| `GET /keys` | List stored providers |
+| `DELETE /keys/:provider` | Remove a stored key |
+| `POST /relay` | **Unified routing** — `model` field selects provider |
+| `GET /models` | Routing table (patterns + provider prefixes) |
+| `POST /relay/:provider/*` | Per-provider relay (backward-compat) |
+| `GET /health` | Health check + version |
+
+### Health check
+```http
+GET /health
+```
+Returns `HTTP 200` when the relay is healthy, `HTTP 503` when a critical check fails.
+
+```json
+{
+  "ok": true,
+  "version": "1.5.1",
+  "uptime": 3600,
+  "timestamp": "2026-06-11T03:00:00.000Z",
+  "providers": ["openai", "anthropic", "google", "groq", "openrouter", "mistral", "elevenlabs", "deepgram", "openai-compatible"],
+  "checks": {
+    "db": { "ok": true },
+    "config": { "ok": true, "encryption_key_set": true, "registration_gated": true }
+  }
+}
+```
+
+**Deep / readiness probe** — also pings a provider's models endpoint to verify network reachability:
+```http
+GET /health?deep=1&provider=openai
+```
+Adds `checks.upstream: { ok, provider, statusCode }` to the response and is rate-limited more tightly than the base liveness check. Use this for post-deploy smoke tests, not per-request liveness probes because it makes an outbound network call.
+
+Use `/health` as your **liveness probe** and `/health?deep=1` as your **readiness probe** in K8s / docker-compose healthchecks.
 
 ### Register a user
 ```http
@@ -163,13 +290,73 @@ GET /keys
 x-relay-token: <token>
 ```
 
+### Rotate a key (atomic: verify new → replace old)
+```http
+POST /keys/anthropic/rotate
+x-relay-token: <token>
+Content-Type: application/json
+
+{ "key": "sk-ant-api03-..." }
+```
+The relay validates the new key's format, pings the provider with a lightweight read-only request to confirm the key is accepted, then atomically replaces the stored key in a single DB write.
+
+The old key is **never touched** if the new key fails validation or is rejected by the provider — safe to call on a live deployment.
+
+Returns `{ ok: true, provider, rotated: true }` if an existing key was replaced, or `{ ok: true, provider, rotated: false }` if no prior key existed.
+
 ### Delete a key
 ```http
 DELETE /keys/anthropic
 x-relay-token: <token>
 ```
 
-### Relay a request
+### Revoke a relay token
+```http
+POST /tokens/revoke
+x-relay-token: <token>
+```
+Immediately invalidates the token. Stored keys remain in the database but are no longer accessible. To regain access, register a new token (`POST /users`) and re-enter your keys.
+
+### Delete account (GDPR erasure)
+```http
+DELETE /users
+x-relay-token: <token>
+```
+Permanently deletes the user account **and all associated API keys**. This action is irreversible.
+
+### Relay a request — unified endpoint (recommended)
+
+Send a single request to `POST /relay` with a `model` field; the relay resolves
+the provider automatically.
+
+Use `"provider/model-name"` for an explicit route, or just the model name if it
+matches a known pattern:
+
+```http
+POST /relay
+x-relay-token: <token>
+Content-Type: application/json
+
+{ "model": "anthropic/claude-3-5-haiku", "max_tokens": 256, "messages": [{"role":"user","content":"Hello"}] }
+```
+
+```http
+POST /relay
+x-relay-token: <token>
+Content-Type: application/json
+
+{ "model": "gpt-4o", "messages": [{"role":"user","content":"Hello"}] }
+```
+
+Full streaming (SSE) is supported — pass `"stream": true` in the body.
+
+**Discovery:** `GET /models` returns the full routing table plus the active model allowlist status. When unrestricted, the allowlist status is `{ "restricted": false, "message": "All models are permitted on this relay." }`.
+
+**Body format note:** the request body must match the target provider's native
+API format (`messages` for OpenAI/Anthropic/Groq/Mistral, `contents` for Google).
+The provider prefix is stripped from the `model` field before forwarding.
+
+### Relay a request — per-provider path (backward-compatible)
 ```http
 POST /relay/anthropic/v1/messages
 x-relay-token: <token>
@@ -190,9 +377,63 @@ Content-Type: application/json
 { "model": "...", "messages": [...] }
 ```
 
+### Restrict allowed models
+
+Set `ALLOWED_MODELS` to a comma-separated list of model names or wildcard patterns to prevent users from requesting expensive or unsupported models. Configure the raw `model` value clients send, including provider prefixes for `POST /relay` requests that use them:
+
+```bash
+ALLOWED_MODELS=gpt-4o-mini,anthropic/claude-3-5-haiku*,google/gemini-2.0-flash*
+```
+
+Matching is case-insensitive. `*` matches zero or more characters.
+
+`GET /models` includes the routing table and the current allowlist status. If no allowlist is configured, the response includes:
+
+```json
+{ "restricted": false, "message": "All models are permitted on this relay." }
+```
+
+If an allowlist is configured, the response includes `"restricted": true` and `"allowed_models"`.
+
+If a relay request includes a `model` field not on the list, the relay returns:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{ "error": "Model \"gpt-4o\" is not permitted on this relay.", "allowed_models": ["gpt-4o-mini", "anthropic/claude-3-5-haiku*", "google/gemini-2.0-flash*"] }
+```
+
 ## Deploy in one click
 
-Pick a platform based on your use case:
+### Docker (recommended for self-hosters)
+
+```bash
+# 1. Copy and fill in the env template
+cp .env.example .env
+# Set ENCRYPTION_SECRET (required): openssl rand -hex 32
+# Set ALLOWED_ORIGINS to your frontend domain(s)
+# Set APP_SECRET (strongly recommended): openssl rand -hex 32
+
+# 2. Start the relay
+docker compose up -d
+
+# 3. Check it's healthy
+docker compose ps
+curl http://localhost:3000/health
+```
+
+SQLite data persists in the Compose named volume `relay_data` (mounted at `/app/data` inside the container).
+Back up the volume contents (the SQLite file holds all encrypted API keys). Example:
+
+```bash
+docker run --rm -v relay_data:/data -v $(pwd):/out alpine sh -c \
+  'apk add --no-cache sqlite && sqlite3 /data/relay.db ".backup /out/relay-backup-$(date +%s).db"'
+```
+
+> **Note:** When you update the image, run `docker compose up --build -d` — the `relay_data` volume is preserved.
+
+Pick a hosted platform based on your use case:
 
 | Platform | Best for | Persistent storage | Cost |
 |----------|----------|--------------------|------|
@@ -226,16 +467,82 @@ Pick a platform based on your use case:
 
 > ⚠️ **Vercel limitation:** Vercel serverless functions run on an ephemeral filesystem. SQLite state (registered users, stored keys) resets between cold starts. Use Vercel for demos and local testing only. For real users, deploy to Railway or Render instead.
 
+## Quickstart (npm / CLI)
+
+> **Fastest path (dev only):** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) ALLOWED_ORIGINS=http://localhost:5173 && npx byok-relay`
+> ⚠️ Keep the same `ENCRYPTION_SECRET` across restarts. If it changes, the relay cannot decrypt previously stored keys. For anything beyond a throwaway dev run, save it in a durable `.env`, shell profile, or secret manager.
+> For install options, see [Setup](#setup).
+
+**Clone-and-run walkthrough:**
+
+```bash
+# 1. Clone and install
+git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
+
+# 2. Configure
+echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
+echo "ALLOWED_ORIGINS=http://localhost:5173" >> .env  # replace with your browser app's origin
+
+# 3. Start
+npm start &
+i=0; until curl -fsS http://localhost:3000/health >/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && { echo "Relay did not become ready"; exit 1; }; sleep 1; done
+
+# 4. Register a user and get a token
+TOKEN=$(curl -s -X POST http://localhost:3000/users \
+  -H "Content-Type: application/json" \
+  -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
+
+# 5. Store your Anthropic key
+curl -X POST http://localhost:3000/keys/anthropic \
+  -H "Content-Type: application/json" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"key":"sk-ant-YOUR-KEY-HERE"}'
+
+# 6. Relay a request (streaming)
+curl -X POST http://localhost:3000/relay/anthropic/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "x-relay-token: $TOKEN" \
+  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":256,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
 ## Setup
 
 ### 1. Install
+
+**Option A — npx (quickest, no install)**
+
+`npx byok-relay` launches a **standalone relay server process** — you run it alongside your existing app. It is not an embedded library; it listens on a port that your frontend calls. Set env vars in your shell before running.
+
+```bash
+export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+export ALLOWED_ORIGINS=https://your-app.example.com  # or * for dev
+npx byok-relay
+```
+
+> ⚠️ **Persistence:** `ENCRYPTION_SECRET` set via `export` is ephemeral (session only). If you restart the server without the same secret, it cannot decrypt previously stored keys and all users will need to re-register their keys. Save it to a file (e.g. `.env`) or your shell profile for persistence. If you also customize `ENCRYPTION_SALT` (default: `byok-relay-salt`), save and keep that unchanged too — both values must match to decrypt existing keys.
+
+**Option B — global install**
+
+Same standalone server as Option A, available as a persistent command.
+
+```bash
+npm install -g byok-relay
+export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+export ALLOWED_ORIGINS=https://your-app.example.com
+byok-relay
+```
+
+> ⚠️ **Persistence:** Same caveat as Option A — store `ENCRYPTION_SECRET` somewhere durable (e.g. a `.env` file or your shell's `.bashrc`/`.zshrc`) so restarts don't invalidate existing stored keys. This applies to `ENCRYPTION_SALT` too if you've customized it.
+
+**Option C — clone & run**
 ```bash
 git clone https://github.com/avikalpg/byok-relay.git
 cd byok-relay
 npm install
 ```
 
-### 2. Configure
+### 2. Configure *(Option C only — A and B use env vars directly, as shown above)*
 ```bash
 cp .env.example .env
 # Set ENCRYPTION_SECRET (generate: openssl rand -hex 32)
@@ -257,23 +564,108 @@ sudo systemctl enable --now byok-relay
 sudo apt install nginx
 sudo snap install --classic certbot
 sudo certbot --nginx -d relay.yourdomain.com
+
+# Add a deny block to your nginx site config to block direct DB file access:
+# Inside your server {} block, add:
+#   location ~* \.db(-wal|-shm)?$ { deny all; return 404; }
+# Then: sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ## Security
 
-- **AES-256-GCM encryption** — keys are encrypted at rest; the `ENCRYPTION_SECRET` lives only in your server environment
-- **Keys never returned** — after the initial POST, the key value is never sent over the wire again
-- **Registration gate** — set `APP_SECRET` to require `Authorization: Bearer <secret>` on `POST /users`; without it anyone who reaches your relay can register. Generate with `openssl rand -hex 32`.
-- **Rate limiting** — 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP
-- **Startup validation** — server refuses to start without a valid `ENCRYPTION_SECRET`
-- **CORS** — restrict `ALLOWED_ORIGINS` to your app's domain in production
-- **HTTPS required** in production (mixed-content browsers block HTTP endpoints called from HTTPS pages)
+### What byok-relay protects
+
+| Threat | Protection |
+|--------|------------|
+| API key leaked from DB backup or LFI | AES-256-GCM encryption at rest; key is never returned to clients or persisted in plaintext |
+| Relay token leaked from database | HMAC-SHA256 stored token hash; raw token sent to user exactly once at registration; legacy hashes are upgraded lazily. Browser-stolen raw tokens remain usable until expiry or revocation |
+| Unauthenticated registration abuse | `APP_SECRET` gate on `POST /users` when configured; rate-limited to 10 registrations/hour per IP while the limiter store is available |
+| SSRF via `openai-compatible` base URL | URL blocklist (RFC-1918, link-local, cloud IMDS, IPv6 loopback, IPv4-mapped IPv6); HTTPS-only; DNS rebinding protection via resolved-IP validation |
+| Request floods | Three-layer rate limiting: 100 req/min global, 20 AI req/min per token, 10 registrations/hour per IP. Redis-backed for serverless/multi-process deployments; limits fail open if Redis/store is unavailable |
+| Unexpected expensive model usage | Optional `ALLOWED_MODELS` allowlist with exact names and `*` wildcards; rejects configured JSON relay requests whose `model` is outside the list |
+| Path traversal beyond inference | Allowlist of permitted path prefixes per provider (`/chat/completions`, `/completions`, `/embeddings`, `/messages`, etc.) |
+| Header injection into upstream requests | CRLF sanitisation on all forwarded header values |
+| Hung upstream connections | 30 s `AbortController` hard timeout on every `fetch()` to AI providers |
+| Token theft → permanent access | Tokens expire after 90 days (`TOKEN_EXPIRY_DAYS`); `POST /tokens/revoke` for immediate invalidation |
+| WAL file exposure via nginx misconfiguration | Nginx deny rules for `.db`, `.db-wal`, and `.db-shm` files; `DB_PATH` to move DB out of web root; systemd service tightens DB file permissions |
+
+### Encryption implementation
+
+**API key storage:**
+```text
+scrypt(ENCRYPTION_SECRET + ENCRYPTION_SALT) → 32-byte derived key  (computed once at startup)
+aes-256-gcm(derived key, random 16-byte IV) → { iv, authTag, ciphertext }  stored as JSON in SQLite
+```
+- Derived key cached at module scope — `scrypt` runs exactly once per process startup, not per request
+- Each key encrypted with a fresh random IV
+- AES-GCM's `authTag` catches any tampering with the ciphertext
+- `ENCRYPTION_SECRET` is required at startup
+- `ENCRYPTION_SALT` is configurable (default fallback exists for backward compat; generate your own with `openssl rand -hex 32`)
+
+**Relay token storage:**
+```text
+HMAC-SHA256(TOKEN_HMAC_SECRET, rawToken) → tokenHash  stored in SQLite
+```
+- The raw token is sent to the user exactly once (registration response) and never stored or logged
+- All subsequent lookups compare `HMAC(incoming_token)` against stored token hashes in SQLite
+- Set `TOKEN_HMAC_SECRET` to use a dedicated HMAC key. Existing hashes made with the historical `ENCRYPTION_SECRET` fallback continue to authenticate and are upgraded lazily, provided the existing `ENCRYPTION_SECRET` remains unchanged until every legacy-token user has authenticated and been upgraded.
+- Run `npm run token-migration-status` on the relay host to see conservative `current`, `legacy`, and percentage counts. Existing rows begin as legacy/unconfirmed and become current after successful authentication; no user identifiers or tokens are printed.
+- Tokens expire after 90 days and can be revoked immediately via `POST /tokens/revoke`
+
+### Threat model: what byok-relay does NOT protect against
+
+- **Prompt content confidentiality** — request bodies (prompts, conversation history) pass through the relay in plaintext on the way to AI providers. For production use with sensitive data, self-host on infrastructure you control.
+- **XSS in your app** — the relay token lives in your app's `localStorage`. An XSS vulnerability in *your* app can steal relay tokens. Scope tokens to IP, add CSP headers, and consider a short expiry.
+- **Compromised `ENCRYPTION_SECRET`** — if your server environment is fully compromised, the encryption key is accessible. Mitigate with a cloud KMS (AWS KMS, GCP Cloud KMS) for higher assurance.
+- **Multi-instance SQLite concurrency** — SQLite handles concurrent reads well but bottlenecks on concurrent writes. For high-traffic multi-replica deployments, use a Postgres backend.
+
+### Managed relay vs self-hosted — an honest comparison
+
+| | `relay.byokrelay.com` (managed) | Self-hosted |
+|---|---|---|
+| Setup time | Zero | ~5 min |
+| Control over `ENCRYPTION_SECRET` | **No** — operator holds the key | **Yes** — you hold it |
+| Request data flows through | Third-party infra | Your infra |
+| Uptime SLA | None | Your ops |
+| Good for | Prototypes, demos, development | Production, sensitive data |
+
+For production deployments or any app with paying users: **self-host**. The managed relay is an easy way to evaluate byok-relay, not a production dependency.
+
+### Hardening checklist for production
+
+```bash
+# Required
+ENCRYPTION_SECRET=$(openssl rand -hex 32)   # ≥32 chars, never reuse
+APP_SECRET=$(openssl rand -hex 32)           # gate POST /users
+TOKEN_HMAC_SECRET=$(openssl rand -hex 32)    # HMAC token storage
+ALLOWED_ORIGINS=https://yourdomain.com       # lock down CORS
+
+# Recommended
+ENCRYPTION_SALT=$(openssl rand -hex 32)      # unique per deployment; preserve with backups
+REDIS_URL=redis://...                        # persistent rate limiting
+TOKEN_EXPIRY_DAYS=30                         # shorter than default 90
+ALLOWED_MODELS=gpt-4o-mini,claude-haiku*     # cap model access for shared/team relays
+DB_PATH=/var/lib/byok-relay/relay.db         # outside web root
+```
+
+- Serve behind HTTPS (Let's Encrypt / Cloudflare)
+- Restrict `ALLOWED_ORIGINS` to your app's domain in production
+- Add nginx `deny` rules for `.db`, `.db-wal`, and `.db-shm` files if DB is in the project directory
+- The systemd service applies `chmod 600` to `data/relay.db`, `relay.db-wal`, and `relay.db-shm` on every start via `ExecStartPost`. If deploying without systemd, run `chmod 600 data/relay.db*` manually after first start.
+- Back up SQLite safely while WAL is enabled: use SQLite's online backup mechanism, or stop the service and checkpoint the WAL before copying `relay.db` (and any `relay.db-wal` / `relay.db-shm` files). The DB contains encrypted API keys; recovery requires preserving both `ENCRYPTION_SECRET` and `ENCRYPTION_SALT`.
+- Rotate `ENCRYPTION_SECRET` only after `npm run token-migration-status` reports zero legacy or unconfirmed relay-token rows, then re-encrypt all stored API keys. API-key re-encryption alone does not migrate legacy token HMAC rows. Automated rotation tooling is not available yet; deleting users is not a safe rotation substitute because it destroys stored keys.
+
+### Reporting vulnerabilities
+
+Report vulnerabilities through GitHub Security Advisories when available, or email the maintainer privately. Do not open public GitHub issues or post exploit details before a fix is available.
+
+---
 
 ## BYOK — your users pay for what they use
 
 Two patterns, one integration:
 
-**Prosumer / individual** — each user registers their own API key once. They use their own credits; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
+**Prosumer / individual** — each user registers their own API key once. Requests use their own credits and are billed to their provider account; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
 
 **Team / B2B** — a company admin registers the org's shared API key once. The relay token lives in your app's backend; all team members access AI through your app, which routes requests automatically. Billing, usage, and key rotation are managed inside the customer's organisation — not by you.
 
@@ -295,6 +687,11 @@ byok-relay handles both patterns today.
 ## License
 
 Apache 2.0
+
+## Legal
+
+- [SECURITY.md](SECURITY.md) — vulnerability reporting, incident response runbook, hardening checklist
+- [PRIVACY.md](PRIVACY.md) — privacy policy + template for operators running their own relay
 
 ---
 
