@@ -5,19 +5,29 @@
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS,APP_SECRET&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
 
-**Your users already have AI keys. byok-relay lets them use those keys — straight from your frontend, with no CORS issues and no keys in your code.**
+> **Your users bring their own AI keys. byok-relay lets them use those keys straight from the browser — CORS handled, keys never in your code, costs on their bill.**
 
-Built for developers building prosumer tools and B2B AI products. Whether you're running a frontend-only app or have a full backend, byok-relay handles the BYOK plumbing — encrypted key storage, secure relay, multi-provider support — in minutes, not days. Your users bring their own OpenAI, Anthropic, or Gemini keys; you build the product; they pay for their own AI usage.
+Browser apps can't call `api.openai.com` or `api.anthropic.com` directly — CORS blocks them. The usual fix (a backend proxy) puts your users' keys — and your users' AI costs — on your tab. byok-relay flips this: each user gets a secure token; they store their own key; they pay for their own inference. You build the product.
 
-## Managed relay
+## Get started
 
-**Skip the setup — use ours:**
+**Option A — Use our relay (zero setup):**
 
-```
+```text
 https://relay.byokrelay.com
 ```
 
-Free to use. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
+Free. Open CORS (any origin). [Health check →](https://relay.byokrelay.com/health)
+
+**Option B — Self-host in 3 commands:**
+
+```bash
+git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay
+echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
+docker compose up -d   # relay running at http://localhost:3000
+```
+
+Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickstart →](#quickstart-60-seconds)
 
 > **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
@@ -37,30 +47,6 @@ https://byokrelay.com/skill
 
 > Prompt: *"Read the byok-relay skill at https://byokrelay.com/skill and integrate byok-relay into this project using the hosted relay at https://relay.byokrelay.com"*
 
-## The problem
-
-Browser apps can't call AI APIs directly:
-- `api.anthropic.com`, `api.openai.com`, and most AI providers **block browser requests via CORS**
-- Putting API keys in frontend code exposes them to every user
-
-The common workaround — a backend proxy — means the *app developer* holds the keys. That's a trust problem, and it puts inference costs on your bill permanently.
-
-**byok-relay solves this differently:** the relay sits between your frontend and the AI provider. Users register their own keys once; every request after that uses their key, billed to their account.
-
-## How it compares
-
-| | byok-relay | OpenRouter | LiteLLM |
-|---|---|---|---|
-| Who holds the API keys | Your users | OpenRouter | Your org |
-| Who pays for AI usage | Your users | You (the dev) | You (the org) |
-| BYOK for end users | ✅ | ❌ | ❌ |
-| Browser-safe (CORS handled) | ✅ | ✅ | ❌ (needs backend) |
-| Self-hosted | ✅ | ❌ | ✅ |
-| Open source | ✅ Apache 2.0 | ❌ | ✅ |
-| Model routing / fallbacks | ❌ | ✅ | ✅ |
-
-Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing + analytics. Use byok-relay when you want users to bring their own keys.
-
 ## How it works
 
 ```
@@ -79,11 +65,25 @@ Browser                  byok-relay              AI Provider
   │◄─ streamed response ──────┤◄─ streamed response ──┤
 ```
 
-The `token` (not the API key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM.
+The **token** (not the key) lives in the browser. The API key stays server-side, encrypted at rest with AES-256-GCM. In the individual flow, users register once; every request uses their key and is billed to their provider account. In the B2B flow, requests use the organization's registered key and provider billing account.
+
+## How it compares
+
+| | byok-relay | OpenRouter | LiteLLM |
+|---|---|---|---|
+| Who holds the API keys | Your users | OpenRouter | Your org |
+| Who pays for AI usage | Your users | You (the dev) | You (the org) |
+| BYOK for end users | ✅ | ❌ | ❌ |
+| Browser-safe (CORS handled) | ✅ | ✅ | ❌ (needs backend) |
+| Self-hosted | ✅ | ❌ | ✅ |
+| Open source | ✅ Apache 2.0 | ❌ | ✅ |
+| Model routing / fallbacks | ❌ | ✅ | ✅ |
+
+Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing + analytics. Use byok-relay when you want **users to bring their own keys**.
 
 ## JavaScript client
 
-The easiest way to integrate byok-relay into a JavaScript app:
+The easiest way to integrate byok-relay into a Vite/ESM browser app:
 
 ```bash
 npm install @byok-relay/client
@@ -93,7 +93,7 @@ npm install @byok-relay/client
 import { createClient } from '@byok-relay/client'
 
 const relay = createClient({
-  relayUrl: import.meta.env.VITE_RELAY_URL ?? 'https://relay.byokrelay.com',
+  relayUrl: import.meta.env.VITE_RELAY_URL ?? 'https://relay.byokrelay.com', // or your self-hosted relay URL
 })
 
 // Your user enters their API key once
@@ -120,16 +120,26 @@ git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm ins
 
 # 2. Configure
 echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
-echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+echo "ALLOWED_ORIGINS=http://localhost:5173" >> .env  # replace with your browser app's origin
+# Production only: restrict who can register users, and keep this shell variable for step 4.
+# APP_SECRET=$(openssl rand -hex 32)
+# echo "APP_SECRET=$APP_SECRET" >> .env
 
-# 3. Start (add APP_SECRET for production to restrict who can register users)
-# echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
+# 3. Start
 npm start &
+i=0; until curl -fsS http://localhost:3000/health >/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && { echo "Relay did not become ready"; exit 1; }; sleep 1; done
 
 # 4. Register a user and get a token
+# Development, when APP_SECRET is not set:
 TOKEN=$(curl -s -X POST http://localhost:3000/users \
   -H "Content-Type: application/json" \
-  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
+
+# Production, when APP_SECRET is set:
+# TOKEN=$(curl -s -X POST http://localhost:3000/users \
+#   -H "Content-Type: application/json" \
+#   -H "Authorization: Bearer $APP_SECRET" \
+#   -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
 
 # 5. Store your Anthropic key
 curl -X POST http://localhost:3000/keys/anthropic \
@@ -436,24 +446,28 @@ The fastest way to get byok-relay running is via Vercel:
 
 ## Quickstart (npm / CLI)
 
-> **Fastest path:** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) && npx byok-relay`
-> For the full walkthrough continue below, or see [Setup options](#setup) for `npm install -g` and clone paths.
+> **Fastest path (dev only):** `export ENCRYPTION_SECRET=$(openssl rand -hex 32) ALLOWED_ORIGINS=http://localhost:5173 && npx byok-relay`
+> ⚠️ Keep the same `ENCRYPTION_SECRET` across restarts. If it changes, the relay cannot decrypt previously stored keys. For anything beyond a throwaway dev run, save it in a durable `.env`, shell profile, or secret manager.
+> For install options, see [Setup](#setup).
+
+**Clone-and-run walkthrough:**
 
 ```bash
-# 1. Clone and install (or skip this with: npx byok-relay)
+# 1. Clone and install
 git clone https://github.com/avikalpg/byok-relay.git && cd byok-relay && npm install
 
 # 2. Configure
 echo "ENCRYPTION_SECRET=$(openssl rand -hex 32)" > .env
-echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
+echo "ALLOWED_ORIGINS=http://localhost:5173" >> .env  # replace with your browser app's origin
 
 # 3. Start
 npm start &
+i=0; until curl -fsS http://localhost:3000/health >/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && { echo "Relay did not become ready"; exit 1; }; sleep 1; done
 
 # 4. Register a user and get a token
 TOKEN=$(curl -s -X POST http://localhost:3000/users \
   -H "Content-Type: application/json" \
-  -d '{"app_id":"test"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  -d '{"app_id":"test"}' | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).token))")
 
 # 5. Store your Anthropic key
 curl -X POST http://localhost:3000/keys/anthropic \
@@ -555,7 +569,7 @@ sudo certbot --nginx -d relay.yourdomain.com
 ### Encryption implementation
 
 **API key storage:**
-```
+```text
 scrypt(ENCRYPTION_SECRET + ENCRYPTION_SALT) → 32-byte derived key  (computed once at startup)
 aes-256-gcm(derived key, random 16-byte IV) → { iv, authTag, ciphertext }  stored as JSON in SQLite
 ```
@@ -566,7 +580,7 @@ aes-256-gcm(derived key, random 16-byte IV) → { iv, authTag, ciphertext }  sto
 - `ENCRYPTION_SALT` is configurable (default fallback exists for backward compat; generate your own with `openssl rand -hex 32`)
 
 **Relay token storage:**
-```
+```text
 HMAC-SHA256(TOKEN_HMAC_SECRET, rawToken) → tokenHash  stored in SQLite
 ```
 - The raw token is sent to the user exactly once (registration response) and never stored or logged
@@ -628,7 +642,7 @@ Report vulnerabilities through GitHub Security Advisories when available, or ema
 
 Two patterns, one integration:
 
-**Prosumer / individual** — each user registers their own API key once. They use their own credits; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
+**Prosumer / individual** — each user registers their own API key once. Requests use their own credits and are billed to their provider account; you spend $0 on inference. Great for developer tools, research UIs, or any product where users already have API accounts.
 
 **Team / B2B** — a company admin registers the org's shared API key once. The relay token lives in your app's backend; all team members access AI through your app, which routes requests automatically. Billing, usage, and key rotation are managed inside the customer's organisation — not by you.
 
