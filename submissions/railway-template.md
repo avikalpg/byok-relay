@@ -102,7 +102,7 @@ SQLite writes to `DB_PATH` (default: `/data/relay.db`). Without a Railway volume
 4. Check `/health` returns JSON with `"ok": true` (for example: `{"ok":true,"version":"...","providers":[...]}`)
 5. Register a test user only now, redeploy again, and verify the token still works
 
-**Migrating an already-used deployment:** Before attaching the volume, stop writes and use Railway SSH to create a SQLite online backup of the current `relay.db`, then download it. Mount `/data`, restore the backup to `/data/relay.db`, and only then reopen the service. Preserve the existing `ENCRYPTION_SECRET` and `TOKEN_HMAC_SECRET` so restored keys and tokens remain usable.
+**Migrating an already-used deployment:** Before attaching the volume, stop writes and use Railway SSH to create a SQLite online backup of the current `relay.db`, then download it. Mount `/data`, restore the backup to `/data/relay.db`, and only then reopen the service. Preserve the existing `ENCRYPTION_SECRET`, `ENCRYPTION_SALT`, and `TOKEN_HMAC_SECRET` so restored keys and tokens remain usable.
 
 ---
 
