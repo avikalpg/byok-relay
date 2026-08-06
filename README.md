@@ -447,9 +447,11 @@ Pick a hosted platform based on your use case:
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&envs=ENCRYPTION_SECRET%2CALLOWED_ORIGINS%2CAPP_SECRET%2CDB_PATH&ENCRYPTION_SECRETDesc=Generate%20with%3A%20openssl%20rand%20-hex%2032&ALLOWED_ORIGINSDesc=Your%20frontend%20domain%20e.g.%20https%3A%2F%2Fmy-app.vercel.app&APP_SECRETDesc=Secret%20key%20for%20user%20registration%20%E2%80%94%20generate%20with%3A%20openssl%20rand%20-hex%2032&DB_PATHDesc=SQLite%20path%20%E2%80%94%20match%20your%20Railway%20volume%20mount%20(default%3A%20%2Fdata%2Frelay.db)&DB_PATHDefault=%2Fdata%2Frelay.db)
 
 1. Click the button above — Railway prompts for env vars
-2. Set `ENCRYPTION_SECRET` (`openssl rand -hex 32`), `ALLOWED_ORIGINS` (your frontend domain), `APP_SECRET` (`openssl rand -hex 32`), leave `DB_PATH` as `/data/relay.db`
-3. After first deploy: **Dashboard → your service → Volumes → Add Volume → Mount Path: `/data`** — this persists `relay.db` across deploys
-4. Redeploy once after adding the volume — tokens and keys now survive restarts
+2. Set `ENCRYPTION_SECRET` (`openssl rand -hex 32`), `ALLOWED_ORIGINS` (your frontend domain), `APP_SECRET` (`openssl rand -hex 32`), and leave `DB_PATH` as `/data/relay.db`
+3. As soon as the initial deploy completes, **before registering users or storing keys**, open **Dashboard → your service → Volumes → Add Volume** and set the mount path to `/data`
+4. Redeploy, wait for `/health` to succeed, and only then use the relay — tokens and keys now survive restarts
+
+> **Already used the relay without a volume?** Before attaching the volume, stop writes and use Railway SSH to create a SQLite online backup of the existing `relay.db` and download it. After mounting `/data`, restore that backup to `/data/relay.db` before reopening the service. Keep the existing `ENCRYPTION_SECRET` and `TOKEN_HMAC_SECRET`; changing either can make restored keys or tokens unusable.
 
 ### Deploy to Render (free tier with persistent disk)
 

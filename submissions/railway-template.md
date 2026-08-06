@@ -8,7 +8,7 @@
 
 - `railway.toml` — Nixpacks builder, Node 20 pin, `/health` healthcheck, `DB_PATH=/data/relay.db` env var default
 - README deploy button updated — now includes `DB_PATH` env var prompt with `/data/relay.db` default
-- README Railway section updated — explicit step to add a volume in the Railway dashboard after first deploy
+- README Railway section updated — explicit step to add a volume immediately after the initial deploy and before registering users or storing keys
 
 ---
 
@@ -93,13 +93,16 @@ https://railway.app/template/byok-relay
 
 ## Volume setup (critical for data persistence)
 
-SQLite writes to `DB_PATH` env var (default: `/data/relay.db`). Without a Railway volume mounted at `/data`, the database resets on every deploy — all registered users and encrypted keys are lost.
+SQLite writes to `DB_PATH` (default: `/data/relay.db`). Without a Railway volume mounted at `/data`, the database lives on the ephemeral deployment layer and is lost on redeploy.
 
-**Post-deploy checklist:**
-1. Deploy completes → check `/health` returns JSON with `"ok": true` (for example: `{"ok":true,"version":"...","providers":[...]}`)
+**Initial-deploy checklist:**
+1. Let the initial deploy complete, but do not register users or store keys yet
 2. Dashboard → your service → **Volumes** → **Add Volume** → Mount Path: `/data`
-3. Redeploy (triggers once automatically after volume add, or click "Redeploy")
-4. Confirm persistence: register a test user, redeploy, verify the token still works
+3. Redeploy (Railway may trigger this automatically after adding the volume)
+4. Check `/health` returns JSON with `"ok": true` (for example: `{"ok":true,"version":"...","providers":[...]}`)
+5. Register a test user only now, redeploy again, and verify the token still works
+
+**Migrating an already-used deployment:** Before attaching the volume, stop writes and use Railway SSH to create a SQLite online backup of the current `relay.db`, then download it. Mount `/data`, restore the backup to `/data/relay.db`, and only then reopen the service. Preserve the existing `ENCRYPTION_SECRET` and `TOKEN_HMAC_SECRET` so restored keys and tokens remain usable.
 
 ---
 
