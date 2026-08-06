@@ -14,8 +14,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: "3000"
       - key: ENCRYPTION_SECRET
         generateValue: true
       - key: ALLOWED_ORIGINS
