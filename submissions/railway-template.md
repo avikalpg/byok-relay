@@ -16,7 +16,7 @@
 
 The button in the README already works:
 
-```
+```text
 https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&envs=ENCRYPTION_SECRET%2CALLOWED_ORIGINS%2CAPP_SECRET%2CDB_PATH&...
 ```
 
@@ -84,7 +84,7 @@ Once published, add the template marketplace URL to:
 3. Discord `#byok-relay` — post the template link
 
 Suggested template marketplace URL format:
-```
+```text
 https://railway.app/template/byok-relay
 ```
 (exact slug assigned by Railway after publish)
@@ -96,7 +96,7 @@ https://railway.app/template/byok-relay
 SQLite writes to `DB_PATH` env var (default: `/data/relay.db`). Without a Railway volume mounted at `/data`, the database resets on every deploy — all registered users and encrypted keys are lost.
 
 **Post-deploy checklist:**
-1. Deploy completes → check `/health` returns `{"status":"ok"}`
+1. Deploy completes → check `/health` returns JSON with `"ok": true` (for example: `{"ok":true,"version":"...","providers":[...]}`)
 2. Dashboard → your service → **Volumes** → **Add Volume** → Mount Path: `/data`
 3. Redeploy (triggers once automatically after volume add, or click "Redeploy")
 4. Confirm persistence: register a test user, redeploy, verify the token still works
