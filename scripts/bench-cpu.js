@@ -21,7 +21,8 @@ const RUNS = 10000;
 const WARMUP = 500;
 
 // Derive encryption key (this is cached at startup in prod; shown here for completeness)
-const ENCRYPTION_KEY = crypto.scryptSync(ENCRYPTION_SECRET, 'byok-relay-salt', 32);
+const ENCRYPTION_SALT = crypto.randomBytes(16).toString('hex');
+const ENCRYPTION_KEY = crypto.scryptSync(ENCRYPTION_SECRET, ENCRYPTION_SALT, 32);
 
 // ── DB setup ───────────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ function encryptKey(plaintext) {
 }
 
 function decryptKey(encryptedHex, ivHex, authTagHex) {
-  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, Buffer.from(ivHex, 'hex'));
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, Buffer.from(ivHex, 'hex'), { authTagLength: 16 });
   decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
   return Buffer.concat([decipher.update(Buffer.from(encryptedHex, 'hex')), decipher.final()]).toString('utf8');
 }
