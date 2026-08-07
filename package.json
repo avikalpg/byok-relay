@@ -1,7 +1,7 @@
 {
   "name": "byok-relay",
   "version": "1.5.1",
-  "description": "BYOK relay server — stores user API keys encrypted and proxies requests to AI providers",
+  "description": "BYOK relay server \u2014 stores user API keys encrypted and proxies requests to AI providers",
   "main": "src/index.js",
   "workspaces": [
     "packages/*"
@@ -48,7 +48,10 @@
     "no-server",
     "byok-proxy-service",
     "ai-agent-integration",
-    "llm-relay-for-agents"
+    "llm-relay-for-agents",
+    "lovable",
+    "bolt",
+    "framer"
   ],
   "author": "Avikalp Gupta <avikalpgupta@gmail.com>",
   "repository": {
