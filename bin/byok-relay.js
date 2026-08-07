@@ -1,62 +1,82 @@
 #!/usr/bin/env node
-'use strict';
-
 /**
- * byok-relay CLI
+ * byok-relay CLI — Start the relay server from npx
  *
  * Usage:
- *   npx byok-relay              # start server (reads .env)
- *   npx byok-relay --help       # show help
- *   npx byok-relay --version    # print version
- *
- * Environment variables (set in .env or shell):
- *   ENCRYPTION_SECRET   required  32+ char secret for AES-256-GCM key encryption
- *   PORT                optional  default 3000
- *   APP_SECRET          optional  bearer token gate on POST /users
- *   ALLOWED_ORIGINS     optional  comma-separated CORS origins
+ *   npx byok-relay             # starts on port 3000
+ *   npx byok-relay --port 8080
+ *   npx byok-relay --help
  */
+
+'use strict';
 
 const args = process.argv.slice(2);
 
-if (args.includes('--version') || args.includes('-v')) {
-  const { version } = require('../package.json');
-  console.log(version);
-  process.exit(0);
-}
-
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`
-byok-relay — BYOK AI relay server
+byok-relay — BYOK (Bring Your Own Key) relay server for AI APIs
 
 Usage:
   npx byok-relay [options]
 
 Options:
-  --help, -h        Show this help message
-  --version, -v     Print version number
+  --port <n>    Port to listen on (default: 3000, or PORT env var)
+  --help, -h    Show this help message
+  --version     Print version
 
 Environment variables (required):
-  ENCRYPTION_SECRET   32+ character secret for AES-256-GCM key encryption
+  ENCRYPTION_SECRET   Random hex string ≥ 32 chars
                       Generate: openssl rand -hex 32
 
 Environment variables (optional):
-  PORT              Port to listen on (default: 3000)
-  APP_SECRET        Bearer token required at POST /users (gates user registration)
-  ALLOWED_ORIGINS   Comma-separated list of allowed CORS origins
-                    (default: * — lock down in production)
+  PORT                Server port (default: 3000)
+  ALLOWED_ORIGINS     Comma-separated allowed origins (default: *)
+  APP_SECRET          Bearer token required at POST /users (recommended in production)
+  DB_PATH             SQLite database file path (default: ./data/relay.db)
+  RATE_LIMIT_GLOBAL   Max requests/min per IP (default: 100)
+  RATE_LIMIT_RELAY    Max AI requests/min per token (default: 20)
 
 Quick start:
-  ENCRYPTION_SECRET=$(openssl rand -hex 32) npx byok-relay
+  export ENCRYPTION_SECRET=$(openssl rand -hex 32)
+  npx byok-relay
 
-Self-hosted with docker:
-  docker run -e ENCRYPTION_SECRET=<secret> -p 3000:3000 byok-relay
-
-Documentation:
+Docs:
   https://byokrelay.com
   https://github.com/avikalpg/byok-relay
 `);
   process.exit(0);
 }
 
-// Start the server
-require('../src/index.js');
+if (args.includes('--version')) {
+  const pkg = require('../package.json');
+  console.log(pkg.version);
+  process.exit(0);
+}
+
+// Forward --port flag to PORT env var
+const portIdx = args.indexOf('--port');
+if (portIdx !== -1) {
+  const portVal = args[portIdx + 1];
+  const portNum = Number(portVal);
+  if (!portVal || !Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+    console.error('Error: --port requires a valid port number between 1 and 65535, e.g. --port 8080');
+    process.exit(1);
+  }
+  process.env.PORT = portVal;
+}
+
+// Warn on unknown flags so typos don't go unnoticed
+const knownFlags = new Set(['--help', '-h', '--version', '--port']);
+const unknownArgs = args.filter((a, i) =>
+  a.startsWith('-') && !knownFlags.has(a) && args[i - 1] !== '--port'
+);
+if (unknownArgs.length) {
+  console.warn(`Warning: unknown option(s): ${unknownArgs.join(', ')}. Run --help for usage.`);
+}
+
+// Bootstrap the server.
+// require.main here is bin/byok-relay.js, not src/index.js, so the
+// require.main === module guard in src/index.js would not fire on its own.
+// We call startServer() explicitly to start listening.
+const { startServer } = require('../src/index.js');
+startServer();
