@@ -1,12 +1,19 @@
 [build]
 builder = "NIXPACKS"
 
+[build.buildArgs]
+NIXPACKS_NODE_VERSION = "20"
+
 [deploy]
 startCommand = "npm start"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
+
+# --- Required env vars ---
+# Set these in Railway dashboard > Variables after first deploy.
+# The deploy button pre-fills prompts; these are defaults for manual deploys.
 
 [[deploy.envVars]]
 name = "NODE_ENV"
@@ -15,3 +22,15 @@ value = "production"
 [[deploy.envVars]]
 name = "PORT"
 value = "3000"
+
+# SQLite database path — must match the Railway volume mount path below.
+# Create a volume in Railway dashboard mounted at /data; this var tells
+# byok-relay where to write relay.db so it survives deploys and restarts.
+[[deploy.envVars]]
+name = "DB_PATH"
+value = "/data/relay.db"
+
+# --- Volume ---
+# In Railway dashboard: your service > Volumes > Add Volume > Mount Path: /data
+# This persists relay.db (user tokens + encrypted keys) across redeploys.
+# Without a volume, relay.db is on the ephemeral layer and resets on deploy.
