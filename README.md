@@ -35,6 +35,36 @@ Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickst
 
 > **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
+## React hooks
+
+For React apps (Lovable, Bolt.new, Vite, Next.js, Remix), install the hooks package:
+
+```bash
+npm install @byok-relay/react
+```
+
+```jsx
+import { useChat, useStreamingChat, useByokRelay } from '@byok-relay/react';
+
+// Add BYOK chat to any React component
+const { messages, sendMessage, isLoading } = useChat({
+  appId: 'my-app',
+  provider: 'openai',  // or 'anthropic', 'groq', 'mistral', 'openrouter'
+  model: 'gpt-4o',
+});
+
+// Real-time streaming
+const { streamingContent, isStreaming } = useStreamingChat({
+  appId: 'my-app', provider: 'anthropic', model: 'claude-3-5-sonnet-20241022'
+});
+
+// Key storage UI
+const { storeKey } = useByokRelay({ appId: 'my-app' });
+await storeKey('openai', userEnteredKey);
+```
+
+See [`packages/react`](./packages/react/README.md) for full API docs.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
