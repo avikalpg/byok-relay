@@ -7,7 +7,9 @@ description: "OpenAI-compatible LLM gateway for any client-side application (bro
 
 ## What this skill does
 
-This skill helps you integrate **byok-relay** - an OpenAI-compatible LLM gateway for any client-side application (browser, mobile, extensions, Electron, smart TV, and more) that handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
+This skill helps you integrate **byok-relay** — an OpenAI-compatible LLM gateway for any client-side application (browser, mobile, extensions, Electron, smart TV, and more) that handles CORS, encrypts API keys, and supports multiple providers through a single relay endpoint.
+
+**Zero backend required.** Frontend-only apps connect directly to the managed relay at `https://relay.byokrelay.com`. No cloning, no server setup, no environment variables on your side.
 
 Use this skill whenever:
 - A user wants to call OpenAI, Anthropic, Gemini, Groq, Mistral, or other LLMs from a client-side app (browser, mobile app, VS Code extension, browser extension, Electron app, smart TV app, etc.)
@@ -32,29 +34,34 @@ Browser apps can't call AI APIs directly:
 
 **byok-relay** is a single relay that handles all of this: OpenAI-compatible endpoint, CORS-safe, multi-provider, with optional BYOK so users (or their organization) supply their own credentials and the developer pays nothing for inference.
 
-### Two BYOK patterns - both supported
+### Two BYOK patterns — both supported
 
 **Individuals / prosumers:** Each user registers their own personal API key. Common for developer tools, research UIs, AI power-user products.
 
-**Teams / B2B (company-managed key):** A company admin registers one shared company API key via `POST /keys/:provider` (e.g. `/keys/openai`). In the current implementation, keys are stored per relay-token (user); to share a key across team members, the admin can share their relay token or register the same company key under each member's account. Org-level key sharing (one stored key → multiple relay tokens) is on the roadmap. The developer doesn't touch the key — it belongs to the customer's organization.
+**Teams / B2B (company-managed key):** Keys are currently scoped per relay token. A company admin can register the same company API key via `POST /keys/:provider` (e.g. `/keys/openai`) under each member's relay token, or implement an explicit org-scoped design for one stored key serving multiple relay tokens. Do not share a relay token across team members: it shares all saved keys with every holder and is not a supported team feature. The developer doesn't touch the key — it belongs to the customer's organization.
 
-## Setup - choose your path
+## Setup — choose your path
 
-### Option A: Use the managed relay (recommended for frontend-only apps)
+### Option A: Use the managed relay (zero backend, recommended for client-side apps)
 
-**If you are building a frontend-only, browser-only, or client-side-only application (Lovable, Bolt, Replit, plain HTML, Vite, React without a backend, mobile app, extension), use the hosted relay directly. No cloning, no server setup needed.**
+**If you are building a frontend-only, browser-only, or client-side-only application (Lovable, Bolt, Replit, plain HTML, Vite, React without a backend, mobile app, extension) — this is your path. You need exactly 0 lines of server code.**
 
 ```javascript
 const RELAY_URL = 'https://relay.byokrelay.com';
 ```
 
-That's the only configuration needed. Skip to the Integration section below.
+That is the only configuration step on your side. The managed relay:
+- accepts requests from any origin (no domain registration required)
+- handles key encryption, storage, and CORS for you
+- is free for development and low-volume use
 
-The managed relay accepts requests from any origin (`ALLOWED_ORIGINS=*`), so no domain registration is required.
+Skip directly to the **Integration** section below.
 
-### Option B: Self-host the relay (if you have a backend or want full control)
+> **Note:** The managed relay is best for development and low-stakes production. For sensitive or high-volume production use, self-host so you control the encryption key.
 
-Use this if you want to run your own relay on your infrastructure (VPS, Railway, Fly.io, etc.).
+### Option B: Self-host the relay (if you want full control or run your own infrastructure)
+
+Use this if you want to run your own relay on a VPS, Railway, Fly.io, etc.
 
 ```bash
 git clone https://github.com/avikalpg/byok-relay.git
@@ -66,7 +73,13 @@ npm start
 
 For production: see the systemd + nginx setup in the README.
 
-One-click deploy: [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/avikalpg/byok-relay)
+**Docker (quickest self-hosted path):**
+```bash
+git clone https://github.com/avikalpg/byok-relay.git
+cd byok-relay
+cp .env.example .env          # edit ENCRYPTION_SECRET and ALLOWED_ORIGINS
+docker compose up -d
+```
 
 ## Integration (client-side code)
 
@@ -75,24 +88,34 @@ Use `RELAY_URL = 'https://relay.byokrelay.com'` for the managed relay, or your o
 ### Step 1: Register a user and get a relay token
 
 ```javascript
+function relayTokenStorageKey(relayUrl, appId) {
+  const normalizedRelayUrl = new URL(relayUrl).origin;
+  return `byok-relay:relay-token:${normalizedRelayUrl}:${appId}`;
+}
+
 async function getRelayToken(relayUrl, appId) {
+  // Keep bearer tokens scoped to one relay/app. Do not reuse one global
+  // `relay_token` key across products, tenants, or relay URLs.
+  const storageKey = relayTokenStorageKey(relayUrl, appId);
+  const stored = localStorage.getItem(storageKey);
+  if (stored) return stored;                          // reuse across page loads
   const res = await fetch(`${relayUrl}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: appId })
   });
   const { token } = await res.json();
-  localStorage.setItem('relay_token', token);
+  localStorage.setItem(storageKey, token);
   return token;
 }
 ```
 
-### Step 2: Let user store their API key
+### Step 2: Let the user store their API key
 
 ```javascript
 async function storeApiKey(relayUrl, token, provider, apiKey) {
   // provider: 'openai' | 'anthropic' | 'google' | 'groq' | 'mistral' | 'openrouter'
-  await fetch(`${relayUrl}/keys/${provider}`, {
+  const res = await fetch(`${relayUrl}/keys/${provider}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -100,6 +123,7 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
     },
     body: JSON.stringify({ key: apiKey })
   });
+  return res.ok;
 }
 ```
 
@@ -120,7 +144,7 @@ async function chat(relayUrl, token, messages) {
       stream: true
     })
   });
-  return res; // SSE stream, handle with EventSource or manual ReadableStream
+  return res; // SSE stream — handle with EventSource or ReadableStream
 }
 
 // Anthropic via relay
@@ -142,6 +166,117 @@ async function claudeChat(relayUrl, token, messages) {
   return res;
 }
 ```
+
+## Generating the API key input UI
+
+When integrating byok-relay, always generate a styled API key input component that matches the app's existing design system. This is a required part of the integration — the relay is useless without a UI for users to enter their keys.
+
+**What to generate:**
+- A settings panel or modal with a password-type `<input>` for the API key
+- A provider selector (dropdown or radio buttons) if the app supports multiple providers
+- A "Save key" button that calls `storeApiKey()` and shows feedback (success / error)
+- A "Key saved ✓" indicator when a key is already stored (call `GET /keys` to check)
+- A "Remove key" action for key deletion
+
+**Design system detection — use the one already in the project:**
+- Tailwind CSS → use `bg-gray-50`, `border`, `rounded-lg`, `px-4 py-2`, etc.
+- shadcn/ui → use `<Input>`, `<Button>`, `<Card>` from `@/components/ui`
+- MUI → use `<TextField>`, `<Button variant="contained">`, `<Paper>`
+- Plain CSS / no framework → write minimal scoped styles inline
+
+**Minimal example (plain HTML / Tailwind):**
+```html
+<div class="rounded-lg border bg-gray-50 p-4 space-y-3">
+  <h3 class="font-medium text-sm text-gray-700">Your API key</h3>
+  <div class="flex gap-2">
+    <input
+      id="api-key-input"
+      type="password"
+      placeholder="sk-..."
+      class="flex-1 rounded border px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+    />
+    <button
+      onclick="handleSaveKey()"
+      class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+    >
+      Save
+    </button>
+  </div>
+  <p id="key-status" class="text-xs text-gray-500 hidden"></p>
+</div>
+
+<script>
+async function handleSaveKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  const status = document.getElementById('key-status');
+  if (!key) return;
+  const token = await getRelayToken(RELAY_URL, 'my-app');
+  const ok = await storeApiKey(RELAY_URL, token, 'openai', key);
+  status.textContent = ok ? '✓ Key saved — your requests will now use your own API credits.' : '✗ Failed to save key. Check the format and try again.';
+  status.className = ok ? 'text-xs text-green-600' : 'text-xs text-red-600';
+  status.classList.remove('hidden');
+}
+</script>
+```
+
+Always place this component on a settings page, in a modal triggered by a "Connect API key" button, or in the app's onboarding flow.
+
+## Verify your setup
+
+After wiring up the integration, run this quick smoke test (Node.js or browser console) to confirm the relay is reachable and the stored key works before closing the PR:
+
+```javascript
+// Paste into browser console or run with node --input-type=module
+const RELAY_URL = 'https://relay.byokrelay.com'; // or your self-hosted URL
+const APP_ID    = 'smoke-test';
+
+async function smokeTest() {
+  // 1. Health check
+  const healthRes = await fetch(`${RELAY_URL}/health`);
+  if (!healthRes.ok) throw new Error(`Health check failed: ${healthRes.status} ${healthRes.statusText}`);
+  const health = await healthRes.json();
+  if (health.ok !== true) throw new Error(`Health check failed: ${JSON.stringify(health)}`);
+  console.log('✓ Health:', health);
+
+  // 2. Register
+  const usersRes = await fetch(`${RELAY_URL}/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: APP_ID })
+  });
+  if (!usersRes.ok) throw new Error(`Registration failed: ${usersRes.status} ${usersRes.statusText}`);
+  const { token } = await usersRes.json();
+  if (!token) throw new Error('Registration failed — no token returned');
+  console.log('✓ Token obtained');
+
+  // 3. List providers (should be empty before storing a key)
+  const keysRes = await fetch(`${RELAY_URL}/keys`, {
+    headers: { 'x-relay-token': token }
+  });
+  if (!keysRes.ok) throw new Error(`Keys list failed: ${keysRes.status} ${keysRes.statusText}`);
+  const { providers } = await keysRes.json();
+  if (!Array.isArray(providers)) throw new Error(`Keys list returned invalid providers: ${JSON.stringify(providers)}`);
+  if (providers.length !== 0) throw new Error(`Newly registered user unexpectedly has stored providers: ${providers.join(', ')}`);
+  console.log('✓ Stored providers:', providers);
+
+  // 4. (Optional) Store a real key and test a relay call
+  // await storeApiKey(RELAY_URL, token, 'openai', 'sk-YOUR-KEY');
+  // const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
+  //   method: 'POST',
+  //   headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
+  //   body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'ping' }] })
+  // });
+  // if (!res.ok) throw new Error(`Relay call failed: ${res.status} ${res.statusText}`);
+  // const data = await res.json();
+  // console.log('✓ Relay response:', data.choices?.[0]?.message?.content);
+
+  console.log('✅ Smoke test passed');
+}
+
+smokeTest().catch(console.error);
+```
+
+Run this before shipping the integration. If health check fails → relay URL is wrong. If token is missing → check `app_id` and CORS. If a relay call errors → verify the key was stored correctly.
 
 ## Supported providers
 
@@ -168,3 +303,7 @@ async function claudeChat(relayUrl, token, messages) {
 
 - You need advanced model routing, automatic fallbacks, or per-request spend analytics → consider adding those on top of byok-relay or using a dedicated routing layer
 - You are building a pure server-side application with no client-side component and no need for BYOK → use provider SDKs directly
+
+---
+
+If this skill saved you time, consider [⭐ starring the repo](https://github.com/avikalpg/byok-relay) — it helps other developers find it.
