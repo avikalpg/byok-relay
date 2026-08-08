@@ -270,6 +270,12 @@ function requireToken(req, res, next) {
   next();
 }
 
+// ── Attestation metadata (resolved once at startup) ────────────────────────
+const { version: PKG_VERSION } = require('../package.json');
+const REPO_URL = 'https://github.com/avikalpg/byok-relay';
+const COMMIT_SHA = process.env.COMMIT_SHA || null;
+const BUILD_TIME = process.env.BUILD_TIME || new Date().toISOString();
+
 function logRelayRequest(req, details) {
   const { provider, model, status, latency_ms, streaming } = details;
 
@@ -521,7 +527,6 @@ async function forwardRelayRequest({
 // Non-critical warnings appear in the `warnings` array but do NOT affect the
 // HTTP status so load-balancers continue routing to the instance.
 app.get('/health', deepHealthLimiter, async (req, res) => {
-  const { version } = require('../package.json');
   const checks = {};
   const warnings = [];
   let healthy = true;
@@ -583,7 +588,9 @@ app.get('/health', deepHealthLimiter, async (req, res) => {
 
   const body = {
     ok: healthy,
-    version,
+    version: PKG_VERSION,
+    commit: COMMIT_SHA,
+    buildTime: BUILD_TIME,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
     providers: SUPPORTED_PROVIDERS,
@@ -592,6 +599,26 @@ app.get('/health', deepHealthLimiter, async (req, res) => {
   };
 
   res.status(healthy ? 200 : 503).json(body);
+});
+
+/**
+ * GET /version
+ * Returns the running version, git commit SHA, build timestamp, and repo URL.
+ * Allows users of the managed relay (relay.byokrelay.com) to verify that the
+ * running code matches a specific public commit on GitHub.
+ *
+ * Compare the returned `commit` with the public source at `attestationUrl`.
+ * This URL is commit-pinned because a deployment from main may be ahead of the
+ * latest version tag and therefore may not match that release's attestation.
+ */
+app.get('/version', (req, res) => {
+  res.json({
+    version: PKG_VERSION,
+    commit: COMMIT_SHA,
+    buildTime: BUILD_TIME,
+    repoUrl: REPO_URL,
+    attestationUrl: COMMIT_SHA ? `${REPO_URL}/tree/${COMMIT_SHA}` : null,
+  });
 });
 
 /**
