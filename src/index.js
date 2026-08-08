@@ -607,10 +607,9 @@ app.get('/health', deepHealthLimiter, async (req, res) => {
  * Allows users of the managed relay (relay.byokrelay.com) to verify that the
  * running code matches a specific public commit on GitHub.
  *
- * Compare the returned `commit` with the tagged release at:
- *   https://github.com/avikalpg/byok-relay/releases
- * The `attestationUrl` provides a direct link to the `attestation.json` asset
- * containing file SHA-256 hashes for verification.
+ * Compare the returned `commit` with the public source at `attestationUrl`.
+ * This URL is commit-pinned because a deployment from main may be ahead of the
+ * latest version tag and therefore may not match that release's attestation.
  */
 app.get('/version', (req, res) => {
   res.json({
@@ -618,9 +617,7 @@ app.get('/version', (req, res) => {
     commit: COMMIT_SHA,
     buildTime: BUILD_TIME,
     repoUrl: REPO_URL,
-    attestationUrl: COMMIT_SHA
-      ? `https://github.com/avikalpg/byok-relay/releases/download/v${PKG_VERSION}/attestation.json`
-      : null,
+    attestationUrl: COMMIT_SHA ? `${REPO_URL}/tree/${COMMIT_SHA}` : null,
   });
 });
 
