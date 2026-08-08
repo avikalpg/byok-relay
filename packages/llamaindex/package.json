@@ -1,0 +1,50 @@
+{
+  "name": "@byok-relay/llamaindex",
+  "version": "1.0.0",
+  "description": "LlamaIndex.TS custom LLM and embedding adapter for BYOK AI relay — ByokRelayLLM, ByokRelayEmbedding, ByokRelayClient",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/llamaindex.test.js"
+  },
+  "keywords": [
+    "llamaindex",
+    "llamaindexts",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "embeddings",
+    "rag",
+    "agents",
+    "vector-store",
+    "tool-calling",
+    "frontend",
+    "no-backend",
+    "self-hosted"
+  ],
+  "peerDependencies": {
+    "llamaindex": ">=0.5.0"
+  },
+  "peerDependenciesMeta": {
+    "llamaindex": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/llamaindex"
+  },
+  "homepage": "https://byokrelay.com"
+}
