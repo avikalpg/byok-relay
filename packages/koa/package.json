@@ -1,0 +1,52 @@
+{
+  "name": "@byok-relay/koa",
+  "version": "1.0.0",
+  "description": "Koa middleware and router factory for BYOK AI relay — proxy AI provider requests server-side while users bring their own API keys",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/koa.test.js"
+  },
+  "keywords": [
+    "koa",
+    "koa2",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "middleware",
+    "router",
+    "node",
+    "frontend",
+    "no-backend",
+    "self-hosted"
+  ],
+  "peerDependencies": {
+    "koa": ">=2.0.0",
+    "@koa/router": ">=12.0.0"
+  },
+  "peerDependenciesMeta": {
+    "koa": {
+      "optional": true
+    },
+    "@koa/router": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/koa"
+  },
+  "homepage": "https://byokrelay.com"
+}

@@ -35,6 +35,49 @@ Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickst
 
 > **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
+## Koa Middleware (`@byok-relay/koa`)
+
+```bash
+npm install @byok-relay/koa
+```
+
+```js
+const Koa = require('koa');
+const { createByokRelayMiddleware } = require('@byok-relay/koa');
+const app = new Koa();
+app.use(createByokRelayMiddleware()); // intercepts /relay/*
+app.listen(3000);
+```
+
+Also: `createRelayRouter` for `@koa/router` integration + `ByokRelayClient` for browser/server usage.
+
+## tRPC Integration (`@byok-relay/trpc`)
+
+Type-safe AI procedures with user-owned keys. `RELAY_URL` stays in `process.env` — the browser only calls your tRPC server.
+
+```bash
+npm install @byok-relay/trpc @trpc/server
+```
+
+```js
+// trpc/router.js
+const { initTRPC } = require('@trpc/server');
+const { createByokRelayContext, createByokRelayRouter } = require('@byok-relay/trpc');
+const t = initTRPC.context().create();
+const appRouter = t.router({ relay: createByokRelayRouter(t) });
+module.exports = { appRouter };
+
+// app/api/trpc/[trpc]/route.js  (Next.js App Router)
+const { createByokRelayFetchHandler } = require('@byok-relay/trpc');
+const { appRouter } = require('../../../../trpc/router');
+const handler = createByokRelayFetchHandler({ router: appRouter });
+module.exports = { GET: handler, POST: handler };
+```
+
+Client: `trpc.relay.chat.mutate({ model: 'openai/gpt-4o', messages })` returns `{ reply }`.
+Procedures: health · register · storeKey · listKeys · deleteKey · rotateKey · chat · stats · models.
+`createRelayProcedure(t.procedure)` injects `ctx.relay` into any individual procedure.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
