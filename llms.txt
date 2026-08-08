@@ -69,6 +69,37 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 - CORS locked to allowed origins
 - HTTPS required in production
 
+## Vue Composables (@byok-relay/vue)
+
+For Vue 3 and Nuxt apps — install with:
+
+```bash
+npm install @byok-relay/vue
+```
+
+Four composables — all return readonly reactive refs:
+
+- `useByokRelay({ appId })` — manages relay token and encrypted provider key storage. Returns `{ token, isRegistered, register, storeKey, deleteKey, listProviders, logout, error }`.
+- `useChat({ token, provider, model, systemPrompt })` — stateful non-streaming chat. Returns `{ messages, isLoading, sendMessage, clearMessages, error }`.
+- `useStreamingChat({ token, provider, model, systemPrompt })` — SSE streaming chat. Returns `{ messages, streamingContent, isStreaming, sendMessage, stopStreaming, clearMessages, error }`. AbortController abort on `stopStreaming()` and on component unmount.
+- `useRelayHealth({ intervalMs, deep, provider })` — polls `/health`. Returns `{ isHealthy, status, isLoading, refetch, error }`.
+
+```vue
+<script setup>
+import { useByokRelay, useStreamingChat } from '@byok-relay/vue'
+const relay = useByokRelay({ appId: 'my-app' })
+const chat  = useStreamingChat({ token: relay.token, provider: 'openai', model: 'gpt-4o-mini' })
+</script>
+<template>
+  <div v-for="m in chat.messages.value">{{ m.role }}: {{ m.content }}</div>
+  <p v-if="chat.isStreaming.value">{{ chat.streamingContent.value }}</p>
+  <input @keydown.enter="e => chat.sendMessage(e.target.value)" />
+</template>
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/vue
+Full docs: https://github.com/avikalpg/byok-relay/tree/main/packages/vue
+
 ## License
 
 Apache 2.0 — free to self-host or build on top of.
@@ -78,3 +109,7 @@ Apache 2.0 — free to self-host or build on top of.
 - GitHub: https://github.com/avikalpg/byok-relay
 - Hosted relay: https://relay.byokrelay.com
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
+- @byok-relay/vue (Vue 3 composables): https://www.npmjs.com/package/@byok-relay/vue
+- @byok-relay/react (React hooks): https://www.npmjs.com/package/@byok-relay/react
+- @byok-relay/client (framework-agnostic): https://www.npmjs.com/package/@byok-relay/client
+- @byok-relay/mcp (Claude Desktop/Code MCP): https://www.npmjs.com/package/@byok-relay/mcp

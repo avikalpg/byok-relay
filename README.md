@@ -35,6 +35,38 @@ Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickst
 
 > **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
+## Vue composables
+
+For Vue 3 apps (Nuxt, Vite+Vue, Quasar), install the composables package:
+
+```bash
+npm install @byok-relay/vue
+```
+
+```vue
+<script setup>
+import { useByokRelay, useStreamingChat } from '@byok-relay/vue'
+
+const relay = useByokRelay({ appId: 'my-app' })
+const chat  = useStreamingChat({
+  token: relay.token,
+  provider: 'openai',  // or 'anthropic', 'groq', 'mistral', 'openrouter'
+  model: 'gpt-4o-mini',
+})
+</script>
+
+<template>
+  <div v-for="m in chat.messages.value" :key="m.role">{{ m.role }}: {{ m.content }}</div>
+  <p v-if="chat.isStreaming.value" style="opacity:.6">{{ chat.streamingContent.value }}</p>
+  <input @keydown.enter="e => chat.sendMessage(e.target.value)" />
+  <button v-if="chat.isStreaming.value" @click="chat.stopStreaming()">Stop</button>
+</template>
+```
+
+Four composables: `useByokRelay` (token + key storage), `useChat` (stateful chat), `useStreamingChat` (SSE streaming with `stopStreaming()`), `useRelayHealth` (polls `/health`).
+
+See [`packages/vue`](./packages/vue/README.md) for full API docs.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
