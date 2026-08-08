@@ -1,0 +1,49 @@
+{
+  "name": "@byok-relay/sveltekit",
+  "version": "1.0.0",
+  "description": "SvelteKit handle hook, +server.js route handlers, and ByokRelayClient for BYOK AI relay — proxy AI provider requests server-side while users bring their own API keys",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/sveltekit.test.js"
+  },
+  "keywords": [
+    "sveltekit",
+    "svelte",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "hooks",
+    "server-route",
+    "edge",
+    "node",
+    "frontend",
+    "no-backend",
+    "self-hosted"
+  ],
+  "peerDependencies": {
+    "@sveltejs/kit": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@sveltejs/kit": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/sveltekit"
+  },
+  "homepage": "https://byokrelay.com"
+}
