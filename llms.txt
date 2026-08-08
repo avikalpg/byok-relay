@@ -73,6 +73,41 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 
 Apache 2.0 — free to self-host or build on top of.
 
+## SolidJS Signals (`@byok-relay/solid`)
+
+For SolidJS or SolidStart apps, install the signals package:
+
+```bash
+npm install @byok-relay/solid
+```
+
+Four reactive stores with SolidJS's `[getter, setter]` signal contract:
+- `createByokRelayStore(opts)` — token registration + key CRUD + logout (localStorage persistence, SolidStart SSR-safe)
+- `createChatStore(opts)` — stateful message list, non-streaming, openai/anthropic/groq/mistral/openrouter
+- `createStreamingChatStore(opts)` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent()` live signal
+- `createRelayHealthStore(opts)` — polls /health, refetch(), destroy() for onCleanup
+
+npm: https://www.npmjs.com/package/@byok-relay/solid
+
+## Angular Injectable Services (`@byok-relay/angular`)
+
+For Angular 14+ or Analog apps, install the Angular services package:
+
+```bash
+npm install @byok-relay/angular
+```
+
+Four Angular injectable services with optional Angular 16+ signal reactivity:
+- `ByokRelayService` — token registration + key CRUD + logout (localStorage persistence, Analog SSR-safe)
+- `ChatService` — stateful message list, non-streaming, openai/anthropic/groq/mistral/openrouter
+- `StreamingChatService` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent()` live signal
+- `RelayHealthService` — polls /health, `destroy()` for ngOnDestroy cleanup
+
+Setup: `provideByokRelay({ relayUrl: 'https://relay.byokrelay.com' })` in `app.config.ts` providers.
+Services use Angular `signal()` when @angular/core 16+ is detected; plain getter shim otherwise.
+
+npm: https://www.npmjs.com/package/@byok-relay/angular
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
