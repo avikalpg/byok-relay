@@ -1,0 +1,45 @@
+{
+  "name": "@byok-relay/openai",
+  "version": "1.0.0",
+  "description": "Drop-in OpenAI SDK-compatible client for byok-relay — ByokRelayOpenAI mirrors the openai npm package interface, routing requests through byok-relay so users' API keys are stored encrypted in the relay, never in your app",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/openai.test.js"
+  },
+  "keywords": [
+    "openai",
+    "openai-sdk",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "anthropic",
+    "groq",
+    "mistral",
+    "relay",
+    "byok-relay",
+    "chat-completions",
+    "embeddings",
+    "drop-in",
+    "compatible",
+    "frontend",
+    "no-backend",
+    "self-hosted",
+    "api-key",
+    "streaming",
+    "sse"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/openai"
+  },
+  "homepage": "https://byokrelay.com"
+}
