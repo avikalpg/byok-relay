@@ -609,7 +609,8 @@ app.get('/health', deepHealthLimiter, async (req, res) => {
  *
  * Compare the returned `commit` with the tagged release at:
  *   https://github.com/avikalpg/byok-relay/releases
- * or verify file hashes in the release attestation asset.
+ * The `attestationUrl` provides a direct link to the `attestation.json` asset
+ * containing file SHA-256 hashes for verification.
  */
 app.get('/version', (req, res) => {
   res.json({
@@ -618,7 +619,7 @@ app.get('/version', (req, res) => {
     buildTime: BUILD_TIME,
     repoUrl: REPO_URL,
     attestationUrl: COMMIT_SHA
-      ? `${REPO_URL}/releases/tag/v${PKG_VERSION}`
+      ? `https://github.com/avikalpg/byok-relay/releases/download/v${PKG_VERSION}/attestation.json`
       : null,
   });
 });
