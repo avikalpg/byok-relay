@@ -41,7 +41,7 @@ Suggested 5-image sequence:
 
 ## Description (shown in Gallery tab, ~260 chars for subtitle)
 
-> byok-relay is a self-hostable, zero-backend relay that lets your AI app's users bring their own API keys — no CORS, no key storage on your server, no vendor lock-in. Works with Lovable, Bolt, Cursor, plain Vite, and any frontend that talks HTTP.
+> byok-relay is a self-hostable, zero-backend relay that lets your AI app's users bring their own API keys — no CORS, no keys in frontend code, no vendor lock-in. Keys are encrypted at rest on the relay. Works with Lovable, Bolt, Cursor, plain Vite, and any frontend that talks HTTP.
 
 ---
 
@@ -59,9 +59,9 @@ byok-relay is that missing piece:
 - **Self-hostable in one command** — `npx byok-relay` or `docker compose up`
 - **All the major providers** — OpenAI, Anthropic, Gemini, Mistral, Groq, ElevenLabs, Deepgram, HuggingFace
 - **Streaming, multimodal, binary** — vision requests, audio, the works; no re-serialization
-- **No vendor lock-in** — open-source MIT, your data stays on your infrastructure
+- **No vendor lock-in** — open-source Apache 2.0, your data stays on your infrastructure
 
-The managed relay at byokrelay.com is free for prototypes. For production, self-host in one command.
+The managed relay at https://relay.byokrelay.com is free for prototypes. For production, self-host in one command.
 
 Happy to answer any questions about the architecture, the BYOK model, or why this approach beats "just add a serverless function." AMA!
 
@@ -128,11 +128,11 @@ A: OpenRouter and LiteLLM are vendor-managed proxies — users pay through the v
 **Q: Is the managed relay safe to use?**
 A: For prototypes and demos, yes. For production with paying users, self-host — it's one command. The managed relay is transparent about what transits (prompts, not keys) in the README.
 
-**Q: What happens if byokrelay.com goes down?**
+**Q: What happens if relay.byokrelay.com goes down?**
 A: Nothing changes for self-hosted users. For managed-relay users, switch the relay URL to your own instance. Zero vendor lock-in.
 
 **Q: Does this work with Vercel / serverless?**
 A: byok-relay uses SQLite which is ephemeral on Vercel. Use Railway (recommended) or Render for production self-hosting. Vercel is fine for demos.
 
-**Q: Why MIT and not AGPL / source-available?**
+**Q: Why Apache 2.0 and not AGPL / source-available?**
 A: Maximum adoption. We want this in as many apps as possible. Commercial use is welcome.

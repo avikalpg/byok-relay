@@ -43,9 +43,9 @@ npx byok-relay
 **Performance:** relay adds ~0.014ms median overhead (p99 = 0.041ms). Measured, not estimated — benchmark script in `scripts/bench-cpu.js`.
 
 Repo: https://github.com/avikalpg/byok-relay
-Managed relay (for testing): https://byokrelay.com
+Managed relay (for testing): https://relay.byokrelay.com
 
-It's MIT. Happy to answer questions or take PRs.
+It's Apache 2.0. Happy to answer questions or take PRs.
 
 ---
 
@@ -64,7 +64,7 @@ If you're shipping a frontend-only app (Lovable, Bolt.new, Cursor, plain Vite/Re
 I built **byok-relay** to solve this. It's a tiny self-hostable relay that:
 
 1. **User enters their own API key** in your app's settings UI
-2. Key is **AES-256-GCM encrypted**, stored on your server (or on byokrelay.com for prototypes)
+2. Key is **AES-256-GCM encrypted**, stored on your self-hosted relay (or on relay.byokrelay.com for prototypes)
 3. Your app calls `/relay/openai/...` instead of `api.openai.com` — relay decrypts key, forwards request, streams response
 
 **Frontend integration (5 minutes):**
@@ -72,8 +72,10 @@ I built **byok-relay** to solve this. It's a tiny self-hostable relay that:
 ```js
 import { createClient } from '@byok-relay/client';
 
-const relay = createClient({ relayUrl: 'https://byokrelay.com' });
-await relay.register({ appId: 'my-app' });
+const relay = createClient({
+  relayUrl: 'https://relay.byokrelay.com',
+  appId: 'my-app'
+});
 await relay.storeKey('openai', userEnteredKey);
 
 // Now call OpenAI through the relay — streaming works
@@ -89,7 +91,7 @@ Works for OpenAI, Anthropic, Gemini, ElevenLabs, Deepgram, HuggingFace — anyth
 **Integration guides** for Lovable, Bolt.new, Framer, Next.js, plain Vite are in `INTEGRATIONS.md`:
 https://github.com/avikalpg/byok-relay/blob/main/INTEGRATIONS.md
 
-Self-host with docker compose or `npx byok-relay`. MIT license.
+Self-host with docker compose or `npx byok-relay`. Apache 2.0 license.
 
 https://github.com/avikalpg/byok-relay
 
@@ -112,7 +114,7 @@ One pattern I've seen working well for solo builders: instead of marking up AI A
 
 The catch: you can't do BYOK from a frontend app. You need a relay to handle CORS and to store the key securely without exposing it in the bundle.
 
-I built **byok-relay** to be that relay. It's self-hostable, MIT-licensed, and takes about 5 minutes to integrate.
+I built **byok-relay** to be that relay. It's self-hostable, Apache-2.0-licensed, and takes about 5 minutes to integrate.
 
 **The unit economics shift:**
 
@@ -126,7 +128,7 @@ I built **byok-relay** to be that relay. It's self-hostable, MIT-licensed, and t
 Works best when your users are technical enough to have an API key (or willing to get one in 5 min). Not a fit for consumer apps where users don't know what an API key is.
 
 Repo: https://github.com/avikalpg/byok-relay
-Demo / managed relay: https://byokrelay.com
+Demo / managed relay: https://relay.byokrelay.com
 
 Happy to discuss the model — curious if others have tried BYOK as a revenue strategy and how it worked.
 
@@ -142,11 +144,11 @@ byok-relay lets frontend-only apps (Lovable, Bolt.new, Cursor, plain Vite/React)
 
 The model: users enter their own OpenAI / Anthropic / Gemini key in your app's settings. The relay encrypts it (AES-256-GCM) and stores it in a local SQLite DB. Your frontend calls the relay instead of the AI provider directly — relay decrypts the key per-request, forwards the call, pipes back the response (including streaming and binary).
 
-The managed relay at byokrelay.com is free for prototypes. For production: `npx byok-relay` or `docker compose up`.
+The managed relay at relay.byokrelay.com is free for prototypes. For production: `npx byok-relay` or `docker compose up`.
 
 Supports: OpenAI, Anthropic, Google Gemini, Mistral, Groq, Together AI, Perplexity, ElevenLabs, Deepgram, HuggingFace. Streaming SSE + binary pass-through (audio, video). Per-user stats at `GET /stats`. Redis-backed rate limiting for multi-process.
 
-Source: https://github.com/avikalpg/byok-relay (MIT)
+Source: https://github.com/avikalpg/byok-relay (Apache 2.0)
 
 ---
 
@@ -156,11 +158,11 @@ Source: https://github.com/avikalpg/byok-relay (MIT)
 Built a CORS-safe relay so your Lovable apps can let users bring their own OpenAI/Anthropic key.
 
 No backend needed — just point your app at the relay URL:
-• Managed (free for prototypes): https://byokrelay.com
+• Managed (free for prototypes): https://relay.byokrelay.com
 • Self-host: npx byok-relay
 
 INTEGRATIONS.md has a copy-paste Lovable integration guide:
 https://github.com/avikalpg/byok-relay/blob/main/INTEGRATIONS.md
 
-MIT, open source. Happy to help integrate.
+Apache 2.0, open source. Happy to help integrate.
 ```
