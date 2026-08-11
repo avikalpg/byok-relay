@@ -35,6 +35,39 @@ Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickst
 
 > **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
+## @byok-relay/sveltekit
+
+SvelteKit `handle` hook factory, `+server.js` route handlers, and `ByokRelayClient` for full-stack SvelteKit apps. `RELAY_URL` stays in `process.env` — never shipped to the browser. Works with all adapters (`adapter-node`, `adapter-vercel`, `adapter-cloudflare`).
+
+```bash
+npm install @byok-relay/sveltekit
+```
+
+```js
+// src/hooks.server.js
+import { createByokRelayHandle } from '@byok-relay/sveltekit';
+export const handle = createByokRelayHandle();
+```
+
+Or use the route handler factory in `src/routes/relay/[...path]/+server.js`:
+
+```js
+import { createRelayRouteHandlers } from '@byok-relay/sveltekit';
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } = createRelayRouteHandlers();
+```
+
+Browser-side streaming in a Svelte component:
+
+```js
+import { ByokRelayClient } from '@byok-relay/sveltekit';
+const client = new ByokRelayClient({ relayUrl: '/relay' });
+for await (const chunk of client.streamChat({ model: 'openai/gpt-4o', messages })) {
+  content += chunk;
+}
+```
+
+Key differentiator vs `@byok-relay/svelte` (client-only stores): the `handle` hook intercepts requests server-side so `RELAY_URL` is never in the browser bundle; `ByokRelayClient` supports a cookie storage adapter for server load functions. npm: [`@byok-relay/sveltekit`](https://www.npmjs.com/package/@byok-relay/sveltekit)
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
