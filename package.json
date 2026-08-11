@@ -1,15 +1,19 @@
 {
   "name": "byok-relay",
-  "version": "1.1.0",
-  "description": "BYOK relay server — stores user API keys encrypted and proxies requests to AI providers",
+  "version": "1.5.1",
+  "description": "BYOK relay server \u2014 stores user API keys encrypted and proxies requests to AI providers",
   "main": "src/index.js",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "byok-relay": "./bin/byok-relay.js"
   },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test test/e2e/relay.test.js"
+    "test": "node --test test/e2e/relay.test.js",
+    "token-migration-status": "node scripts/token-migration-status.js"
   },
   "keywords": [
     "byok",
@@ -44,7 +48,10 @@
     "no-server",
     "byok-proxy-service",
     "ai-agent-integration",
-    "llm-relay-for-agents"
+    "llm-relay-for-agents",
+    "lovable",
+    "bolt",
+    "framer"
   ],
   "author": "Avikalp Gupta <avikalpgupta@gmail.com>",
   "repository": {
@@ -64,12 +71,18 @@
     ".env.example"
   ],
   "dependencies": {
-    "better-sqlite3": "^9.4.3",
+    "better-sqlite3": "^12.10.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.18.3",
     "express-rate-limit": "^7.2.0",
+    "helmet": "^8.2.0",
+    "ioredis": "^5.11.1",
     "node-fetch": "^2.7.0",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
+    "pino-pretty": "^13.1.3",
+    "rate-limit-redis": "^4.2.1",
     "uuid": "^9.0.1"
   },
   "engines": {
