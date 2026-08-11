@@ -29,6 +29,13 @@ const Database = require('better-sqlite3');
 const crypto = require('node:crypto');
 
 const { createMockProvider } = require('./mock-provider');
+const { isPathAllowed } = require('../../src/providers');
+
+it('allows OpenAI moderation requests as inference paths', () => {
+  assert.equal(isPathAllowed('openai', '/v1/moderations'), true);
+  assert.equal(isPathAllowed('openai-compatible', '/v1/moderations'), true);
+  assert.equal(isPathAllowed('openai', '/v1/moderations/../files'), false);
+});
 
 it('startup migration preserves keys belonging to legacy-token users', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-migration-'));
