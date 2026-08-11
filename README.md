@@ -35,6 +35,30 @@ Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickst
 
 > **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
+## LangChain.js Integration
+
+Drop `ByokRelayChatModel` into any LangChain chain, agent, or RAG pipeline. Users supply their own keys; the relay stores them AES-256-GCM encrypted.
+
+```bash
+npm install @byok-relay/langchain @langchain/core
+```
+
+```js
+import { ByokRelayChatModel, ByokRelayEmbeddings } from '@byok-relay/langchain';
+import { HumanMessage } from '@langchain/core/messages';
+
+// Chat model — works with LCEL chains, agents, tool calling
+const model = new ByokRelayChatModel({ relayUrl: process.env.RELAY_URL, modelName: 'openai/gpt-4o' });
+await model.storeKey('openai', 'sk-...');           // user supplies key via settings UI
+const result = await model.invoke([new HumanMessage('Explain BYOK.')]);
+
+// Embeddings — drop into any LangChain vector store
+const embeddings = new ByokRelayEmbeddings({ modelName: 'openai/text-embedding-3-small' });
+const vectors = await embeddings.embedDocuments(['doc1', 'doc2']);
+```
+
+Supports: streaming, tool calling (`bindTools`), LCEL pipes, ReAct agents, RAG with vector stores.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
