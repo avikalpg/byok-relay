@@ -35,6 +35,7 @@ it('allows OpenAI moderation requests as inference paths', () => {
   assert.equal(isPathAllowed('openai', '/v1/moderations'), true);
   assert.equal(isPathAllowed('openai-compatible', '/v1/moderations'), true);
   assert.equal(isPathAllowed('openai', '/v1/moderations/../files'), false);
+  assert.equal(isPathAllowed('openai-compatible', '/v1/moderations/../files'), false);
 });
 
 it('startup migration preserves keys belonging to legacy-token users', () => {
