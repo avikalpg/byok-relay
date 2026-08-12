@@ -5,6 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/byok-relay.svg)](https://www.npmjs.com/package/byok-relay)
 [![npm downloads](https://img.shields.io/npm/dm/byok-relay.svg)](https://www.npmjs.com/package/byok-relay)
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/avikalpg/byok-relay?quickstart=1)
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&envs=ENCRYPTION_SECRET%2CALLOWED_ORIGINS%2CAPP_SECRET%2CDB_PATH&ENCRYPTION_SECRETDesc=Generate%20with%3A%20openssl%20rand%20-hex%2032&ALLOWED_ORIGINSDesc=Your%20frontend%20domain%20e.g.%20https%3A%2F%2Fmy-app.vercel.app&APP_SECRETDesc=Secret%20key%20for%20user%20registration%20%E2%80%94%20generate%20with%3A%20openssl%20rand%20-hex%2032&DB_PATHDesc=SQLite%20path%20%E2%80%94%20match%20your%20Railway%20volume%20mount%20(default%3A%20%2Fdata%2Frelay.db)&DB_PATHDefault=%2Fdata%2Frelay.db)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS,APP_SECRET&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
 [![Run on Replit](https://replit.com/badge/github/avikalpg/byok-relay)](https://replit.com/github/avikalpg/byok-relay)
@@ -113,6 +114,16 @@ const text = await relay.streamChat({
 ```
 
 Works in browsers (localStorage default), Node.js (in-memory default), and any custom storage adapter. See [`packages/client/README.md`](packages/client/README.md) for full API reference.
+
+---
+
+## Try it instantly
+
+No install needed — open byok-relay in a fully configured dev environment in your browser:
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/avikalpg/byok-relay?quickstart=1)
+
+Dependencies are installed and a dev `.env` is pre-configured. Just run `npm start` and the API is live on port 3000.
 
 ---
 
