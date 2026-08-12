@@ -627,14 +627,24 @@ app.get('/version', (req, res) => {
 // AI coding agents, Postman, Insomnia, and similar tools can import these.
 const OPENAPI_JSON_PATH = path.join(__dirname, '..', 'openapi.json');
 
+function isMissingOpenApiSpec(err) {
+  return err && (
+    err.code === 'ENOENT' ||
+    (err.code === 'MODULE_NOT_FOUND' && typeof err.message === 'string' && err.message.includes(OPENAPI_JSON_PATH))
+  );
+}
+
 app.get('/openapi.json', (req, res) => {
   try {
     // Clear require cache so hot-reloads pick up spec changes in dev
     delete require.cache[OPENAPI_JSON_PATH];
     const spec = require(OPENAPI_JSON_PATH);
     res.json(spec);
-  } catch {
-    res.status(404).json({ error: 'OpenAPI spec not found' });
+  } catch (err) {
+    if (isMissingOpenApiSpec(err)) {
+      return res.status(404).json({ error: 'OpenAPI spec not found' });
+    }
+    return res.status(500).json({ error: 'Failed to load OpenAPI spec' });
   }
 });
 
@@ -649,8 +659,11 @@ app.get('/openapi.yaml', (req, res) => {
     const yamlStr = yaml.dump(spec, { lineWidth: 120, noRefs: true });
     res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
     res.send(yamlStr);
-  } catch {
-    res.status(404).json({ error: 'OpenAPI spec not found' });
+  } catch (err) {
+    if (isMissingOpenApiSpec(err)) {
+      return res.status(404).json({ error: 'OpenAPI spec not found' });
+    }
+    return res.status(500).json({ error: 'Failed to render OpenAPI spec' });
   }
 });
 

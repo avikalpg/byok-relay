@@ -66,6 +66,7 @@
     "bin/",
     "src/",
     "deploy/",
+    "openapi.json",
     "README.md",
     "LICENSE",
     ".env.example"

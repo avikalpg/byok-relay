@@ -240,7 +240,7 @@ Adding a new built-in provider is ~5 lines in `src/providers.js`.
 
 ## API
 
-> **Full OpenAPI 3.0 spec** (import into Postman, Insomnia, or any OpenAPI tool):
+> **OpenAPI 3.0 spec for health, users, keys, and per-provider relay endpoints** (import into Postman, Insomnia, or any OpenAPI tool):
 > - JSON: [openapi.json](https://relay.byokrelay.com/openapi.json)
 > - YAML: [openapi.yaml](https://relay.byokrelay.com/openapi.yaml)
 
