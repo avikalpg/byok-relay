@@ -12,29 +12,51 @@ generate_secret() {
 }
 
 ensure_encryption_secret() {
-  if grep -Eq '^ENCRYPTION_SECRET=.{32,}$' .env; then
-    return
-  fi
-
   local encryption_secret
   encryption_secret="$(generate_secret)"
   ENCRYPTION_SECRET="$encryption_secret" node <<'NODE'
 const fs = require('fs');
+const dotenv = require('dotenv');
 
 const envPath = '.env';
 const secret = process.env.ENCRYPTION_SECRET;
 let env = fs.readFileSync(envPath, 'utf8');
+const lines = env.split(/\r?\n/);
+const assignmentIndexes = [];
 
-if (/^ENCRYPTION_SECRET=.*$/m.test(env)) {
-  env = env.replace(/^ENCRYPTION_SECRET=.*$/m, `ENCRYPTION_SECRET=${secret}`);
-} else {
-  env += `${env.endsWith('\n') ? '' : '\n'}ENCRYPTION_SECRET=${secret}\n`;
+for (const [index, line] of lines.entries()) {
+  if (/^\s*(?:export\s+)?ENCRYPTION_SECRET\s*=/.test(line)) {
+    assignmentIndexes.push(index);
+  }
 }
 
-fs.writeFileSync(envPath, env);
+if (assignmentIndexes.length > 1) {
+  console.error('❌ .env has duplicate ENCRYPTION_SECRET assignments. Refusing to pick one or rotate secrets automatically. Remove duplicates and keep one 32+ character value.');
+  process.exit(1);
+}
+
+if (assignmentIndexes.length === 1) {
+  const parsed = dotenv.parse(`${lines[assignmentIndexes[0]]}\n`);
+  const existing = parsed.ENCRYPTION_SECRET ?? '';
+
+  if (existing.length >= 32) {
+    process.exit(0);
+  }
+
+  const reason = existing.length === 0
+    ? 'empty or whitespace-only'
+    : `only ${existing.length} character${existing.length === 1 ? '' : 's'} long`;
+  console.error(`❌ Existing ENCRYPTION_SECRET is ${reason}. Refusing to replace it automatically because stored keys may become undecryptable. Set a 32+ character value manually, or reset/migrate the dev data first.`);
+  process.exit(1);
+}
+
+env += `${env.endsWith('\n') ? '' : '\n'}ENCRYPTION_SECRET=${secret}\n`;
+fs.writeFileSync(envPath, env, { mode: 0o600 });
+console.log('✅ Added fresh ENCRYPTION_SECRET');
 NODE
-  echo "✅ Added fresh ENCRYPTION_SECRET"
 }
+
+umask 077
 
 if [ ! -f .env ]; then
   echo "🔧 Creating .env with dev-only defaults..."
@@ -63,6 +85,7 @@ else
   echo "ℹ️  .env already exists — checking required settings"
   ensure_encryption_secret
 fi
+chmod 600 .env
 
 echo ""
 echo "✅ byok-relay dev environment ready!"
