@@ -1,0 +1,146 @@
+name: Publish Skill Updates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'skills/byok-relay/**'
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      changelog:
+        description: 'Changelog entry'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install ClawHub CLI
+        run: npm i -g clawhub
+      
+      - name: Read current version
+        id: current_version
+        run: |
+          LATEST_TAG=$(git tag --list 'skill-v*' --sort=-v:refname | head -n 1)
+          if [ -n "$LATEST_TAG" ]; then
+            VERSION="${LATEST_TAG#skill-v}"
+          elif [ -f skills/byok-relay/VERSION ]; then
+            VERSION=$(cat skills/byok-relay/VERSION)
+          else
+            VERSION="1.0.0"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Calculate new version
+        id: new_version
+        run: |
+          CURRENT="${{ steps.current_version.outputs.version }}"
+          BUMP="${{ github.event.inputs.version_bump || 'patch' }}"
+          
+          IFS='.' read -r major minor patch <<< "$CURRENT"
+          
+          case $BUMP in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+          
+          NEW_VERSION="$major.$minor.$patch"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "📦 New version: $NEW_VERSION"
+      
+      - name: Update VERSION file
+        run: |
+          echo "${{ steps.new_version.outputs.version }}" > skills/byok-relay/VERSION
+      
+      - name: Generate changelog
+        id: changelog
+        env:
+          USER_CHANGELOG: ${{ github.event.inputs.changelog }}
+        run: |
+          # Use env var (not direct interpolation) to avoid shell injection
+          if [ -n "$USER_CHANGELOG" ]; then
+            CHANGELOG="$USER_CHANGELOG"
+          else
+            # Auto-generate from commit messages; scope to skill-specific tags only
+            LAST_TAG=$(git describe --tags --abbrev=0 --match 'skill-v*' 2>/dev/null || echo "")
+            if [ -n "$LAST_TAG" ]; then
+              CHANGELOG=$(git log "$LAST_TAG"..HEAD --oneline --no-merges -- skills/byok-relay/ | sed 's/^[a-f0-9]* /- /' | head -10)
+            else
+              CHANGELOG="Auto-publish from main branch"
+            fi
+          fi
+          # Escape newlines for GitHub output
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          echo "text=$CHANGELOG" >> $GITHUB_OUTPUT
+      
+      - name: Authenticate ClawHub
+        env:
+          CLAWHUB_API_TOKEN: ${{ secrets.CLAWHUB_API_TOKEN }}
+        run: |
+          if [ -z "$CLAWHUB_API_TOKEN" ]; then
+            echo "CLAWHUB_API_TOKEN is not configured"
+            exit 1
+          fi
+          clawhub login --token "$CLAWHUB_API_TOKEN" --no-browser
+      
+      - name: Publish to ClawHub
+        run: |
+          clawhub publish ./skills/byok-relay \
+            --slug byok-relay \
+            --name "BYOK Relay Builder" \
+            --version ${{ steps.new_version.outputs.version }} \
+            --changelog "${{ steps.changelog.outputs.text }}"
+      
+      - name: Create Git tag
+        run: |
+          git tag "skill-v${{ steps.new_version.outputs.version }}"
+          git push origin "skill-v${{ steps.new_version.outputs.version }}"
+      
+      - name: Trigger website deployment
+        env:
+          VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$VERCEL_DEPLOY_HOOK_URL" ]; then
+            echo "⏭️  Skipping Vercel deploy (VERCEL_DEPLOY_HOOK_URL not set)"
+            exit 0
+          fi
+          echo "🚀 Triggering Vercel website redeploy to sync updated skill..."
+          curl -X POST "$VERCEL_DEPLOY_HOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"ref": "main", "version": "${{ steps.new_version.outputs.version }}"}' || true
+          echo "✅ Deploy hook triggered (website will fetch latest skill on build)"
