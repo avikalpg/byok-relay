@@ -45,6 +45,10 @@ function storageRemove(key) {
   catch { /* ignore */ }
 }
 
+function tokenStorageKey(relayUrl, appId) {
+  return `byok_relay_token_${encodeURIComponent(String(relayUrl))}_${encodeURIComponent(String(appId))}`;
+}
+
 async function registerRelayToken({ relayUrl, appId, tokenKey }) {
   const existing = storageGet(tokenKey);
   if (existing) return existing;
@@ -89,7 +93,7 @@ async function registerRelayToken({ relayUrl, appId, tokenKey }) {
  * @returns {{ token, isRegistered, register, storeKey, deleteKey, listProviders, error }}
  */
 function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
-  const tokenKey = `byok_relay_token_${appId}`;
+  const tokenKey = tokenStorageKey(relayUrl, appId);
 
   const [token, setToken] = useState(() => storageGet(tokenKey));
   const [error, setError] = useState(null);
@@ -492,13 +496,21 @@ function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false, intervalMs
 
   useEffect(() => {
     const controller = new AbortController();
-    refetch({ signal: controller.signal });
-    const id = intervalMs && intervalMs > 0
-      ? setInterval(() => refetch({ signal: controller.signal }), intervalMs)
-      : null;
+    let timeoutId = null;
+    let disposed = false;
+
+    const poll = async () => {
+      await refetch({ signal: controller.signal });
+      if (!disposed && intervalMs && intervalMs > 0) {
+        timeoutId = setTimeout(poll, intervalMs);
+      }
+    };
+
+    poll();
 
     return () => {
-      if (id) clearInterval(id);
+      disposed = true;
+      if (timeoutId) clearTimeout(timeoutId);
       controller.abort();
     };
   }, [refetch, intervalMs]);
@@ -510,7 +522,7 @@ function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false, intervalMs
 
 /** Internal version of useByokRelay that exposes getToken(). */
 function _useByokRelayInternal({ relayUrl, appId }) {
-  const tokenKey = `byok_relay_token_${appId}`;
+  const tokenKey = tokenStorageKey(relayUrl, appId);
   const [token, setToken] = useState(() => storageGet(tokenKey));
   const [error, setError] = useState(null);
 
