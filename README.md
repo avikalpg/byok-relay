@@ -132,15 +132,14 @@ byok-relay ships an [MCP server](packages/mcp/README.md) so Claude Desktop, Clau
       "command": "npx",
       "args": ["-y", "@byok-relay/mcp"],
       "env": {
-        "RELAY_URL": "https://relay.byokrelay.com",
-        "RELAY_TOKEN": "<your-relay-token>"
+        "RELAY_URL": "https://relay.byokrelay.com"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop — the `byok_relay_*` tools will appear. Ask Claude to run `byok_relay_register` to get your token, then `byok_relay_store_key` to save a provider key, then `byok_relay_chat` to make relay calls.
+Restart Claude Desktop — the `byok_relay_*` tools will appear. Ask Claude to run `byok_relay_register` first. Copy the returned token into the config as `RELAY_TOKEN`, restart Claude Desktop again so the MCP server picks it up, then use `byok_relay_store_key` or `byok_relay_chat`.
 
 See [`packages/mcp/README.md`](packages/mcp/README.md) for Claude Code, Cursor, and Windsurf setup.
 
@@ -318,7 +317,7 @@ Content-Type: application/json
 
 { "app_id": "my-app" }
 ```
-→ `{ "token": "<relay-token>" }` — store in browser localStorage
+→ `{ "token": "<relay-token>" }` — store securely in client-managed storage and treat it like a password
 
 > **If `APP_SECRET` is set**, the request must include `Authorization: Bearer <secret>`:
 > ```http
@@ -686,7 +685,7 @@ HMAC-SHA256(TOKEN_HMAC_SECRET, rawToken) → tokenHash  stored in SQLite
 ### Threat model: what byok-relay does NOT protect against
 
 - **Prompt content confidentiality** — request bodies (prompts, conversation history) pass through the relay in plaintext on the way to AI providers. For production use with sensitive data, self-host on infrastructure you control.
-- **XSS in your app** — the relay token lives in your app's `localStorage`. An XSS vulnerability in *your* app can steal relay tokens. Scope tokens to IP, add CSP headers, and consider a short expiry.
+- **XSS in your app** — any browser-accessible relay token can be stolen by XSS in *your* app. Store tokens with the least exposure your app can support, add CSP headers, scope tokens to IP when possible, and consider a short expiry.
 - **Compromised `ENCRYPTION_SECRET`** — if your server environment is fully compromised, the encryption key is accessible. Mitigate with a cloud KMS (AWS KMS, GCP Cloud KMS) for higher assurance.
 - **Multi-instance SQLite concurrency** — SQLite handles concurrent reads well but bottlenecks on concurrent writes. For high-traffic multi-replica deployments, use a Postgres backend.
 

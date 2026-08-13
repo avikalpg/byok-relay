@@ -95,17 +95,18 @@ Install in Claude Desktop (`claude_desktop_config.json`):
       "command": "npx",
       "args": ["-y", "@byok-relay/mcp"],
       "env": {
-        "RELAY_URL": "https://relay.byokrelay.com",
-        "RELAY_TOKEN": "<your-relay-token>"
+        "RELAY_URL": "https://relay.byokrelay.com"
       }
     }
   }
 }
 ```
 
+Run `byok_relay_register`, add the returned token as `RELAY_TOKEN`, then restart the MCP host before using authenticated tools.
+
 Available MCP tools: `byok_relay_health`, `byok_relay_register`, `byok_relay_store_key`, `byok_relay_request`, `byok_relay_chat`, `byok_relay_stats`.
 
-See `packages/mcp/README.md` for full setup guide.
+See https://github.com/avikalpg/byok-relay/blob/main/packages/mcp/README.md for the full setup guide.
 
 ## Links
 

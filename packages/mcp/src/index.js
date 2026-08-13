@@ -13,7 +13,6 @@
  *         "args": ["-y", "@byok-relay/mcp"],
  *         "env": {
  *           "RELAY_URL": "https://relay.byokrelay.com",
- *           "RELAY_TOKEN": "<your-relay-token>",
  *           "APP_ID": "<your-app-id>"
  *         }
  *       }
@@ -44,8 +43,17 @@ async function relayFetch(path, options = {}) {
     ...(RELAY_TOKEN ? { Authorization: `Bearer ${RELAY_TOKEN}` } : {}),
     ...(options.headers || {}),
   };
-  const res = await fetch(url, { ...options, headers });
-  const text = await res.text();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
+  const { timeoutMs, ...fetchOptions } = options;
+  let res;
+  let text;
+  try {
+    res = await fetch(url, { ...fetchOptions, headers, signal: controller.signal });
+    text = await res.text();
+  } finally {
+    clearTimeout(timeout);
+  }
   let body;
   try { body = JSON.parse(text); } catch { body = text; }
   return { status: res.status, ok: res.ok, body };
@@ -123,7 +131,7 @@ const TOOLS = [
       'Use this to make any provider API call without exposing API keys to the client.',
     inputSchema: {
       type: 'object',
-      required: ['provider', 'path', 'body'],
+      required: ['provider', 'path'],
       properties: {
         provider: {
           type: 'string',
@@ -137,6 +145,11 @@ const TOOLS = [
         body: {
           type: 'object',
           description: 'Request body as a JSON object (will be forwarded verbatim).',
+        },
+        headers: {
+          type: 'object',
+          description: 'Additional relay/provider headers to forward (e.g. anthropic-version or x-relay-base-url).',
+          additionalProperties: { type: 'string' },
         },
         method: {
           type: 'string',
@@ -261,7 +274,8 @@ async function handleTool(name, args) {
       const relayPath = `/relay/${args.provider}${args.path.startsWith('/') ? args.path : '/' + args.path}`;
       const fetchOpts = {
         method,
-        ...(method !== 'GET' && args.body ? { body: JSON.stringify(args.body) } : {}),
+        ...(args.headers ? { headers: args.headers } : {}),
+        ...(method !== 'GET' && args.body != null ? { body: JSON.stringify(args.body) } : {}),
       };
       const { status, body } = await relayFetch(relayPath, fetchOpts);
       return {

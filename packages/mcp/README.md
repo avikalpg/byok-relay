@@ -29,7 +29,6 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "args": ["-y", "@byok-relay/mcp"],
       "env": {
         "RELAY_URL": "https://relay.byokrelay.com",
-        "RELAY_TOKEN": "<your-relay-token>",
         "APP_ID": "claude-desktop"
       }
     }
@@ -37,7 +36,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 }
 ```
 
-Restart Claude Desktop. The byok-relay tools will appear in the tool list.
+Restart Claude Desktop. The byok-relay tools will appear in the tool list. Use `byok_relay_register` first, copy the returned token into the config as `RELAY_TOKEN`, then restart Claude Desktop again before calling authenticated tools such as `byok_relay_store_key` or `byok_relay_chat`.
 
 ### Claude Code / Cursor / Windsurf
 
@@ -51,13 +50,14 @@ Add to your project's MCP config (`.mcp.json` or editor settings):
       "command": "npx",
       "args": ["-y", "@byok-relay/mcp"],
       "env": {
-        "RELAY_URL": "https://relay.byokrelay.com",
-        "RELAY_TOKEN": "<your-relay-token>"
+        "RELAY_URL": "https://relay.byokrelay.com"
       }
     }
   }
 }
 ```
+
+Register first, then add `RELAY_TOKEN` and restart the MCP host before calling authenticated tools.
 
 ### Self-hosted relay
 
@@ -76,9 +76,11 @@ Replace `RELAY_URL` with your own relay URL:
 
 First time? Ask the MCP server to register you:
 
-1. In Claude Desktop, ask: *"Use byok_relay_register to register me with app_id my-app"*
-2. Claude calls `byok_relay_register` and returns your `token`
-3. Copy the token and set it as `RELAY_TOKEN` in your MCP config
+1. Start the MCP server without `RELAY_TOKEN` in the config.
+2. In Claude Desktop, ask: *"Use byok_relay_register to register me with app_id my-app"*.
+3. Claude calls `byok_relay_register` and returns your `token`.
+4. Copy the token into your MCP config as `RELAY_TOKEN`.
+5. Restart Claude Desktop so later tool calls use the new token.
 
 Or register via curl:
 
