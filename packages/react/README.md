@@ -193,7 +193,7 @@ export function StreamingDemo() {
 
 ### `useRelayHealth`
 
-Polls relay `/health` to check liveness.
+Polls relay `/health` every 30 seconds by default to check liveness. Pass `intervalMs: 0` for a one-shot health fetch.
 
 ```jsx
 const {
@@ -201,7 +201,7 @@ const {
   data,      // JSON response from /health
   isLoading, // boolean
   refetch,   // () => Promise<void>
-} = useRelayHealth({ relayUrl?, deep? });
+} = useRelayHealth({ relayUrl?, deep?, intervalMs? });
 ```
 
 ---

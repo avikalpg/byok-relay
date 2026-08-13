@@ -21,7 +21,6 @@ const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const PROVIDER_PATHS = {
   openai: 'chat/completions',
   anthropic: 'messages',
-  google: 'models/{model}:generateContent',
   groq: 'chat/completions',
   mistral: 'chat/completions',
   openrouter: 'chat/completions',
@@ -67,6 +66,12 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
   const register = useCallback(async () => {
     setError(null);
     try {
+      const existing = storageGet(tokenKey);
+      if (existing) {
+        setToken(existing);
+        return existing;
+      }
+
       const res = await fetch(`${relayUrl}/users`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -88,8 +93,13 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
 
   /** Get the current token, auto-registering if needed. */
   const getToken = useCallback(async () => {
+    const stored = storageGet(tokenKey);
+    if (stored) {
+      if (stored !== token) setToken(stored);
+      return stored;
+    }
     return token || register();
-  }, [token, register]);
+  }, [token, tokenKey, register]);
 
   /**
    * Store an API key for a provider.
@@ -182,14 +192,23 @@ function useChat({
 } = {}) {
   const { getToken, error: relayError } = _useByokRelayInternal({ relayUrl, appId });
   const [messages, setMessages] = useState([]);
+  const messagesRef = useRef([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const setMessagesAndRef = useCallback((next) => {
+    const value = typeof next === 'function' ? next(messagesRef.current) : next;
+    messagesRef.current = value;
+    setMessages(value);
+    return value;
+  }, []);
+
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   const sendMessage = useCallback(async (content) => {
     setError(null);
     const userMsg = { role: 'user', content };
-    const nextMessages = [...messages, userMsg];
-    setMessages(nextMessages);
+    const nextMessages = setMessagesAndRef(prev => [...prev, userMsg]);
     setIsLoading(true);
 
     try {
@@ -231,7 +250,7 @@ function useChat({
       const data = await res.json();
       const assistantContent = _extractContent(data, provider);
       const assistantMsg = { role: 'assistant', content: assistantContent };
-      setMessages(prev => [...prev, assistantMsg]);
+      setMessagesAndRef(prev => [...prev, assistantMsg]);
       return assistantContent;
     } catch (e) {
       setError(e.message);
@@ -239,14 +258,14 @@ function useChat({
     } finally {
       setIsLoading(false);
     }
-  }, [relayUrl, appId, provider, model, systemPrompt, extraParams, messages, getToken]);
+  }, [relayUrl, appId, provider, model, systemPrompt, extraParams, getToken, setMessagesAndRef]);
 
   return {
     messages,
     sendMessage,
     isLoading,
     error: error || relayError,
-    clearMessages: () => setMessages([]),
+    clearMessages: () => setMessagesAndRef([]),
   };
 }
 
@@ -268,10 +287,20 @@ function useStreamingChat({
 } = {}) {
   const { getToken, error: relayError } = _useByokRelayInternal({ relayUrl, appId });
   const [messages, setMessages] = useState([]);
+  const messagesRef = useRef([]);
   const [streamingContent, setStreamingContent] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState(null);
   const abortRef = useRef(null);
+
+  const setMessagesAndRef = useCallback((next) => {
+    const value = typeof next === 'function' ? next(messagesRef.current) : next;
+    messagesRef.current = value;
+    setMessages(value);
+    return value;
+  }, []);
+
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   // Clean up any in-flight stream on unmount
   useEffect(() => {
@@ -285,8 +314,7 @@ function useStreamingChat({
     abortRef.current = controller;
 
     const userMsg = { role: 'user', content };
-    const nextMessages = [...messages, userMsg];
-    setMessages(nextMessages);
+    const nextMessages = setMessagesAndRef(prev => [...prev, userMsg]);
     setIsStreaming(true);
     setStreamingContent('');
 
@@ -332,30 +360,46 @@ function useStreamingChat({
       let full = '';
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = '';
+      let finished = false;
 
-      while (true) {
+      const handleSseLine = (line) => {
+        if (!line.startsWith('data: ')) return false;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') return true;
+        try {
+          const delta = _extractStreamDelta(JSON.parse(raw), provider);
+          if (delta) {
+            full += delta;
+            setStreamingContent(full);
+          }
+        } catch { /* skip malformed chunks */ }
+        return false;
+      };
+
+      while (!finished) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          buffer += decoder.decode();
+          break;
+        }
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const raw = line.slice(6).trim();
-          if (raw === '[DONE]') break;
-          try {
-            const delta = _extractStreamDelta(JSON.parse(raw), provider);
-            if (delta) {
-              full += delta;
-              setStreamingContent(full);
-            }
-          } catch { /* skip malformed chunks */ }
+          if (handleSseLine(line)) {
+            finished = true;
+            break;
+          }
         }
       }
 
+      if (!finished && buffer.trim()) handleSseLine(buffer);
+
       const assistantMsg = { role: 'assistant', content: full };
-      setMessages(prev => [...prev, assistantMsg]);
+      setMessagesAndRef(prev => [...prev, assistantMsg]);
       setStreamingContent('');
       return full;
     } catch (e) {
@@ -366,7 +410,7 @@ function useStreamingChat({
     } finally {
       setIsStreaming(false);
     }
-  }, [relayUrl, appId, provider, model, systemPrompt, extraParams, messages, getToken]);
+  }, [relayUrl, appId, provider, model, systemPrompt, extraParams, getToken, setMessagesAndRef]);
 
   const stopStreaming = useCallback(() => {
     if (abortRef.current) abortRef.current.abort();
@@ -379,7 +423,7 @@ function useStreamingChat({
     isStreaming,
     stopStreaming,
     error: error || relayError,
-    clearMessages: () => { setMessages([]); setStreamingContent(''); },
+    clearMessages: () => { setMessagesAndRef([]); setStreamingContent(''); },
   };
 }
 
@@ -391,10 +435,11 @@ function useStreamingChat({
  * @param {object} opts
  * @param {string} [opts.relayUrl]
  * @param {boolean} [opts.deep]  Run deep (upstream provider ping) check
+ * @param {number} [opts.intervalMs] Poll interval in milliseconds (default: 30000, 0 disables polling)
  *
  * @returns {{ status, data, isLoading, refetch }}
  */
-function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false } = {}) {
+function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false, intervalMs = 30000 } = {}) {
   const [data, setData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [status, setStatus] = useState(null); // 'ok' | 'error' | null
@@ -415,7 +460,12 @@ function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false } = {}) {
     }
   }, [relayUrl, deep]);
 
-  useEffect(() => { refetch(); }, [refetch]);
+  useEffect(() => {
+    refetch();
+    if (!intervalMs || intervalMs <= 0) return undefined;
+    const id = setInterval(refetch, intervalMs);
+    return () => clearInterval(id);
+  }, [refetch, intervalMs]);
 
   return { status, data, isLoading, refetch };
 }
@@ -429,6 +479,12 @@ function _useByokRelayInternal({ relayUrl, appId }) {
   const [error, setError] = useState(null);
 
   const register = useCallback(async () => {
+    const existing = storageGet(tokenKey);
+    if (existing) {
+      setToken(existing);
+      return existing;
+    }
+
     const res = await fetch(`${relayUrl}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -444,7 +500,14 @@ function _useByokRelayInternal({ relayUrl, appId }) {
     return t;
   }, [relayUrl, appId, tokenKey]);
 
-  const getToken = useCallback(async () => token || register(), [token, register]);
+  const getToken = useCallback(async () => {
+    const stored = storageGet(tokenKey);
+    if (stored) {
+      if (stored !== token) setToken(stored);
+      return stored;
+    }
+    return token || register();
+  }, [token, tokenKey, register]);
 
   return { token, getToken, error };
 }
