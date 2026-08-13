@@ -2,10 +2,10 @@
   "openapi": "3.0.3",
   "info": {
     "title": "byok-relay",
-    "description": "byok-relay is a lightweight, self-hostable relay server that lets your users bring their own AI provider API keys. Your frontend never touches an API key at build time — users enter their own key once, it is stored encrypted server-side, and every AI request goes through the relay with their key injected automatically.\n\n**How it works:**\n1. Register — call `POST /users`, get a relay token back.\n2. Store a key — user enters their provider key; call `POST /keys/{provider}`. Key is AES-256-GCM encrypted at rest.\n3. Relay — call `POST /relay/{provider}/{path}` instead of the AI provider directly. byok-relay injects the key.\n\n**Supported providers:** anthropic, openai, google, groq, openrouter, mistral, openai-compatible\n\n**Rate limits:** 100 req/min per IP globally; 20 AI requests/min per token; 10 registrations/hour per IP.\n\nSource: https://github.com/avikalpg/byok-relay",
+    "description": "byok-relay is a lightweight, self-hostable relay server that lets your users bring their own AI provider API keys. Your frontend never touches an API key at build time — users enter their own key once, it is stored encrypted server-side, and every AI request goes through the relay with their key injected automatically.\n\n**How it works:**\n1. Register — call `POST /users`, get a relay token back.\n2. Store a key — user enters their provider key; call `POST /keys/{provider}`. Key is AES-256-GCM encrypted at rest.\n3. Relay — call `POST /relay/{provider}/{path}` instead of the AI provider directly. byok-relay injects the key.\n\n**Supported providers:** anthropic, openai, google, groq, openrouter, mistral, elevenlabs, huggingface, deepgram, openai-compatible\n\n**Rate limits:** 100 req/min per IP globally; 20 AI requests/min per token; 10 registrations/hour per IP.\n\nSource: https://github.com/avikalpg/byok-relay",
     "version": "1.0.1",
     "license": {
-      "name": "MIT",
+      "name": "Apache-2.0",
       "url": "https://github.com/avikalpg/byok-relay/blob/main/LICENSE"
     },
     "contact": {
@@ -50,7 +50,7 @@
                     "providers": {
                       "type": "array",
                       "items": { "type": "string" },
-                      "example": ["anthropic","openai","google","groq","openrouter","mistral","openai-compatible"]
+                      "example": ["anthropic","openai","google","groq","openrouter","mistral","elevenlabs","huggingface","deepgram","openai-compatible"]
                     }
                   }
                 }
@@ -93,7 +93,7 @@
         "tags": ["Auth"],
         "operationId": "registerUser",
         "summary": "Register a new user",
-        "description": "Creates a user record for an app_id and returns a relay token. Store the token in localStorage — it is the credential for all key and relay operations.\n\nIf the operator has set APP_SECRET, supply `Authorization: Bearer <APP_SECRET>`. Otherwise registration is open (dev mode).\n\nRate limit: 10 registrations/hour per IP.",
+        "description": "Creates a user record for an app_id and returns a relay token. Store the token in secure, client-managed storage appropriate for your app; it is the credential for all key and relay operations.\n\nIf the operator has set APP_SECRET, supply `Authorization: Bearer <APP_SECRET>`. Otherwise registration is open (dev mode).\n\nRate limit: 10 registrations/hour per IP.",
         "security": [{ "AppSecret": [] }, {}],
         "requestBody": {
           "required": true,
@@ -310,7 +310,7 @@
               "schema": {
                 "type": "string",
                 "format": "binary",
-                "description": "Raw audio/video body for STT/TTS providers (ElevenLabs, Deepgram)"
+                "description": "Raw binary request body for supported providers that accept non-JSON payloads, such as Deepgram speech-to-text audio uploads."
               }
             }
           }
@@ -364,7 +364,7 @@
         "required": true,
         "schema": {
           "type": "string",
-          "enum": ["anthropic","openai","google","groq","openrouter","mistral","openai-compatible"]
+          "enum": ["anthropic","openai","google","groq","openrouter","mistral","elevenlabs","huggingface","deepgram","openai-compatible"]
         },
         "description": "AI provider name",
         "example": "anthropic"
@@ -377,7 +377,7 @@
         "properties": {
           "token": {
             "type": "string",
-            "description": "Relay token — store in localStorage. Treat it like a password.",
+            "description": "Relay token — store it securely and treat it like a password.",
             "example": "abc123..."
           }
         }

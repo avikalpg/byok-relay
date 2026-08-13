@@ -6,6 +6,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/byok-relay.svg)](https://www.npmjs.com/package/byok-relay)
 [![skills.sh](https://skills.sh/b/avikalpg/byok-relay)](https://skills.sh/avikalpg/byok-relay)
 [![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0-85EA2D?logo=openapiinitiative&logoColor=white)](https://relay.byokrelay.com/openapi.json)
+[![MCP Server](https://img.shields.io/badge/MCP-Claude%20Desktop-orange?logo=anthropic)](https://www.npmjs.com/package/@byok-relay/mcp)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/avikalpg/byok-relay?quickstart=1)
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&envs=ENCRYPTION_SECRET%2CALLOWED_ORIGINS%2CAPP_SECRET%2CDB_PATH&ENCRYPTION_SECRETDesc=Generate%20with%3A%20openssl%20rand%20-hex%2032&ALLOWED_ORIGINSDesc=Your%20frontend%20domain%20e.g.%20https%3A%2F%2Fmy-app.vercel.app&APP_SECRETDesc=Secret%20key%20for%20user%20registration%20%E2%80%94%20generate%20with%3A%20openssl%20rand%20-hex%2032&DB_PATHDesc=SQLite%20path%20%E2%80%94%20match%20your%20Railway%20volume%20mount%20(default%3A%20%2Fdata%2Frelay.db)&DB_PATHDefault=%2Fdata%2Frelay.db)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay&env=ENCRYPTION_SECRET,ALLOWED_ORIGINS,APP_SECRET&envDescription=ENCRYPTION_SECRET%3A%20generate%20with%20%60openssl%20rand%20-hex%2032%60.%20ALLOWED_ORIGINS%3A%20your%20frontend%20domain%20(e.g.%20https%3A%2F%2Fmy-app.vercel.app)&envLink=https%3A%2F%2Fgithub.com%2Favikalpg%2Fbyok-relay%23setup&project-name=byok-relay&repository-name=byok-relay)
@@ -115,6 +116,32 @@ const text = await relay.streamChat({
 ```
 
 Works in browsers (localStorage default), Node.js (in-memory default), and any custom storage adapter. See [`packages/client/README.md`](packages/client/README.md) for full API reference.
+
+---
+
+## Use from Claude Desktop / Claude Code (MCP)
+
+byok-relay ships an [MCP server](packages/mcp/README.md) so Claude Desktop, Claude Code, Cursor, and any MCP-compatible client can relay AI requests through users' own API keys directly from the chat interface.
+
+**Claude Desktop** — add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "byok-relay": {
+      "command": "npx",
+      "args": ["-y", "@byok-relay/mcp"],
+      "env": {
+        "RELAY_URL": "https://relay.byokrelay.com"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop — the `byok_relay_*` tools will appear. Ask Claude to run `byok_relay_register` first. Copy the returned token into the config as `RELAY_TOKEN`, restart Claude Desktop again so the MCP server picks it up, then use `byok_relay_store_key` or `byok_relay_chat`.
+
+See [`packages/mcp/README.md`](packages/mcp/README.md) for Claude Code, Cursor, and Windsurf setup.
 
 ---
 
@@ -290,7 +317,7 @@ Content-Type: application/json
 
 { "app_id": "my-app" }
 ```
-→ `{ "token": "<relay-token>" }` — store in browser localStorage
+→ `{ "token": "<relay-token>" }` — store securely in client-managed storage and treat it like a password
 
 > **If `APP_SECRET` is set**, the request must include `Authorization: Bearer <secret>`:
 > ```http
@@ -658,7 +685,7 @@ HMAC-SHA256(TOKEN_HMAC_SECRET, rawToken) → tokenHash  stored in SQLite
 ### Threat model: what byok-relay does NOT protect against
 
 - **Prompt content confidentiality** — request bodies (prompts, conversation history) pass through the relay in plaintext on the way to AI providers. For production use with sensitive data, self-host on infrastructure you control.
-- **XSS in your app** — the relay token lives in your app's `localStorage`. An XSS vulnerability in *your* app can steal relay tokens. Scope tokens to IP, add CSP headers, and consider a short expiry.
+- **XSS in your app** — any browser-accessible relay token can be stolen by XSS in *your* app. Store tokens with the least exposure your app can support, add CSP headers, scope tokens to IP when possible, and consider a short expiry.
 - **Compromised `ENCRYPTION_SECRET`** — if your server environment is fully compromised, the encryption key is accessible. Mitigate with a cloud KMS (AWS KMS, GCP Cloud KMS) for higher assurance.
 - **Multi-instance SQLite concurrency** — SQLite handles concurrent reads well but bottlenecks on concurrent writes. For high-traffic multi-replica deployments, use a Postgres backend.
 
@@ -754,6 +781,7 @@ byok-relay handles both patterns today.
 - [skills.sh](https://skills.sh/avikalpg/byok-relay) — AI coding agent skill registry
 - [Awesome LLMOps](https://github.com/tensorchord/Awesome-LLMOps) — *PR in review*
 - [Awesome ChatGPT API](https://github.com/reorx/awesome-chatgpt-api) — *PR in review*
+- [`@byok-relay/mcp`](https://www.npmjs.com/package/@byok-relay/mcp) — MCP server for Claude Desktop / Claude Code
 
 ## License
 
