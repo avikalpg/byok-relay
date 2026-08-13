@@ -88,3 +88,43 @@ Import into Postman, Insomnia, or any OpenAPI-aware tool. AI coding agents can f
 - Hosted relay: https://relay.byokrelay.com
 - OpenAPI spec: https://relay.byokrelay.com/openapi.json
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
+
+## Koa Middleware (`@byok-relay/koa`)
+
+Koa `async (ctx, next)` middleware and `@koa/router` router factory for BYOK AI.
+`RELAY_URL` stays in `process.env` — browser only calls your `/relay` Koa route.
+`npm install @byok-relay/koa`
+
+```js
+const Koa = require('koa');
+const { createByokRelayMiddleware, ByokRelayClient } = require('@byok-relay/koa');
+const app = new Koa();
+app.use(createByokRelayMiddleware({ pathPrefix: '/relay' }));
+app.listen(3000);
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/koa
+
+## tRPC Integration (`@byok-relay/trpc`)
+
+tRPC v11 router adapter, context factory, and middleware for BYOK AI.
+`RELAY_URL` stays in `process.env` — browser only calls your tRPC server.
+`npm install @byok-relay/trpc @trpc/server`
+
+```js
+// trpc/init.js
+const { initTRPC } = require('@trpc/server');
+const { createByokRelayContext } = require('@byok-relay/trpc');
+const createContext = createByokRelayContext({ relayUrl: process.env.RELAY_URL });
+const t = initTRPC.context().create();
+module.exports = { t, createContext };
+
+// trpc/router.js
+const { createByokRelayRouter } = require('@byok-relay/trpc');
+const relayRouter = createByokRelayRouter(t);
+const appRouter = t.router({ relay: relayRouter });
+```
+
+Client: `trpc.relay.chat.mutate({ model: 'openai/gpt-4o', messages })` returns `{ reply }`.
+All relay ops: health, register, storeKey, listKeys, deleteKey, rotateKey, chat, stats, models.
+npm: https://www.npmjs.com/package/@byok-relay/trpc
