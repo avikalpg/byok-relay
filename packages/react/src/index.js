@@ -26,6 +26,8 @@ const PROVIDER_PATHS = {
   openrouter: 'chat/completions',
 };
 
+const registrationFlights = new Map();
+
 // ─── Storage helpers ──────────────────────────────────────────────────────────
 
 function storageGet(key) {
@@ -41,6 +43,38 @@ function storageSet(key, value) {
 function storageRemove(key) {
   try { if (typeof localStorage !== 'undefined') localStorage.removeItem(key); }
   catch { /* ignore */ }
+}
+
+async function registerRelayToken({ relayUrl, appId, tokenKey }) {
+  const existing = storageGet(tokenKey);
+  if (existing) return existing;
+
+  const flightKey = `${relayUrl}::${appId}`;
+  if (!registrationFlights.has(flightKey)) {
+    const flight = (async () => {
+      const stored = storageGet(tokenKey);
+      if (stored) return stored;
+
+      const res = await fetch(`${relayUrl}/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ app_id: appId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Registration failed (${res.status})`);
+      }
+      const { token: t } = await res.json();
+      storageSet(tokenKey, t);
+      return t;
+    })().finally(() => {
+      registrationFlights.delete(flightKey);
+    });
+
+    registrationFlights.set(flightKey, flight);
+  }
+
+  return registrationFlights.get(flightKey);
 }
 
 // ─── useByokRelay ─────────────────────────────────────────────────────────────
@@ -66,23 +100,7 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
   const register = useCallback(async () => {
     setError(null);
     try {
-      const existing = storageGet(tokenKey);
-      if (existing) {
-        setToken(existing);
-        return existing;
-      }
-
-      const res = await fetch(`${relayUrl}/users`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ app_id: appId }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `Registration failed (${res.status})`);
-      }
-      const { token: t } = await res.json();
-      storageSet(tokenKey, t);
+      const t = await registerRelayToken({ relayUrl, appId, tokenKey });
       setToken(t);
       return t;
     } catch (e) {
@@ -193,6 +211,7 @@ function useChat({
   const { getToken, error: relayError } = _useByokRelayInternal({ relayUrl, appId });
   const [messages, setMessages] = useState([]);
   const messagesRef = useRef([]);
+  const turnInFlightRef = useRef(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -207,6 +226,13 @@ function useChat({
 
   const sendMessage = useCallback(async (content) => {
     setError(null);
+    if (turnInFlightRef.current) {
+      const msg = 'A chat turn is already in progress';
+      setError(msg);
+      throw new Error(msg);
+    }
+
+    turnInFlightRef.current = true;
     const userMsg = { role: 'user', content };
     const nextMessages = setMessagesAndRef(prev => [...prev, userMsg]);
     setIsLoading(true);
@@ -256,6 +282,7 @@ function useChat({
       setError(e.message);
       throw e;
     } finally {
+      turnInFlightRef.current = false;
       setIsLoading(false);
     }
   }, [relayUrl, appId, provider, model, systemPrompt, extraParams, getToken, setMessagesAndRef]);
@@ -444,27 +471,36 @@ function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false, intervalMs
   const [isLoading, setIsLoading] = useState(true);
   const [status, setStatus] = useState(null); // 'ok' | 'error' | null
 
-  const refetch = useCallback(async () => {
+  const refetch = useCallback(async (options = {}) => {
+    const signal = options && options.signal;
     setIsLoading(true);
     try {
       const url = deep ? `${relayUrl}/health?deep=1` : `${relayUrl}/health`;
-      const res = await fetch(url);
+      const res = await fetch(url, signal ? { signal } : undefined);
       const body = await res.json();
+      if (signal?.aborted) return;
       setData(body);
       setStatus(res.ok ? 'ok' : 'error');
-    } catch {
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
       setStatus('error');
       setData(null);
     } finally {
-      setIsLoading(false);
+      if (!signal?.aborted) setIsLoading(false);
     }
   }, [relayUrl, deep]);
 
   useEffect(() => {
-    refetch();
-    if (!intervalMs || intervalMs <= 0) return undefined;
-    const id = setInterval(refetch, intervalMs);
-    return () => clearInterval(id);
+    const controller = new AbortController();
+    refetch({ signal: controller.signal });
+    const id = intervalMs && intervalMs > 0
+      ? setInterval(() => refetch({ signal: controller.signal }), intervalMs)
+      : null;
+
+    return () => {
+      if (id) clearInterval(id);
+      controller.abort();
+    };
   }, [refetch, intervalMs]);
 
   return { status, data, isLoading, refetch };
@@ -479,23 +515,7 @@ function _useByokRelayInternal({ relayUrl, appId }) {
   const [error, setError] = useState(null);
 
   const register = useCallback(async () => {
-    const existing = storageGet(tokenKey);
-    if (existing) {
-      setToken(existing);
-      return existing;
-    }
-
-    const res = await fetch(`${relayUrl}/users`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: appId }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || `Registration failed (${res.status})`);
-    }
-    const { token: t } = await res.json();
-    storageSet(tokenKey, t);
+    const t = await registerRelayToken({ relayUrl, appId, tokenKey });
     setToken(t);
     return t;
   }, [relayUrl, appId, tokenKey]);
