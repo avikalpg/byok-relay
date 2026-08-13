@@ -38,10 +38,13 @@ const APP_ID = process.env.APP_ID || 'mcp-client';
 async function relayFetch(path, options = {}) {
   const fetch = globalThis.fetch || (await import('node-fetch')).default;
   const url = `${RELAY_URL}${path}`;
+  const forwardedHeaders = Object.fromEntries(
+    Object.entries(options.headers || {}).filter(([name]) => name.toLowerCase() !== 'authorization'),
+  );
   const headers = {
     'Content-Type': 'application/json',
+    ...forwardedHeaders,
     ...(RELAY_TOKEN ? { Authorization: `Bearer ${RELAY_TOKEN}` } : {}),
-    ...(options.headers || {}),
   };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
