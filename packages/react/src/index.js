@@ -27,6 +27,8 @@ const PROVIDER_PATHS = {
 };
 
 const registrationFlights = new Map();
+const logoutGenerations = new Map();
+const tokenSubscribers = new Map();
 
 // ─── Storage helpers ──────────────────────────────────────────────────────────
 
@@ -45,18 +47,77 @@ function storageRemove(key) {
   catch { /* ignore */ }
 }
 
-function tokenStorageKey(relayUrl, appId) {
+function legacyTokenStorageKey(relayUrl, appId) {
   return `byok_relay_token_${encodeURIComponent(String(relayUrl))}_${encodeURIComponent(String(appId))}`;
 }
 
-async function registerRelayToken({ relayUrl, appId, tokenKey }) {
+function tokenStorageKey(relayUrl, appId) {
+  return `byok_relay_token_v2_${encodeURIComponent(JSON.stringify([String(relayUrl), String(appId)]))}`;
+}
+
+function tokenScopeKey(relayUrl, appId) {
+  return JSON.stringify([String(relayUrl), String(appId)]);
+}
+
+function readStoredToken(tokenKey, legacyTokenKey) {
   const existing = storageGet(tokenKey);
   if (existing) return existing;
 
-  const flightKey = `${relayUrl}::${appId}`;
+  if (legacyTokenKey && legacyTokenKey !== tokenKey) {
+    const legacy = storageGet(legacyTokenKey);
+    if (legacy) {
+      storageSet(tokenKey, legacy);
+      return legacy;
+    }
+  }
+
+  return null;
+}
+
+function removeStoredToken(tokenKey, legacyTokenKey) {
+  storageRemove(tokenKey);
+  if (legacyTokenKey && legacyTokenKey !== tokenKey) storageRemove(legacyTokenKey);
+}
+
+function tokenGeneration(scopeKey) {
+  return logoutGenerations.get(scopeKey) || 0;
+}
+
+function createAbortError(message) {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function subscribeTokenScope(scopeKey, listener) {
+  if (!tokenSubscribers.has(scopeKey)) tokenSubscribers.set(scopeKey, new Set());
+  const listeners = tokenSubscribers.get(scopeKey);
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) tokenSubscribers.delete(scopeKey);
+  };
+}
+
+function bumpTokenGeneration(scopeKey) {
+  const next = tokenGeneration(scopeKey) + 1;
+  logoutGenerations.set(scopeKey, next);
+  const listeners = tokenSubscribers.get(scopeKey);
+  if (listeners) {
+    for (const listener of listeners) listener(next);
+  }
+  return next;
+}
+
+async function registerRelayToken({ relayUrl, appId, tokenKey, legacyTokenKey, scopeKey, generation }) {
+  const startGeneration = generation ?? tokenGeneration(scopeKey);
+  const existing = readStoredToken(tokenKey, legacyTokenKey);
+  if (existing) return existing;
+
+  const flightKey = JSON.stringify([scopeKey, startGeneration]);
   if (!registrationFlights.has(flightKey)) {
     const flight = (async () => {
-      const stored = storageGet(tokenKey);
+      const stored = readStoredToken(tokenKey, legacyTokenKey);
       if (stored) return stored;
 
       const res = await fetch(`${relayUrl}/users`, {
@@ -69,10 +130,13 @@ async function registerRelayToken({ relayUrl, appId, tokenKey }) {
         throw new Error(body.error || `Registration failed (${res.status})`);
       }
       const { token: t } = await res.json();
+      if (tokenGeneration(scopeKey) !== startGeneration) {
+        throw createAbortError('Registration cancelled by logout');
+      }
       storageSet(tokenKey, t);
       return t;
     })().finally(() => {
-      registrationFlights.delete(flightKey);
+      if (registrationFlights.get(flightKey) === flight) registrationFlights.delete(flightKey);
     });
 
     registrationFlights.set(flightKey, flight);
@@ -94,34 +158,62 @@ async function registerRelayToken({ relayUrl, appId, tokenKey }) {
  */
 function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
   const tokenKey = tokenStorageKey(relayUrl, appId);
+  const legacyTokenKey = legacyTokenStorageKey(relayUrl, appId);
+  const scopeKey = tokenScopeKey(relayUrl, appId);
 
-  const [token, setToken] = useState(() => storageGet(tokenKey));
+  const readToken = useCallback(() => readStoredToken(tokenKey, legacyTokenKey), [tokenKey, legacyTokenKey]);
+  const [tokenState, setTokenState] = useState(() => ({
+    scopeKey,
+    tokenKey,
+    generation: tokenGeneration(scopeKey),
+    token: readToken(),
+  }));
   const [error, setError] = useState(null);
 
+  const token = tokenState.scopeKey === scopeKey && tokenState.tokenKey === tokenKey ? tokenState.token : readToken();
+  const tokenStateGeneration = tokenState.scopeKey === scopeKey ? tokenState.generation : tokenGeneration(scopeKey);
   const isRegistered = Boolean(token);
+
+  useEffect(() => {
+    setTokenState({ scopeKey, tokenKey, generation: tokenGeneration(scopeKey), token: readToken() });
+    setError(null);
+  }, [scopeKey, tokenKey, readToken]);
+
+  useEffect(() => subscribeTokenScope(scopeKey, (generation) => {
+    setTokenState({ scopeKey, tokenKey, generation, token: null });
+  }), [scopeKey, tokenKey]);
 
   /** Register a new relay token (or load an existing one from localStorage). */
   const register = useCallback(async () => {
     setError(null);
+    const generation = tokenGeneration(scopeKey);
     try {
-      const t = await registerRelayToken({ relayUrl, appId, tokenKey });
-      setToken(t);
+      const t = await registerRelayToken({ relayUrl, appId, tokenKey, legacyTokenKey, scopeKey, generation });
+      if (tokenGeneration(scopeKey) !== generation) throw createAbortError('Registration cancelled by logout');
+      setTokenState({ scopeKey, tokenKey, generation, token: t });
       return t;
     } catch (e) {
-      setError(e.message);
+      if (e?.name !== 'AbortError') setError(e.message);
       throw e;
     }
-  }, [relayUrl, appId, tokenKey]);
+  }, [relayUrl, appId, tokenKey, legacyTokenKey, scopeKey]);
 
   /** Get the current token, auto-registering if needed. */
   const getToken = useCallback(async () => {
-    const stored = storageGet(tokenKey);
+    const generation = tokenGeneration(scopeKey);
+    const stored = readToken();
     if (stored) {
-      if (stored !== token) setToken(stored);
+      if (stored !== token || tokenStateGeneration !== generation) {
+        setTokenState({ scopeKey, tokenKey, generation, token: stored });
+      }
       return stored;
     }
+    if (tokenStateGeneration !== generation) {
+      if (token !== null) setTokenState({ scopeKey, tokenKey, generation, token: null });
+      return register();
+    }
     return token || register();
-  }, [token, tokenKey, register]);
+  }, [token, tokenKey, scopeKey, tokenStateGeneration, readToken, register]);
 
   /**
    * Store an API key for a provider.
@@ -182,9 +274,10 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
 
   /** Clear token from localStorage (logout). */
   const logout = useCallback(() => {
-    storageRemove(tokenKey);
-    setToken(null);
-  }, [tokenKey]);
+    removeStoredToken(tokenKey, legacyTokenKey);
+    const generation = bumpTokenGeneration(scopeKey);
+    setTokenState({ scopeKey, tokenKey, generation, token: null });
+  }, [tokenKey, legacyTokenKey, scopeKey]);
 
   return { token, isRegistered, register, storeKey, deleteKey, listProviders, logout, error };
 }
@@ -474,35 +567,77 @@ function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false, intervalMs
   const [data, setData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [status, setStatus] = useState(null); // 'ok' | 'error' | null
+  const requestIdRef = useRef(0);
+  const activeControllerRef = useRef(null);
 
   const refetch = useCallback(async (options = {}) => {
-    const signal = options && options.signal;
+    const externalSignal = options && options.signal;
+    const timeoutMs = options && options.timeoutMs;
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+
+    if (activeControllerRef.current) activeControllerRef.current.abort();
+
+    const controller = new AbortController();
+    activeControllerRef.current = controller;
+    let timeoutId = null;
+    let timedOut = false;
+
+    const abortFromExternalSignal = () => controller.abort();
+    if (externalSignal?.aborted) {
+      controller.abort();
+    } else if (externalSignal?.addEventListener) {
+      externalSignal.addEventListener('abort', abortFromExternalSignal, { once: true });
+    }
+
+    if (timeoutMs && timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+    }
+
     setIsLoading(true);
     try {
       const url = deep ? `${relayUrl}/health?deep=1` : `${relayUrl}/health`;
-      const res = await fetch(url, signal ? { signal } : undefined);
+      const res = await fetch(url, { signal: controller.signal });
       const body = await res.json();
-      if (signal?.aborted) return;
+      if (controller.signal.aborted || requestId !== requestIdRef.current) return;
       setData(body);
       setStatus(res.ok ? 'ok' : 'error');
     } catch (e) {
-      if (e?.name === 'AbortError') return;
-      setStatus('error');
-      setData(null);
+      if (e?.name === 'AbortError' && !timedOut) return;
+      if (requestId === requestIdRef.current) {
+        setStatus('error');
+        setData(null);
+      }
     } finally {
-      if (!signal?.aborted) setIsLoading(false);
+      if (timeoutId) clearTimeout(timeoutId);
+      if (externalSignal?.removeEventListener) {
+        externalSignal.removeEventListener('abort', abortFromExternalSignal);
+      }
+      if (activeControllerRef.current === controller) activeControllerRef.current = null;
+      if (requestId === requestIdRef.current && (!controller.signal.aborted || timedOut)) {
+        setIsLoading(false);
+      }
     }
   }, [relayUrl, deep]);
 
   useEffect(() => {
-    const controller = new AbortController();
     let timeoutId = null;
     let disposed = false;
+    let pollController = null;
 
     const poll = async () => {
-      await refetch({ signal: controller.signal });
-      if (!disposed && intervalMs && intervalMs > 0) {
-        timeoutId = setTimeout(poll, intervalMs);
+      pollController = new AbortController();
+      const pollTimeoutMs = intervalMs && intervalMs > 0 ? intervalMs : 30000;
+      try {
+        await refetch({ signal: pollController.signal, timeoutMs: pollTimeoutMs });
+      } finally {
+        pollController = null;
+        if (!disposed && intervalMs && intervalMs > 0) {
+          timeoutId = setTimeout(poll, intervalMs);
+        }
       }
     };
 
@@ -511,7 +646,7 @@ function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false, intervalMs
     return () => {
       disposed = true;
       if (timeoutId) clearTimeout(timeoutId);
-      controller.abort();
+      if (pollController) pollController.abort();
     };
   }, [refetch, intervalMs]);
 
@@ -523,23 +658,56 @@ function useRelayHealth({ relayUrl = DEFAULT_RELAY_URL, deep = false, intervalMs
 /** Internal version of useByokRelay that exposes getToken(). */
 function _useByokRelayInternal({ relayUrl, appId }) {
   const tokenKey = tokenStorageKey(relayUrl, appId);
-  const [token, setToken] = useState(() => storageGet(tokenKey));
+  const legacyTokenKey = legacyTokenStorageKey(relayUrl, appId);
+  const scopeKey = tokenScopeKey(relayUrl, appId);
+  const readToken = useCallback(() => readStoredToken(tokenKey, legacyTokenKey), [tokenKey, legacyTokenKey]);
+  const [tokenState, setTokenState] = useState(() => ({
+    scopeKey,
+    tokenKey,
+    generation: tokenGeneration(scopeKey),
+    token: readToken(),
+  }));
   const [error, setError] = useState(null);
+  const token = tokenState.scopeKey === scopeKey && tokenState.tokenKey === tokenKey ? tokenState.token : readToken();
+  const tokenStateGeneration = tokenState.scopeKey === scopeKey ? tokenState.generation : tokenGeneration(scopeKey);
+
+  useEffect(() => {
+    setTokenState({ scopeKey, tokenKey, generation: tokenGeneration(scopeKey), token: readToken() });
+    setError(null);
+  }, [scopeKey, tokenKey, readToken]);
+
+  useEffect(() => subscribeTokenScope(scopeKey, (generation) => {
+    setTokenState({ scopeKey, tokenKey, generation, token: null });
+  }), [scopeKey, tokenKey]);
 
   const register = useCallback(async () => {
-    const t = await registerRelayToken({ relayUrl, appId, tokenKey });
-    setToken(t);
-    return t;
-  }, [relayUrl, appId, tokenKey]);
+    const generation = tokenGeneration(scopeKey);
+    try {
+      const t = await registerRelayToken({ relayUrl, appId, tokenKey, legacyTokenKey, scopeKey, generation });
+      if (tokenGeneration(scopeKey) !== generation) throw createAbortError('Registration cancelled by logout');
+      setTokenState({ scopeKey, tokenKey, generation, token: t });
+      return t;
+    } catch (e) {
+      if (e?.name !== 'AbortError') setError(e.message);
+      throw e;
+    }
+  }, [relayUrl, appId, tokenKey, legacyTokenKey, scopeKey]);
 
   const getToken = useCallback(async () => {
-    const stored = storageGet(tokenKey);
+    const generation = tokenGeneration(scopeKey);
+    const stored = readToken();
     if (stored) {
-      if (stored !== token) setToken(stored);
+      if (stored !== token || tokenStateGeneration !== generation) {
+        setTokenState({ scopeKey, tokenKey, generation, token: stored });
+      }
       return stored;
     }
+    if (tokenStateGeneration !== generation) {
+      if (token !== null) setTokenState({ scopeKey, tokenKey, generation, token: null });
+      return register();
+    }
     return token || register();
-  }, [token, tokenKey, register]);
+  }, [token, tokenKey, scopeKey, tokenStateGeneration, readToken, register]);
 
   return { token, getToken, error };
 }
@@ -560,9 +728,22 @@ function _extractStreamDelta(parsed, provider) {
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
-module.exports = {
+const exported = {
   useByokRelay,
   useChat,
   useStreamingChat,
   useRelayHealth,
 };
+
+if (process.env.NODE_ENV === 'test') {
+  exported.__testing = {
+    tokenStorageKey,
+    legacyTokenStorageKey,
+    tokenScopeKey,
+    readStoredToken,
+    removeStoredToken,
+    tokenGeneration,
+  };
+}
+
+module.exports = exported;
