@@ -38,7 +38,9 @@ Or use the managed relay without installing anything — just import from a CDN:
   let apiKey = '';
   let saved  = false;
 
-  onMount(() => relay.register());
+  onMount(() => {
+    relay.register().catch(console.error);
+  });
 
   async function saveKey() {
     await relay.storeKey('openai', apiKey);
@@ -142,7 +144,9 @@ Non-streaming chat — stateful message list for any supported provider.
 
   let input = '';
 
-  onMount(() => relay.register());
+  onMount(() => {
+    relay.register().catch(console.error);
+  });
 
   async function submit() {
     const msg = input.trim();
@@ -206,7 +210,9 @@ Same options as `createChatStore`.
   });
 
   let input = '';
-  onMount(() => relay.register());
+  onMount(() => {
+    relay.register().catch(console.error);
+  });
 </script>
 
 <div class="messages">
@@ -292,7 +298,6 @@ Polls `/health` on the relay — tracks liveness and readiness.
 | Groq | `'groq'` | Llama 3, Mixtral, … |
 | Mistral | `'mistral'` | Mistral 7B, Mixtral, … |
 | OpenRouter | `'openrouter'` | Any model via OpenRouter |
-| Google | `'google'` | Gemini (pass model as `models/gemini-pro`) |
 
 ---
 
@@ -304,14 +309,16 @@ All stores are SSR-safe. localStorage access is guarded by `typeof window !== 'u
 
 ```svelte
 <script>
-  import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/svelte';
+  import { createByokRelayStore, createStreamingChatStore, createRelayHealthStore } from '@byok-relay/svelte';
   import { onMount, onDestroy } from 'svelte';
 
   const relay  = createByokRelayStore({ appId: 'myapp' });
   const chat   = createStreamingChatStore({ appId: 'myapp', provider: 'openai' });
   const health = createRelayHealthStore({ pollIntervalMs: 60_000 });
 
-  onMount(() => relay.register());
+  onMount(() => {
+    relay.register().catch(console.error);
+  });
   onDestroy(health.destroy);
 </script>
 ```

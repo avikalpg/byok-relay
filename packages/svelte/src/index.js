@@ -24,7 +24,6 @@ const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const PROVIDER_PATHS = {
   openai:     'chat/completions',
   anthropic:  'messages',
-  google:     'models/{model}:generateContent',
   groq:       'chat/completions',
   mistral:    'chat/completions',
   openrouter: 'chat/completions',
@@ -412,6 +411,7 @@ function createStreamingChatStore({
   });
 
   let _controller = null;
+  let _generation = 0;
 
   function _patch(patch) {
     store.update(s => ({ ...s, ...patch }));
@@ -426,6 +426,7 @@ function createStreamingChatStore({
     if (!token) { _patch({ error: 'Not registered — call relay.register() first' }); return; }
     if (store.get().isStreaming) stopStreaming();
 
+    const myGen = ++_generation;
     _patch({ error: null, isStreaming: true, streamingContent: '' });
     store.update(s => ({
       ...s,
@@ -473,6 +474,7 @@ function createStreamingChatStore({
 
       while (true) {
         const { done, value } = await reader.read();
+        if (myGen !== _generation) return;
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
@@ -494,6 +496,7 @@ function createStreamingChatStore({
         }
       }
 
+      if (myGen !== _generation) return;
       store.update(s => ({
         ...s,
         isStreaming:      false,
@@ -501,6 +504,7 @@ function createStreamingChatStore({
         messages:         [...s.messages, { role: 'assistant', content: full }],
       }));
     } catch (err) {
+      if (myGen !== _generation) return;
       if (err.name === 'AbortError') {
         // User stopped — commit whatever was streamed
         const partial = store.get().streamingContent;
@@ -516,7 +520,7 @@ function createStreamingChatStore({
         _patch({ isStreaming: false, streamingContent: '', error: err.message });
       }
     } finally {
-      _controller = null;
+      if (myGen === _generation) _controller = null;
     }
   }
 
@@ -525,6 +529,7 @@ function createStreamingChatStore({
   }
 
   function clear() {
+    _generation++;
     stopStreaming();
     store.set({ messages: [], streamingContent: '', isStreaming: false, error: null });
   }

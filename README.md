@@ -114,7 +114,9 @@ npm install @byok-relay/svelte
   const relay = createByokRelayStore({ appId: 'myapp' });
   const chat  = createStreamingChatStore({ appId: 'myapp', provider: 'openai' });
 
-  onMount(() => relay.register());
+  onMount(() => {
+    relay.register().catch(console.error);
+  });
 </script>
 
 {#if $chat.isStreaming}
@@ -135,7 +137,7 @@ npx skills add avikalpg/byok-relay
 
 Or point your agent directly at the skill file:
 
-```
+```text
 https://byokrelay.com/skill
 ```
 
@@ -143,7 +145,7 @@ https://byokrelay.com/skill
 
 ## How it works
 
-```
+```text
 Browser                  byok-relay              AI Provider
   │                           │                       │
   ├─ POST /users ────────────►│                       │
