@@ -171,6 +171,39 @@ await test('stored tokens are scoped by relayUrl and appId', async () => {
   assertEqual(relayAAgain.token.value, 'tok_a');
 });
 
+await test('normalizes relayUrl for registration and key requests', async () => {
+  const calls = [];
+  mockFetch((url, opts) => {
+    calls.push({ url: String(url), method: opts.method || 'GET' });
+    if (String(url).endsWith('/users')) return jsonResponse({ token: 'tok_normalized' });
+    if (String(url).endsWith('/keys')) return jsonResponse({ providers: [] });
+    return jsonResponse({ ok: true });
+  });
+  const relay = useByokRelay({ relayUrl: 'https://relay-a.example///', appId: 'test-normalize-requests' });
+  await relay.register();
+  await relay.storeKey('openai', 'sk-test-12345678');
+  await relay.deleteKey('openai');
+  await relay.listProviders();
+
+  assertEqual(JSON.stringify(calls), JSON.stringify([
+    { url: 'https://relay-a.example/users', method: 'POST' },
+    { url: 'https://relay-a.example/keys/openai', method: 'POST' },
+    { url: 'https://relay-a.example/keys/openai', method: 'DELETE' },
+    { url: 'https://relay-a.example/keys', method: 'GET' },
+  ]));
+});
+
+await test('empty relayUrl falls back to default relay URL for requests', async () => {
+  let capturedUrl = null;
+  mockFetch((url) => {
+    capturedUrl = String(url);
+    return jsonResponse({ token: 'tok_default_url' });
+  });
+  const relay = useByokRelay({ relayUrl: '', appId: 'test-empty-relay-url' });
+  await relay.register();
+  assertEqual(capturedUrl, 'https://relay.byokrelay.com/users');
+});
+
 await test('storeKey() calls /keys/:provider after register()', async () => {
   const calls = [];
   mockFetch((url, opts) => {

@@ -48,8 +48,14 @@ function legacyTokenStorageKey(appId) {
   return `byok_relay_token_${appId}`;
 }
 
+function normalizeRelayUrl(relayUrl) {
+  const baseUrl = String(relayUrl || DEFAULT_RELAY_URL).replace(/\/+$/, '');
+  if (!baseUrl) throw new Error('relayUrl must not be empty');
+  return baseUrl;
+}
+
 function tokenStorageKey(relayUrl, appId) {
-  const relayScope = String(relayUrl || DEFAULT_RELAY_URL).replace(/\/+$/, '');
+  const relayScope = normalizeRelayUrl(relayUrl);
   const appScope = appId == null || appId === '' ? 'default' : String(appId);
   return `byok_relay_token_v2_${encodeURIComponent(JSON.stringify([relayScope, appScope]))}`;
 }
@@ -95,7 +101,8 @@ function removeStoredToken(tokenKey, legacyTokenKey) {
  * }}
  */
 function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
-  const tokenKey = tokenStorageKey(relayUrl, appId);
+  const baseUrl = normalizeRelayUrl(relayUrl);
+  const tokenKey = tokenStorageKey(baseUrl, appId);
   const legacyTokenKey = legacyTokenStorageKey(appId);
 
   const token = ref(readStoredToken(tokenKey, legacyTokenKey));
@@ -107,7 +114,7 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
   async function register() {
     error.value = null;
     try {
-      const res = await fetch(`${relayUrl}/users`, {
+      const res = await fetch(`${baseUrl}/users`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ app_id: appId }),
@@ -132,7 +139,7 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
   async function storeKey(provider, apiKey) {
     error.value = null;
     if (!token.value) throw new Error('Not registered — call register() first');
-    const res = await fetch(`${relayUrl}/keys/${provider}`, {
+    const res = await fetch(`${baseUrl}/keys/${provider}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -153,7 +160,7 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
   async function deleteKey(provider) {
     error.value = null;
     if (!token.value) throw new Error('Not registered');
-    const res = await fetch(`${relayUrl}/keys/${provider}`, {
+    const res = await fetch(`${baseUrl}/keys/${provider}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token.value}` },
     });
@@ -170,7 +177,7 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
   async function listProviders() {
     error.value = null;
     if (!token.value) return [];
-    const res = await fetch(`${relayUrl}/keys`, {
+    const res = await fetch(`${baseUrl}/keys`, {
       headers: { 'Authorization': `Bearer ${token.value}` },
     });
     if (!res.ok) {
