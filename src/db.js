@@ -406,6 +406,30 @@ function listProviders(userId) {
     .map(r => r.provider);
 }
 
+
+/**
+ * Atomically rotate a stored API key for a provider.
+ *
+ * The caller is expected to have already verified the new key against the
+ * provider before calling this function. The operation delegates to the same
+ * UPSERT path used by key creation, so the existing key stays intact unless
+ * the verified replacement write succeeds.
+ *
+ * @param {string} userId        - Owner user id
+ * @param {string} provider      - Provider name
+ * @param {string} newPlaintext  - New plaintext API key (already verified)
+ * @returns {{ rotated: boolean }}
+ *   `rotated: true`  → an existing key was replaced
+ *   `rotated: false` → no prior key existed; new key was stored (first-time set)
+ */
+function rotateKey(userId, provider, newPlaintext) {
+  const hadKey = !!db
+    .prepare('SELECT id FROM keys WHERE user_id = ? AND provider = ?')
+    .get(userId, provider);
+  upsertKey(userId, provider, newPlaintext);
+  return { rotated: hadKey };
+}
+
 // ── Request log helpers ─────────────────────────────────────────────────────
 
 /**
@@ -527,6 +551,17 @@ function getStatsForApp(appId) {
   };
 }
 
+/**
+ * Lightweight DB connectivity probe for the /health endpoint.
+ * Runs a fast read-only query against both tables and returns basic counts.
+ * Throws if the database is inaccessible or corrupt.
+ */
+function dbHealthCheck() {
+  const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+  const keyCount  = db.prepare('SELECT COUNT(*) AS n FROM keys').get().n;
+  return { userCount, keyCount };
+}
+
 module.exports = {
   createUser,
   getUserByToken,
@@ -534,10 +569,12 @@ module.exports = {
   deleteUser,
   getTokenHmacMigrationProgress,
   upsertKey,
+  rotateKey,
   getDecryptedKey,
   deleteKey,
   listProviders,
   logRequest,
   getStatsForUser,
   getStatsForApp,
+  dbHealthCheck,
 };

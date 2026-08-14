@@ -1,5 +1,7 @@
 require('dotenv').config();
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -11,14 +13,16 @@ const {
   revokeToken,
   deleteUser,
   upsertKey,
+  rotateKey,
   getDecryptedKey,
   deleteKey,
   listProviders,
   logRequest,
   getStatsForUser,
   getStatsForApp,
+  dbHealthCheck,
 } = require('./db');
-const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, isPathAllowed, normalizeProviderPath } = require('./providers');
+const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
 const { logger, httpLogger } = require('./logger');
 
@@ -46,6 +50,45 @@ if (!process.env.TOKEN_HMAC_SECRET) {
   logger.warn('TOKEN_HMAC_SECRET is not set — falling back to ENCRYPTION_SECRET for token hashing.');
 }
 
+// ── Model allowlist ─────────────────────────────────────────────────────────
+// Parse ALLOWED_MODELS at startup. Supports exact names and glob-style
+// wildcards using '*' (e.g. "gpt-4o*" matches "gpt-4o" and "gpt-4o-mini").
+// Empty / unset = all models permitted.
+const ALLOWED_MODELS_RAW = process.env.ALLOWED_MODELS
+  ? process.env.ALLOWED_MODELS.split(',').map((model) => model.trim()).filter(Boolean)
+  : [];
+
+function patternToRegex(pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
+const ALLOWED_MODEL_REGEXES = ALLOWED_MODELS_RAW.map(patternToRegex);
+
+function isModelAllowed(modelName) {
+  if (ALLOWED_MODEL_REGEXES.length === 0) return true;
+  if (!modelName || typeof modelName !== 'string') return true;
+  return ALLOWED_MODEL_REGEXES.some((regex) => regex.test(modelName));
+}
+
+function isModelAllowedForProvider(modelName, provider) {
+  if (isModelAllowed(modelName)) return true;
+  if (!provider || !modelName || typeof modelName !== 'string' || modelName.includes('/')) return false;
+  return isModelAllowed(`${provider}/${modelName}`);
+}
+
+function extractModelFromProviderPath(provider, forwardPath) {
+  if (provider !== 'google' || typeof forwardPath !== 'string') return undefined;
+  const match = forwardPath.match(/^\/(?:v1beta|v1)\/models\/([^/:?]+)(?::(?:generateContent|streamGenerateContent))?(?:[/?]|$)/);
+  return match?.[1];
+}
+
+if (ALLOWED_MODELS_RAW.length > 0) {
+  logger.info({ allowedModels: ALLOWED_MODELS_RAW }, 'model allowlist active');
+} else {
+  logger.warn('ALLOWED_MODELS is not set — all models are permitted.');
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(o => o.trim());
@@ -61,6 +104,11 @@ function parseRequestBodyLimitBytes(rawValue) {
 }
 
 const REQUEST_BODY_LIMIT_BYTES = parseRequestBodyLimitBytes(process.env.REQUEST_BODY_LIMIT_BYTES);
+
+function isDeepHealthProbe(req) {
+  const deep = String(req.query.deep ?? '').toLowerCase();
+  return deep === '1' || deep === 'true';
+}
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 
@@ -150,6 +198,19 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
+// Deep health probes can make outbound provider calls, so cap them more tightly
+// than cheap liveness checks while leaving plain /health on the global limiter.
+const deepHealthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  skip: (req) => !isDeepHealthProbe(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  passOnStoreError: true,
+  message: { error: 'Deep health probe rate limit exceeded (10/min).' },
+  store: makeStore('health-deep'),
+});
+
 // Relay rate limit: 20 AI requests per minute per token
 const relayLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -210,6 +271,12 @@ function requireToken(req, res, next) {
   req.user = user;
   next();
 }
+
+// ── Attestation metadata (resolved once at startup) ────────────────────────
+const { version: PKG_VERSION } = require('../package.json');
+const REPO_URL = 'https://github.com/avikalpg/byok-relay';
+const COMMIT_SHA = process.env.COMMIT_SHA || null;
+const BUILD_TIME = process.env.BUILD_TIME || new Date().toISOString();
 
 function logRelayRequest(req, details) {
   const { provider, model, status, latency_ms, streaming } = details;
@@ -454,9 +521,150 @@ async function forwardRelayRequest({
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // Health check
-app.get('/health', (req, res) => {
-  const { version } = require('../package.json');
-  res.json({ ok: true, version, providers: SUPPORTED_PROVIDERS });
+//
+// GET /health          — liveness probe: DB + config checks
+// GET /health?deep=1   — readiness probe: also pings one provider's models endpoint
+//
+// Returns HTTP 200 when all critical checks pass, 503 otherwise.
+// Non-critical warnings appear in the `warnings` array but do NOT affect the
+// HTTP status so load-balancers continue routing to the instance.
+app.get('/health', deepHealthLimiter, async (req, res) => {
+  const checks = {};
+  const warnings = [];
+  let healthy = true;
+
+  // ── 1. DB connectivity ─────────────────────────────────────────────────
+  try {
+    dbHealthCheck();
+    checks.db = { ok: true };
+  } catch (err) {
+    checks.db = { ok: false, error: 'Database unreachable' };
+    healthy = false;
+    // Log detail server-side only — never leak internal error text to clients.
+    req.log?.error({ err }, 'health DB check failed');
+  }
+
+  // ── 2. Encryption key presence ────────────────────────────────────────
+  const encSecret = process.env.ENCRYPTION_SECRET || '';
+  const hmacSecret = process.env.TOKEN_HMAC_SECRET || '';
+  const encOk = encSecret.length >= 32;
+  const hmacOk = hmacSecret.length >= 32;
+  checks.config = { ok: encOk, encryption_key_set: encOk };
+  if (!encOk) {
+    healthy = false;
+    req.log?.error('ENCRYPTION_SECRET missing or too short');
+  }
+  if (!hmacOk) {
+    warnings.push('TOKEN_HMAC_SECRET not set — falling back to ENCRYPTION_SECRET for token hashing');
+  }
+
+  // ── 3. APP_SECRET gate + model allowlist status (informational) ───────
+  checks.config.registration_gated = !!process.env.APP_SECRET;
+  checks.config.model_allowlist_restricted = ALLOWED_MODELS_RAW.length > 0;
+  if (ALLOWED_MODELS_RAW.length > 0) {
+    checks.config.allowed_models = ALLOWED_MODELS_RAW;
+  }
+
+  // ── 4. Deep probe: live provider ping (opt-in via ?deep=1) ───────────
+  // This is a readiness-style check. Only run when the caller explicitly
+  // requests it (e.g. a post-deploy smoke test, not a per-request liveness
+  // probe from a load balancer).
+  if (isDeepHealthProbe(req)) {
+    const provider = String(req.query.provider || 'openai');
+    if (SUPPORTED_PROVIDERS.includes(provider)) {
+      try {
+        const pingResult = await pingProvider(provider);
+        checks.upstream = { ok: pingResult.ok, provider, statusCode: pingResult.statusCode };
+        if (!pingResult.ok) {
+          warnings.push(`Provider ${provider} returned ${pingResult.statusCode} — may be a key issue or provider outage`);
+        }
+      } catch (err) {
+        checks.upstream = { ok: false, provider, error: 'Ping failed' };
+        warnings.push(`Provider ${provider} unreachable`);
+        req.log?.warn({ err, provider }, 'health upstream ping failed');
+      }
+    } else {
+      checks.upstream = { ok: false, error: `Unknown provider '${provider}'` };
+    }
+  }
+
+  const body = {
+    ok: healthy,
+    version: PKG_VERSION,
+    commit: COMMIT_SHA,
+    buildTime: BUILD_TIME,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    providers: SUPPORTED_PROVIDERS,
+    checks,
+    ...(warnings.length ? { warnings } : {}),
+  };
+
+  res.status(healthy ? 200 : 503).json(body);
+});
+
+/**
+ * GET /version
+ * Returns the running version, git commit SHA, build timestamp, and repo URL.
+ * Allows users of the managed relay (relay.byokrelay.com) to verify that the
+ * running code matches a specific public commit on GitHub.
+ *
+ * Compare the returned `commit` with the public source at `attestationUrl`.
+ * This URL is commit-pinned because a deployment from main may be ahead of the
+ * latest version tag and therefore may not match that release's attestation.
+ */
+app.get('/version', (req, res) => {
+  res.json({
+    version: PKG_VERSION,
+    commit: COMMIT_SHA,
+    buildTime: BUILD_TIME,
+    repoUrl: REPO_URL,
+    attestationUrl: COMMIT_SHA ? `${REPO_URL}/tree/${COMMIT_SHA}` : null,
+  });
+});
+
+// OpenAPI spec endpoints — served for agent/tool discovery
+// AI coding agents, Postman, Insomnia, and similar tools can import these.
+const OPENAPI_JSON_PATH = path.join(__dirname, '..', 'openapi.json');
+
+function isMissingOpenApiSpec(err) {
+  return err && (
+    err.code === 'ENOENT' ||
+    (err.code === 'MODULE_NOT_FOUND' && typeof err.message === 'string' && err.message.includes(OPENAPI_JSON_PATH))
+  );
+}
+
+app.get('/openapi.json', (req, res) => {
+  try {
+    // Clear require cache so hot-reloads pick up spec changes in dev
+    delete require.cache[OPENAPI_JSON_PATH];
+    const spec = require(OPENAPI_JSON_PATH);
+    res.json(spec);
+  } catch (err) {
+    if (isMissingOpenApiSpec(err)) {
+      return res.status(404).json({ error: 'OpenAPI spec not found' });
+    }
+    return res.status(500).json({ error: 'Failed to load OpenAPI spec' });
+  }
+});
+
+app.get('/openapi.yaml', (req, res) => {
+  // Convert JSON spec to YAML on the fly via JSON.stringify indented,
+  // then serve as text/yaml for tools that prefer YAML.
+  try {
+    delete require.cache[OPENAPI_JSON_PATH];
+    const spec = require(OPENAPI_JSON_PATH);
+    // Simple JSON-to-YAML via js-yaml dump
+    const yaml = require('js-yaml');
+    const yamlStr = yaml.dump(spec, { lineWidth: 120, noRefs: true });
+    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+    res.send(yamlStr);
+  } catch (err) {
+    if (isMissingOpenApiSpec(err)) {
+      return res.status(404).json({ error: 'OpenAPI spec not found' });
+    }
+    return res.status(500).json({ error: 'Failed to render OpenAPI spec' });
+  }
 });
 
 /**
@@ -492,6 +700,56 @@ app.post('/keys/:provider', requireToken, (req, res) => {
   }
   upsertKey(req.user.id, provider, key.trim());
   res.json({ ok: true, provider });
+});
+
+/**
+ * POST /keys/:provider/rotate
+ * Rotate an API key atomically: verify the new key against the provider,
+ * then replace the old stored key in a single DB operation.
+ *
+ * Headers: x-relay-token
+ * Body:    { key: string }
+ *
+ * Returns:
+ *   200 { ok: true, provider, rotated: true }  — existing key replaced
+ *   200 { ok: true, provider, rotated: false } — no prior key; new key stored
+ *   400 { error: '...' }                       — missing / malformed key
+ *   422 { error: '...', hint: '...' }          — key rejected by provider
+ */
+app.post('/keys/:provider/rotate', requireToken, async (req, res) => {
+  const { provider } = req.params;
+  if (!SUPPORTED_PROVIDERS.includes(provider)) {
+    return res.status(400).json({ error: `Unsupported provider. Supported: ${SUPPORTED_PROVIDERS.join(', ')}` });
+  }
+
+  const { key } = req.body;
+  if (!key || typeof key !== 'string' || key.trim().length < 10) {
+    return res.status(400).json({ error: 'A valid API key is required (minimum 10 characters)' });
+  }
+  const trimmedKey = key.trim();
+
+  // 1. Validate key format.
+  const { valid, hint } = validateProviderKeyFormat(provider, trimmedKey);
+  if (!valid) {
+    return res.status(400).json({
+      error: `API key format looks wrong for provider “${provider}”. ${hint}`,
+      hint,
+    });
+  }
+
+  // 2. Verify the new key against the live provider endpoint.
+  //    This happens BEFORE touching the DB so a bad key never replaces a good one.
+  const verification = await verifyProviderKey(provider, trimmedKey);
+  if (!verification.ok) {
+    const detail = verification.message ? ` (${verification.message.slice(0, 120)})` : '';
+    return res.status(422).json({
+      error: `New key was rejected by ${provider}${detail}. Your existing key was not changed.`,
+    });
+  }
+
+  // 3. Atomically replace the old key with the verified new key.
+  const { rotated } = rotateKey(req.user.id, provider, trimmedKey);
+  return res.json({ ok: true, provider, rotated });
 });
 
 /**
@@ -575,6 +833,7 @@ app.get('/stats/:app_id', requireAppSecret, (req, res) => {
  * are routable without specifying an explicit provider path.
  */
 app.get('/models', (req, res) => {
+  const restricted = ALLOWED_MODELS_RAW.length > 0;
   res.json({
     providers: SUPPORTED_PROVIDERS,
     providerPrefixes: Object.keys(PROVIDER_DEFAULT_PATHS),
@@ -583,6 +842,10 @@ app.get('/models', (req, res) => {
       flags: pattern.flags,
       provider,
     })),
+    restricted,
+    ...(restricted
+      ? { allowed_models: ALLOWED_MODELS_RAW }
+      : { message: 'All models are permitted on this relay.' }),
     usage: 'POST /relay with { model: "provider/model-name", ...providerBody }',
     examples: [
       '{ "model": "anthropic/claude-3-5-haiku", "max_tokens": 256, "messages": [{"role":"user","content":"Hello"}] }',
@@ -625,6 +888,13 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   }
 
   const { provider, path: forwardPath, modelName } = route;
+
+  if (!isModelAllowed(model)) {
+    return res.status(403).json({
+      error: `Model "${model}" is not permitted on this relay.`,
+      allowed_models: ALLOWED_MODELS_RAW,
+    });
+  }
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
@@ -690,6 +960,16 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
+  const relayBody = req.rawBodyBuffer || req.body;
+  const pathModel = extractModelFromProviderPath(provider, req.forwardPath);
+  const requestedModel = pathModel || (Buffer.isBuffer(relayBody) ? undefined : relayBody?.model);
+  if (!isModelAllowedForProvider(requestedModel, provider)) {
+    return res.status(403).json({
+      error: `Model "${requestedModel}" is not permitted on this relay.`,
+      allowed_models: ALLOWED_MODELS_RAW,
+    });
+  }
+
   // Forward exactly the normalized path that passed the allowlist check.
   // Do not reconstruct it from Express params here: validation and use must
   // operate on the same value.
@@ -712,11 +992,7 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
-  const model = req.body?.model || null;
-  const { rawBody: providerWantsRawBody } = getProviderMeta(provider);
-  const relayBody = providerWantsRawBody && req.rawBodyBuffer
-    ? req.rawBodyBuffer
-    : req.body;
+  const model = Buffer.isBuffer(relayBody) ? null : req.body?.model || null;
 
   return forwardRelayRequest({
     req,
@@ -727,7 +1003,7 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     apiKey,
     extraHeaders,
     model,
-    streamingRequested: req.body?.stream === true,
+    streamingRequested: !Buffer.isBuffer(relayBody) && req.body?.stream === true,
   });
 });
 
@@ -740,7 +1016,12 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
  */
 function startServer() {
   const server = app.listen(PORT, '0.0.0.0', () => {
-    logger.info({ port: PORT, origins: ALLOWED_ORIGINS, providers: SUPPORTED_PROVIDERS }, 'byok-relay started');
+    logger.info({
+      port: PORT,
+      origins: ALLOWED_ORIGINS,
+      providers: SUPPORTED_PROVIDERS,
+      modelAllowlist: ALLOWED_MODELS_RAW.length > 0 ? ALLOWED_MODELS_RAW : 'unrestricted',
+    }, 'byok-relay started');
   });
 
   // Graceful shutdown on SIGTERM (Docker stop, systemd, Kubernetes rolling deploy).

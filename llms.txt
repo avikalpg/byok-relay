@@ -69,6 +69,108 @@ const TOKEN = await fetch('https://your-relay.com/users', {
 - CORS locked to allowed origins
 - HTTPS required in production
 
+## Vue Composables (@byok-relay/vue)
+
+For Vue 3 and Nuxt apps — install with:
+
+```bash
+npm install @byok-relay/vue
+```
+
+Four composables — all return readonly reactive refs:
+
+- `useByokRelay({ appId })` — manages relay token and encrypted provider key storage. Returns `{ token, isRegistered, register, storeKey, deleteKey, listProviders, logout, error }`.
+- `useChat({ token, provider, model, systemPrompt })` — stateful non-streaming chat. Returns `{ messages, isLoading, sendMessage, clearMessages, error }`.
+- `useStreamingChat({ token, provider, model, systemPrompt })` — SSE streaming chat. Returns `{ messages, streamingContent, isStreaming, sendMessage, stopStreaming, clearMessages, error }`. AbortController abort on `stopStreaming()` and on component unmount.
+- `useRelayHealth({ intervalMs, deep, provider })` — polls `/health`. Returns `{ isHealthy, status, isLoading, refetch, error }`.
+
+```vue
+<script setup>
+import { useByokRelay, useStreamingChat } from '@byok-relay/vue'
+const relay = useByokRelay({ appId: 'my-app' })
+const chat  = useStreamingChat({ token: relay.token, provider: 'openai', model: 'gpt-4o-mini' })
+</script>
+<template>
+  <div v-for="m in chat.messages.value" :key="m.role + ':' + m.content">{{ m.role }}: {{ m.content }}</div>
+  <p v-if="chat.isStreaming.value">{{ chat.streamingContent.value }}</p>
+  <input @keydown.enter="e => chat.sendMessage(e.target.value)" />
+</template>
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/vue
+Full docs: https://github.com/avikalpg/byok-relay/tree/main/packages/vue
+
+## Svelte Stores (`@byok-relay/svelte`)
+
+For Svelte and SvelteKit apps:
+
+```bash
+npm install @byok-relay/svelte
+```
+
+```svelte
+<script>
+  import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/svelte';
+  import { onMount, onDestroy } from 'svelte';
+  const relay = createByokRelayStore({ appId: 'myapp' });
+  const chat  = createStreamingChatStore({ appId: 'myapp', provider: 'openai' });
+  onMount(() => relay.register());
+</script>
+<!-- Use $relay.isRegistered, $chat.messages, $chat.isStreaming, $chat.streamingContent -->
+```
+
+Stores: `createByokRelayStore` · `createChatStore` · `createStreamingChatStore` · `createRelayHealthStore`.
+SSR-safe for SvelteKit. npm: https://www.npmjs.com/package/@byok-relay/svelte
+
+## React hooks — @byok-relay/react
+
+For React apps (Lovable, Bolt.new, Vite, Next.js, Remix), use the official hooks package:
+
+```bash
+npm install @byok-relay/react
+```
+
+```jsx
+import { useChat, useStreamingChat, useByokRelay } from '@byok-relay/react';
+
+// Non-streaming chat
+const { messages, sendMessage, isLoading } = useChat({
+  appId: 'my-app',
+  provider: 'openai',   // or 'anthropic', 'groq', 'mistral', 'openrouter'
+  model: 'gpt-4o',
+  // relayUrl defaults to https://relay.byokrelay.com
+});
+
+// Streaming chat (SSE)
+const { messages, sendMessage, streamingContent, isStreaming } = useStreamingChat({
+  appId: 'my-app', provider: 'anthropic', model: 'claude-3-5-sonnet-20241022'
+});
+
+// Key management UI
+const { storeKey, isRegistered } = useByokRelay({ appId: 'my-app' });
+await storeKey('openai', userApiKey);
+```
+
+Hooks: `useByokRelay` (token + key CRUD), `useChat`, `useStreamingChat`, `useRelayHealth`.
+npm: https://www.npmjs.com/package/@byok-relay/react
+
+## MCP Server — @byok-relay/mcp
+
+For Claude Desktop, Claude Code, Cursor, Windsurf:
+
+```bash
+npx -y @byok-relay/mcp
+```
+
+Tools: `byok_relay_health`, `byok_relay_register`, `byok_relay_store_key`, `byok_relay_request`, `byok_relay_chat`, `byok_relay_stats`.
+npm: https://www.npmjs.com/package/@byok-relay/mcp
+
+## OpenAPI spec
+
+Machine-readable API spec (for agents/tools/code-gen):
+- JSON: https://relay.byokrelay.com/openapi.json
+- YAML: https://relay.byokrelay.com/openapi.yaml
+
 ## License
 
 Apache 2.0 — free to self-host or build on top of.
@@ -108,8 +210,51 @@ Services use Angular `signal()` when @angular/core 16+ is detected; plain getter
 
 npm: https://www.npmjs.com/package/@byok-relay/angular
 
+## API Reference
+
+Full OpenAPI 3.0 specification available at runtime:
+- JSON: https://relay.byokrelay.com/openapi.json
+- YAML: https://relay.byokrelay.com/openapi.yaml
+- Source: https://github.com/avikalpg/byok-relay/blob/main/openapi.json
+
+Import into Postman, Insomnia, or any OpenAPI-aware tool. AI coding agents can fetch `/openapi.json` to read the full API surface programmatically.
+
+## MCP Server (Claude Desktop / Claude Code / Cursor)
+
+byok-relay ships an official MCP server (`@byok-relay/mcp`) so AI assistants can relay requests through users' own API keys directly from the chat interface.
+
+Install in Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "byok-relay": {
+      "command": "npx",
+      "args": ["-y", "@byok-relay/mcp"],
+      "env": {
+        "RELAY_URL": "https://relay.byokrelay.com"
+      }
+    }
+  }
+}
+```
+
+Run `byok_relay_register`, add the returned token as `RELAY_TOKEN`, then restart the MCP host before using authenticated tools.
+
+Available MCP tools: `byok_relay_health`, `byok_relay_register`, `byok_relay_store_key`, `byok_relay_request`, `byok_relay_chat`, `byok_relay_stats`.
+
+See https://github.com/avikalpg/byok-relay/blob/main/packages/mcp/README.md for the full setup guide.
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
 - Hosted relay: https://relay.byokrelay.com
+- OpenAPI spec: https://relay.byokrelay.com/openapi.json
+- MCP server: https://www.npmjs.com/package/@byok-relay/mcp
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
+- @byok-relay/vue (Vue 3 composables): https://www.npmjs.com/package/@byok-relay/vue
+- @byok-relay/svelte (Svelte stores): https://www.npmjs.com/package/@byok-relay/svelte
+- @byok-relay/react (React hooks): https://www.npmjs.com/package/@byok-relay/react
+- @byok-relay/angular (Angular services): https://www.npmjs.com/package/@byok-relay/angular
+- @byok-relay/client (framework-agnostic): https://www.npmjs.com/package/@byok-relay/client
+- @byok-relay/mcp (Claude Desktop/Code MCP): https://www.npmjs.com/package/@byok-relay/mcp

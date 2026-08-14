@@ -29,14 +29,24 @@ function getRedisClient() {
   const url = process.env.REDIS_URL;
   if (!url) return null;
 
-  _client = new Redis(url, {
-    // Bound connection attempts and command retries while continuing to reconnect.
-    enableReadyCheck: true,
-    connectTimeout: 2000,
-    maxRetriesPerRequest: 3,
-    retryStrategy: (times) => Math.min(times * 250, 1000),
-    lazyConnect: false,
-  });
+  let client;
+  try {
+    client = new Redis(url, {
+      // Bound connection attempts and command retries while continuing to reconnect.
+      enableReadyCheck: true,
+      connectTimeout: 2000,
+      maxRetriesPerRequest: 3,
+      retryStrategy: (times) => Math.min(times * 250, 1000),
+      lazyConnect: false,
+    });
+  } catch (err) {
+    const detail = err && (err.stack || err.message) ? (err.stack || err.message) : err;
+    console.error('[rate-limit-redis] Redis client creation failed:', detail);
+    _client = null;
+    return null;
+  }
+
+  _client = client;
 
   _client.on('error', (err) => {
     console.error('[rate-limit-redis] Redis connection error:', err.message);
