@@ -216,7 +216,7 @@ const chat = useStreamingChat({ token: relay.token, provider: 'openai', model: '
 
 ### `useRelayHealth(opts)`
 
-Polls the relay `/health` endpoint and exposes liveness + optional readiness state. Polling starts on `onMounted` and stops on `onUnmounted`.
+Polls the relay `/health` endpoint and exposes liveness + optional readiness state. Polling starts on `onMounted` and stops on `onUnmounted`; set `intervalMs: 0` to disable repeated polling after manual or initial checks.
 
 ```js
 const health = useRelayHealth({
@@ -326,7 +326,7 @@ See [byokrelay.com](https://byokrelay.com) for full self-hosting docs.
 
 ## License
 
-MIT
+Apache-2.0
 
 ---
 

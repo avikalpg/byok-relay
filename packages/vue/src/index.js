@@ -44,6 +44,36 @@ function storageRemove(key) {
   catch { /* ignore */ }
 }
 
+function legacyTokenStorageKey(appId) {
+  return `byok_relay_token_${appId}`;
+}
+
+function tokenStorageKey(relayUrl, appId) {
+  const relayScope = String(relayUrl || DEFAULT_RELAY_URL).replace(/\/+$/, '');
+  const appScope = appId == null || appId === '' ? 'default' : String(appId);
+  return `byok_relay_token_v2_${encodeURIComponent(JSON.stringify([relayScope, appScope]))}`;
+}
+
+function readStoredToken(tokenKey, legacyTokenKey) {
+  const existing = storageGet(tokenKey);
+  if (existing) return existing;
+
+  if (legacyTokenKey && legacyTokenKey !== tokenKey) {
+    const legacy = storageGet(legacyTokenKey);
+    if (legacy) {
+      storageSet(tokenKey, legacy);
+      return legacy;
+    }
+  }
+
+  return null;
+}
+
+function removeStoredToken(tokenKey, legacyTokenKey) {
+  storageRemove(tokenKey);
+  if (legacyTokenKey && legacyTokenKey !== tokenKey) storageRemove(legacyTokenKey);
+}
+
 // ─── useByokRelay ─────────────────────────────────────────────────────────────
 
 /**
@@ -65,9 +95,10 @@ function storageRemove(key) {
  * }}
  */
 function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
-  const tokenKey = `byok_relay_token_${appId}`;
+  const tokenKey = tokenStorageKey(relayUrl, appId);
+  const legacyTokenKey = legacyTokenStorageKey(appId);
 
-  const token = ref(storageGet(tokenKey));
+  const token = ref(readStoredToken(tokenKey, legacyTokenKey));
   const error = ref(null);
 
   const isRegistered = computed(() => Boolean(token.value));
@@ -137,18 +168,23 @@ function useByokRelay({ relayUrl = DEFAULT_RELAY_URL, appId } = {}) {
    * @returns {Promise<string[]>}
    */
   async function listProviders() {
+    error.value = null;
     if (!token.value) return [];
     const res = await fetch(`${relayUrl}/keys`, {
       headers: { 'Authorization': `Bearer ${token.value}` },
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      error.value = body.error || `Failed to list providers (${res.status})`;
+      return [];
+    }
     const body = await res.json();
     return body.providers || [];
   }
 
   /** Clear the relay token from state and localStorage. */
   function logout() {
-    storageRemove(tokenKey);
+    removeStoredToken(tokenKey, legacyTokenKey);
     token.value = null;
     error.value = null;
   }

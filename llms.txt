@@ -91,7 +91,7 @@ const relay = useByokRelay({ appId: 'my-app' })
 const chat  = useStreamingChat({ token: relay.token, provider: 'openai', model: 'gpt-4o-mini' })
 </script>
 <template>
-  <div v-for="m in chat.messages.value">{{ m.role }}: {{ m.content }}</div>
+  <div v-for="m in chat.messages.value" :key="m.role + ':' + m.content">{{ m.role }}: {{ m.content }}</div>
   <p v-if="chat.isStreaming.value">{{ chat.streamingContent.value }}</p>
   <input @keydown.enter="e => chat.sendMessage(e.target.value)" />
 </template>

@@ -22,7 +22,11 @@ function computed(fn) {
   };
 }
 
-function readonly(r) { return r; }
+function readonly(r) {
+  return {
+    get value() { return r.value; },
+  };
+}
 
 function onMounted(fn) { /* no-op in test */ }
 function onUnmounted(fn) { /* no-op in test */ }
@@ -142,22 +146,69 @@ await test('logout() clears token', async () => {
   assert(!relay.isRegistered.value, 'isRegistered should be false');
 });
 
-await test('storeKey() calls /keys/:provider', async () => {
-  let capturedUrl = null;
-  mockFetch((url) => { capturedUrl = url; return jsonResponse({ ok: true }); });
-  const relay = useByokRelay({ appId: 'test-storekey' });
-  relay.token.value = 'tok_store';
-  await relay.storeKey('openai', 'sk-test-12345678');
-  assert(capturedUrl && capturedUrl.includes('/keys/openai'), `URL should include /keys/openai, got ${capturedUrl}`);
+await test('token ref is readonly to callers', async () => {
+  const relay = useByokRelay({ appId: 'test-readonly' });
+  let rejected = false;
+  try { relay.token.value = 'tok_mutated'; }
+  catch { rejected = true; }
+  assert(rejected || relay.token.value !== 'tok_mutated', 'token should not be mutable through the public ref');
 });
 
-await test('listProviders() returns array', async () => {
-  mockFetch(() => jsonResponse({ providers: ['openai', 'anthropic'] }));
+await test('stored tokens are scoped by relayUrl and appId', async () => {
+  mockFetch((url) => {
+    if (String(url).startsWith('https://relay-a.example')) return jsonResponse({ token: 'tok_a' });
+    if (String(url).startsWith('https://relay-b.example')) return jsonResponse({ token: 'tok_b' });
+    return jsonResponse({ token: 'tok_default' });
+  });
+  const relayA = useByokRelay({ relayUrl: 'https://relay-a.example', appId: 'same-app' });
+  const relayB = useByokRelay({ relayUrl: 'https://relay-b.example', appId: 'same-app' });
+  await relayA.register();
+  await relayB.register();
+  assertEqual(relayA.token.value, 'tok_a');
+  assertEqual(relayB.token.value, 'tok_b');
+
+  const relayAAgain = useByokRelay({ relayUrl: 'https://relay-a.example/', appId: 'same-app' });
+  assertEqual(relayAAgain.token.value, 'tok_a');
+});
+
+await test('storeKey() calls /keys/:provider after register()', async () => {
+  const calls = [];
+  mockFetch((url, opts) => {
+    calls.push({ url, opts });
+    if (String(url).endsWith('/users')) return jsonResponse({ token: 'tok_store' });
+    return jsonResponse({ ok: true });
+  });
+  const relay = useByokRelay({ appId: 'test-storekey' });
+  await relay.register();
+  await relay.storeKey('openai', 'sk-test-12345678');
+  const keyCall = calls.find(call => String(call.url).includes('/keys/openai'));
+  assert(keyCall, `URL should include /keys/openai, got ${calls.map(call => call.url).join(', ')}`);
+  assertEqual(keyCall.opts.headers.Authorization, 'Bearer tok_store');
+});
+
+await test('listProviders() returns array after register()', async () => {
+  mockFetch((url) => {
+    if (String(url).endsWith('/users')) return jsonResponse({ token: 'tok_list' });
+    return jsonResponse({ providers: ['openai', 'anthropic'] });
+  });
   const relay = useByokRelay({ appId: 'test-list' });
-  relay.token.value = 'tok_list';
+  await relay.register();
   const providers = await relay.listProviders();
   assert(Array.isArray(providers), 'should return array');
   assertEqual(providers.length, 2);
+});
+
+await test('listProviders() surfaces /keys failures', async () => {
+  mockFetch((url) => {
+    if (String(url).endsWith('/users')) return jsonResponse({ token: 'tok_list_fail' });
+    return jsonResponse({ error: 'Unauthorized' }, 401);
+  });
+  const relay = useByokRelay({ appId: 'test-list-fail' });
+  await relay.register();
+  const providers = await relay.listProviders();
+  assert(Array.isArray(providers), 'should return array');
+  assertEqual(providers.length, 0);
+  assertEqual(relay.error.value, 'Unauthorized');
 });
 
 await test('listProviders() returns empty array if not registered', async () => {
