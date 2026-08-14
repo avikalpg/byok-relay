@@ -68,6 +68,38 @@ await storeKey('openai', userEnteredKey);
 
 See [`packages/react`](./packages/react/README.md) for full API docs.
 
+## Vue composables
+
+For Vue 3 apps (Nuxt, Vite+Vue, Quasar), install the composables package:
+
+```bash
+npm install @byok-relay/vue
+```
+
+```vue
+<script setup>
+import { useByokRelay, useStreamingChat } from '@byok-relay/vue'
+
+const relay = useByokRelay({ appId: 'my-app' })
+const chat  = useStreamingChat({
+  token: relay.token,
+  provider: 'openai',  // or 'anthropic', 'groq', 'mistral', 'openrouter'
+  model: 'gpt-4o-mini',
+})
+</script>
+
+<template>
+  <div v-for="m in chat.messages.value" :key="m.role">{{ m.role }}: {{ m.content }}</div>
+  <p v-if="chat.isStreaming.value" style="opacity:.6">{{ chat.streamingContent.value }}</p>
+  <input @keydown.enter="e => chat.sendMessage(e.target.value)" />
+  <button v-if="chat.isStreaming.value" @click="chat.stopStreaming()">Stop</button>
+</template>
+```
+
+Four composables: `useByokRelay` (token + key storage), `useChat` (stateful chat), `useStreamingChat` (SSE streaming with `stopStreaming()`), `useRelayHealth` (polls `/health`).
+
+See [`packages/vue`](./packages/vue/README.md) for full API docs.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
