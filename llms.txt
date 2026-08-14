@@ -99,15 +99,100 @@ const chat  = useStreamingChat({ token: relay.token, provider: 'openai', model: 
 
 npm: https://www.npmjs.com/package/@byok-relay/vue
 Full docs: https://github.com/avikalpg/byok-relay/tree/main/packages/vue
+## React hooks — @byok-relay/react
+
+For React apps (Lovable, Bolt.new, Vite, Next.js, Remix), use the official hooks package:
+
+```bash
+npm install @byok-relay/react
+```
+
+```jsx
+import { useChat, useStreamingChat, useByokRelay } from '@byok-relay/react';
+
+// Non-streaming chat
+const { messages, sendMessage, isLoading } = useChat({
+  appId: 'my-app',
+  provider: 'openai',   // or 'anthropic', 'groq', 'mistral', 'openrouter'
+  model: 'gpt-4o',
+  // relayUrl defaults to https://relay.byokrelay.com
+});
+
+// Streaming chat (SSE)
+const { messages, sendMessage, streamingContent, isStreaming } = useStreamingChat({
+  appId: 'my-app', provider: 'anthropic', model: 'claude-3-5-sonnet-20241022'
+});
+
+// Key management UI
+const { storeKey, isRegistered } = useByokRelay({ appId: 'my-app' });
+await storeKey('openai', userApiKey);
+```
+
+Hooks: `useByokRelay` (token + key CRUD), `useChat`, `useStreamingChat`, `useRelayHealth`.
+npm: https://www.npmjs.com/package/@byok-relay/react
+
+## MCP Server — @byok-relay/mcp
+
+For Claude Desktop, Claude Code, Cursor, Windsurf:
+
+```bash
+npx -y @byok-relay/mcp
+```
+
+Tools: `byok_relay_health`, `byok_relay_register`, `byok_relay_store_key`, `byok_relay_request`, `byok_relay_chat`, `byok_relay_stats`.
+npm: https://www.npmjs.com/package/@byok-relay/mcp
+
+## OpenAPI spec
+
+Machine-readable API spec (for agents/tools/code-gen):
+- JSON: https://relay.byokrelay.com/openapi.json
+- YAML: https://relay.byokrelay.com/openapi.yaml
 
 ## License
 
 Apache 2.0 — free to self-host or build on top of.
 
+## API Reference
+
+Full OpenAPI 3.0 specification available at runtime:
+- JSON: https://relay.byokrelay.com/openapi.json
+- YAML: https://relay.byokrelay.com/openapi.yaml
+- Source: https://github.com/avikalpg/byok-relay/blob/main/openapi.json
+
+Import into Postman, Insomnia, or any OpenAPI-aware tool. AI coding agents can fetch `/openapi.json` to read the full API surface programmatically.
+
+## MCP Server (Claude Desktop / Claude Code / Cursor)
+
+byok-relay ships an official MCP server (`@byok-relay/mcp`) so AI assistants can relay requests through users' own API keys directly from the chat interface.
+
+Install in Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "byok-relay": {
+      "command": "npx",
+      "args": ["-y", "@byok-relay/mcp"],
+      "env": {
+        "RELAY_URL": "https://relay.byokrelay.com"
+      }
+    }
+  }
+}
+```
+
+Run `byok_relay_register`, add the returned token as `RELAY_TOKEN`, then restart the MCP host before using authenticated tools.
+
+Available MCP tools: `byok_relay_health`, `byok_relay_register`, `byok_relay_store_key`, `byok_relay_request`, `byok_relay_chat`, `byok_relay_stats`.
+
+See https://github.com/avikalpg/byok-relay/blob/main/packages/mcp/README.md for the full setup guide.
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
 - Hosted relay: https://relay.byokrelay.com
+- OpenAPI spec: https://relay.byokrelay.com/openapi.json
+- MCP server: https://www.npmjs.com/package/@byok-relay/mcp
 - Issues / feature requests: https://github.com/avikalpg/byok-relay/issues
 - @byok-relay/vue (Vue 3 composables): https://www.npmjs.com/package/@byok-relay/vue
 - @byok-relay/react (React hooks): https://www.npmjs.com/package/@byok-relay/react
