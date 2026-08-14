@@ -100,6 +100,33 @@ Four composables: `useByokRelay` (token + key storage), `useChat` (stateful chat
 
 See [`packages/vue`](./packages/vue/README.md) for full API docs.
 
+## Svelte stores
+
+```bash
+npm install @byok-relay/svelte
+```
+
+```svelte
+<script>
+  import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/svelte';
+  import { onMount } from 'svelte';
+
+  const relay = createByokRelayStore({ appId: 'myapp' });
+  const chat  = createStreamingChatStore({ appId: 'myapp', provider: 'openai' });
+
+  onMount(() => {
+    relay.register().catch(console.error);
+  });
+</script>
+
+{#if $chat.isStreaming}
+  <p>{$chat.streamingContent}<span>▋</span></p>
+  <button on:click={chat.stopStreaming}>Stop</button>
+{/if}
+```
+
+Four stores: `createByokRelayStore` · `createChatStore` · `createStreamingChatStore` · `createRelayHealthStore`. SvelteKit SSR-safe. See [`packages/svelte`](./packages/svelte).
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
@@ -110,7 +137,7 @@ npx skills add avikalpg/byok-relay
 
 Or point your agent directly at the skill file:
 
-```
+```text
 https://byokrelay.com/skill
 ```
 
@@ -118,7 +145,7 @@ https://byokrelay.com/skill
 
 ## How it works
 
-```
+```text
 Browser                  byok-relay              AI Provider
   │                           │                       │
   ├─ POST /users ────────────►│                       │
