@@ -134,6 +134,7 @@ npm install @byok-relay/solid
 ```
 
 ```jsx
+import { For, Show } from 'solid-js';
 import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/solid';
 
 function App() {
