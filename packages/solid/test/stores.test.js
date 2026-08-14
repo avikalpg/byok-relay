@@ -333,11 +333,14 @@ await test('sendMessage() preserves SSE frames split across chunks', async () =>
     ...makeSSEStream(sseChunks),
   }));
 
-  const s = createStreamingChatStore({ provider: 'openai', model: 'gpt-4o-mini' });
-  await s.sendMessage('Hi', 'tok_abc');
+  try {
+    const s = createStreamingChatStore({ provider: 'openai', model: 'gpt-4o-mini' });
+    await s.sendMessage('Hi', 'tok_abc');
 
-  assertEqual(s.messages()[1].content, 'Hello world');
-  clearMocks();
+    assertEqual(s.messages()[1].content, 'Hello world');
+  } finally {
+    clearMocks();
+  }
 });
 
 await test('sendMessage() with anthropic streaming', async () => {
