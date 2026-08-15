@@ -193,6 +193,7 @@ npm install @byok-relay/angular
 ```
 
 ```typescript
+import { NgFor } from '@angular/common';
 import { Component, inject } from '@angular/core';
 import { ByokRelayService, ChatService, provideByokRelay } from '@byok-relay/angular';
 
@@ -202,10 +203,14 @@ export const appConfig = {
 };
 
 // chat.component.ts
-@Component({ template: `
-  <div *ngFor="let m of chat.messages()">{{ m.role }}: {{ m.content }}</div>
-  <button (click)="send('Hello!')">Send</button>
-` })
+@Component({
+  standalone: true,
+  imports: [NgFor],
+  template: `
+    <div *ngFor="let m of chat.messages()">{{ m.role }}: {{ m.content }}</div>
+    <button (click)="send('Hello!')">Send</button>
+  `,
+})
 export class ChatComponent {
   relay = inject(ByokRelayService);
   chat  = inject(ChatService);

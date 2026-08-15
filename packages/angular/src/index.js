@@ -29,7 +29,6 @@ const DEFAULT_STORAGE_KEY = 'byok_relay_token';
 const PROVIDER_PATHS = {
   openai:     'chat/completions',
   anthropic:  'messages',
-  google:     'models/{model}:generateContent',
   groq:       'chat/completions',
   mistral:    'chat/completions',
   openrouter: 'chat/completions',
@@ -84,6 +83,44 @@ function getSafeStorage() {
   };
 }
 
+function buildChatBody(provider, model, messages, systemPrompt, extra = {}, stream = false) {
+  const allMessages = systemPrompt
+    ? [{ role: 'system', content: systemPrompt }, ...messages]
+    : [...messages];
+
+  if (provider === 'anthropic') {
+    const system = allMessages
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content)
+      .join('\n');
+    const body = {
+      model,
+      messages: allMessages.filter((m) => m.role !== 'system'),
+      max_tokens: 1024,
+      ...(stream ? { stream: true } : {}),
+      ...extra,
+    };
+    if (system) body.system = system;
+    return body;
+  }
+
+  return {
+    model,
+    messages: allMessages,
+    ...(stream ? { stream: true } : {}),
+    ...extra,
+  };
+}
+
+function extractStreamDelta(event, provider) {
+  if (!event) return '';
+  if (provider === 'anthropic') {
+    if (event.type === 'content_block_delta') return event.delta?.text || '';
+    return '';
+  }
+  return event.choices?.[0]?.delta?.content ?? '';
+}
+
 // ─── ByokRelayService ─────────────────────────────────────────────────────────
 
 /**
@@ -112,6 +149,7 @@ class ByokRelayService {
   get token() { return this._token.value; }
   get loading() { return this._loading.value; }
   get error() { return this._error.value; }
+  get relayUrl() { return this._relayUrl; }
 
   /** Register a new relay user and persist the token. */
   async register(appId, options = {}) {
@@ -260,6 +298,9 @@ class ChatService {
    * @param {object} options - { provider, model, systemPrompt, ...extraBody }
    */
   async sendMessage(content, options = {}) {
+    const trimmedContent = content?.trim();
+    if (!trimmedContent) throw new Error('Message content is required');
+
     const {
       provider = 'openai',
       model = 'gpt-4o-mini',
@@ -267,27 +308,21 @@ class ChatService {
       ...extra
     } = options;
 
-    const tok = this._relay._storage.getItem(this._relay._storageKey);
+    const tok = this._relay.token();
     if (!tok) throw new Error('Not registered. Call ByokRelayService.register() first.');
 
-    const newUserMsg = { role: 'user', content };
+    const newUserMsg = { role: 'user', content: trimmedContent };
     this._messages.update((prev) => [...prev, newUserMsg]);
     this._loading.set(true);
     this._error.set(null);
 
     const history = this._messages.value();
-    const body = {
-      model,
-      messages: systemPrompt
-        ? [{ role: 'system', content: systemPrompt }, ...history]
-        : [...history],
-      ...extra,
-    };
+    const body = buildChatBody(provider, model, history, systemPrompt, extra);
 
     try {
       const path = PROVIDER_PATHS[provider] || 'chat/completions';
       const resp = await fetch(
-        `${this._relay._relayUrl}/relay/${provider}/${path}`,
+        `${this._relay.relayUrl}/relay/${provider}/${path}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-relay-token': tok },
@@ -364,6 +399,9 @@ class StreamingChatService {
    * @param {object} options - { provider, model, systemPrompt, onChunk, ...extraBody }
    */
   async streamMessage(content, options = {}) {
+    const trimmedContent = content?.trim();
+    if (!trimmedContent) throw new Error('Message content is required');
+
     const {
       provider = 'openai',
       model = 'gpt-4o-mini',
@@ -372,31 +410,24 @@ class StreamingChatService {
       ...extra
     } = options;
 
-    const tok = this._relay._storage.getItem(this._relay._storageKey);
+    const tok = this._relay.token();
     if (!tok) throw new Error('Not registered. Call ByokRelayService.register() first.');
 
-    this._messages.update((prev) => [...prev, { role: 'user', content }]);
+    this._messages.update((prev) => [...prev, { role: 'user', content: trimmedContent }]);
     this._streaming.set(true);
     this._streamingContent.set('');
     this._error.set(null);
     this._abortController = new AbortController();
 
     const history = this._messages.value();
-    const body = {
-      model,
-      messages: systemPrompt
-        ? [{ role: 'system', content: systemPrompt }, ...history]
-        : [...history],
-      stream: true,
-      ...extra,
-    };
+    const body = buildChatBody(provider, model, history, systemPrompt, extra, true);
 
     let accumulated = '';
 
     try {
       const path = PROVIDER_PATHS[provider] || 'chat/completions';
       const resp = await fetch(
-        `${this._relay._relayUrl}/relay/${provider}/${path}`,
+        `${this._relay.relayUrl}/relay/${provider}/${path}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-relay-token': tok },
@@ -412,6 +443,7 @@ class StreamingChatService {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let leftover = '';
+      let streamDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -423,10 +455,13 @@ class StreamingChatService {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const payload = line.slice(6).trim();
-          if (payload === '[DONE]') break;
+          if (payload === '[DONE]') {
+            streamDone = true;
+            break;
+          }
           try {
             const parsed = JSON.parse(payload);
-            const delta = parsed.choices?.[0]?.delta?.content ?? '';
+            const delta = extractStreamDelta(parsed, provider);
             if (delta) {
               accumulated += delta;
               this._streamingContent.set(accumulated);
@@ -434,6 +469,7 @@ class StreamingChatService {
             }
           } catch { /* skip malformed SSE lines */ }
         }
+        if (streamDone) break;
       }
 
       this._messages.update((prev) => [
@@ -509,8 +545,8 @@ class RelayHealthService {
     this._error.set(null);
     try {
       const url = deep
-        ? `${this._relay._relayUrl}/health?deep=1`
-        : `${this._relay._relayUrl}/health`;
+        ? `${this._relay.relayUrl}/health?deep=1`
+        : `${this._relay.relayUrl}/health`;
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`Health check returned ${resp.status}`);
       const data = await resp.json();
@@ -518,7 +554,6 @@ class RelayHealthService {
       return data;
     } catch (err) {
       this._error.set(err.message);
-      this._status.set(null);
       throw err;
     } finally {
       this._loading.set(false);
@@ -583,14 +618,8 @@ function createByokRelayBundle(config = {}) {
  */
 function provideByokRelay(config = {}) {
   try {
-    const { makeEnvironmentProviders, InjectionToken } = require('@angular/core');
-
-    const RELAY_CONFIG_TOKEN = new InjectionToken('BYOK_RELAY_CONFIG', {
-      providedIn: 'root',
-      factory: () => config,
-    });
-
-    return makeEnvironmentProviders([
+    const { makeEnvironmentProviders } = require('@angular/core');
+    const providers = [
       {
         provide: ByokRelayService,
         useFactory: () => new ByokRelayService(config),
@@ -610,7 +639,11 @@ function provideByokRelay(config = {}) {
         useFactory: (r) => new RelayHealthService(r, config.healthIntervalMs),
         deps: [ByokRelayService],
       },
-    ]);
+    ];
+
+    return typeof makeEnvironmentProviders === 'function'
+      ? makeEnvironmentProviders(providers)
+      : providers;
   } catch {
     // @angular/core not installed — return plain bundle (test / standalone usage)
     return createByokRelayBundle(config);
