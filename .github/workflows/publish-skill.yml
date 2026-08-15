@@ -61,7 +61,7 @@ jobs:
           CURRENT: ${{ steps.current_version.outputs.version }}
           BUMP: ${{ github.event.inputs.version_bump || 'patch' }}
         run: |
-          if ! [[ "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$CURRENT" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "Invalid current version: $CURRENT"
             exit 1
           fi
@@ -117,10 +117,14 @@ jobs:
               CHANGELOG="Auto-publish from main branch"
             fi
           fi
+          DELIMITER="CHANGELOG_$(openssl rand -hex 16)"
+          while grep -Fqx "$DELIMITER" <<< "$CHANGELOG"; do
+            DELIMITER="CHANGELOG_$(openssl rand -hex 16)"
+          done
           {
-            echo 'text<<__CHANGELOG__'
+            printf 'text<<%s\n' "$DELIMITER"
             printf '%s\n' "$CHANGELOG"
-            echo '__CHANGELOG__'
+            printf '%s\n' "$DELIMITER"
           } >> "$GITHUB_OUTPUT"
 
       - name: Authenticate ClawHub
@@ -163,7 +167,8 @@ jobs:
           fi
           echo "🚀 Triggering Vercel website redeploy to sync updated skill..."
           PAYLOAD=$(jq -n --arg ref main --arg version "$VERSION" '{ref: $ref, version: $version}')
-          curl -X POST "$VERCEL_DEPLOY_HOOK_URL" \
+          curl --fail-with-body --show-error --silent --connect-timeout 10 --max-time 30 \
+            -X POST "$VERCEL_DEPLOY_HOOK_URL" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD" || true
+            -d "$PAYLOAD"
           echo "✅ Deploy hook triggered (website will fetch latest skill on build)"

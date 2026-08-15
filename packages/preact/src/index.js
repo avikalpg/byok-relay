@@ -147,13 +147,14 @@ async function _streamSSE (url, body, headers, signal, onChunk, onDone, onError)
 
 function _chatBody ({ provider, model, messages, systemPrompt, stream, extraParams }) {
   if (provider === 'anthropic') {
+    const { max_tokens: maxTokensSnake, maxTokens, ...anthropicParams } = extraParams;
     return {
       model,
-      max_tokens: extraParams.max_tokens ?? extraParams.maxTokens ?? 1024,
+      max_tokens: maxTokensSnake ?? maxTokens ?? 1024,
       ...(stream ? { stream: true } : {}),
       messages,
       ...(systemPrompt ? { system: systemPrompt } : {}),
-      ...extraParams,
+      ...anthropicParams,
     };
   }
   return {
@@ -375,6 +376,7 @@ function useStreamingChat ({
   const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       if (abortRef.current) abortRef.current.abort();

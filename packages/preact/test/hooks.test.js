@@ -273,6 +273,26 @@ await test('handles provider=anthropic relay path', async () => {
   afterEach();
 });
 
+await test('maps Anthropic maxTokens to max_tokens without forwarding camelCase', async () => {
+  localStorage.setItem('byok_relay_token', 'tok-ant');
+  let body;
+  mockFetch(async (_url, opts) => {
+    body = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ content: [{ text: 'Sure!' }] }) };
+  });
+  const h = useChat({
+    relayUrl: 'http://relay',
+    appId: 'app1',
+    provider: 'anthropic',
+    extraParams: { maxTokens: 42, temperature: 0.2 },
+  });
+  await h.sendMessage('test');
+  assertEqual(body.max_tokens, 42);
+  assert(!Object.prototype.hasOwnProperty.call(body, 'maxTokens'), 'camelCase maxTokens is not forwarded');
+  assertEqual(body.temperature, 0.2);
+  afterEach();
+});
+
 await test('handles provider=groq relay path', async () => {
   localStorage.setItem('byok_relay_token', 'tok-groq');
   let capturedUrl;
