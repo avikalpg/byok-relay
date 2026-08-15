@@ -280,6 +280,7 @@ class ChatService {
     this._messages = createAngularSignal([]);
     this._loading = createAngularSignal(false);
     this._error = createAngularSignal(null);
+    this._activeRequests = 0;
   }
 
   get messages() { return this._messages.value; }
@@ -313,6 +314,7 @@ class ChatService {
 
     const newUserMsg = { role: 'user', content: trimmedContent };
     this._messages.update((prev) => [...prev, newUserMsg]);
+    this._activeRequests += 1;
     this._loading.set(true);
     this._error.set(null);
 
@@ -348,7 +350,8 @@ class ChatService {
       this._error.set(err.message);
       throw err;
     } finally {
-      this._loading.set(false);
+      this._activeRequests = Math.max(0, this._activeRequests - 1);
+      if (this._activeRequests === 0) this._loading.set(false);
     }
   }
 }

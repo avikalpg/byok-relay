@@ -315,19 +315,15 @@ await test('sendMessage() rolls back user message on error', async () => {
   assert(chat.error() !== null, 'error signal set');
 });
 
-await test('sendMessage() preserves newer messages when an earlier concurrent request fails', async () => {
+await test('sendMessage() preserves loading and newer messages when an earlier concurrent request fails', async () => {
   clearMocks();
   const first = makeDeferred();
+  const second = makeDeferred();
   registerMock(/\/relay\//, (url, opts) => {
     const body = JSON.parse(opts.body);
     const latest = body.messages[body.messages.length - 1]?.content;
     if (latest === 'First') return first.promise;
-    if (latest === 'Second') {
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ choices: [{ message: { content: 'Second reply' } }] }),
-      });
-    }
+    if (latest === 'Second') return second.promise;
     return Promise.reject(new Error(`Unexpected message: ${latest}`));
   });
 
@@ -337,13 +333,22 @@ await test('sendMessage() preserves newer messages when an earlier concurrent re
   const chat = new ChatService(relay);
 
   const firstRequest = chat.sendMessage('First');
-  const secondReply = await chat.sendMessage('Second');
-  assertEqual(secondReply, 'Second reply', 'second request completes first');
+  const secondRequest = chat.sendMessage('Second');
+  assertEqual(chat.loading(), true, 'loading starts with active requests');
 
   first.reject(new Error('Network failed'));
   let firstThrew = false;
   try { await firstRequest; } catch { firstThrew = true; }
   assert(firstThrew, 'first request should fail');
+  assertEqual(chat.loading(), true, 'loading remains true while second request is pending');
+
+  second.resolve({
+    ok: true,
+    json: () => Promise.resolve({ choices: [{ message: { content: 'Second reply' } }] }),
+  });
+  const secondReply = await secondRequest;
+  assertEqual(secondReply, 'Second reply', 'second request completes after first failure');
+  assertEqual(chat.loading(), false, 'loading clears after all requests complete');
 
   const msgs = chat.messages();
   assertEqual(msgs.length, 2, 'newer user + assistant messages remain');
