@@ -15,6 +15,7 @@
 /* -------------------------------------------------------------------------- */
 
 let _useState, _useEffect, _useCallback, _useRef;
+let _warnedMissingHooks = false;
 
 function _resolveHooks () {
   if (_useState) return;
@@ -37,6 +38,10 @@ function _resolveHooks () {
     return;
   } catch (_) { /* not installed */ }
   // Inline shim for test / non-DOM environments
+  if (!_warnedMissingHooks && typeof window !== 'undefined' && typeof console !== 'undefined' && console.warn) {
+    _warnedMissingHooks = true;
+    console.warn('[@byok-relay/preact] Neither preact/hooks nor react could be resolved; using a non-reactive test shim. Install preact to enable component re-renders.');
+  }
   _useState = (init) => {
     const val = typeof init === 'function' ? init() : init;
     const setter = (next) => {
@@ -105,12 +110,22 @@ async function _streamSSE (url, body, headers, signal, onChunk, onDone, onError)
     onError(msg);
     return;
   }
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    onError('Response has no readable body');
+    return;
+  }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
   while (true) {
     let chunk;
-    try { chunk = await reader.read(); } catch (_) { break; }
+    try {
+      chunk = await reader.read();
+    } catch (err) {
+      if (signal?.aborted) return;
+      onError(err.message || 'Stream read error');
+      return;
+    }
     if (chunk.done) break;
     buf += decoder.decode(chunk.value, { stream: true });
     const lines = buf.split('\n');
@@ -126,7 +141,27 @@ async function _streamSSE (url, body, headers, signal, onChunk, onDone, onError)
       if (delta) onChunk(delta);
     }
   }
+  if (signal?.aborted) return;
   onDone();
+}
+
+function _chatBody ({ provider, model, messages, systemPrompt, stream, extraParams }) {
+  if (provider === 'anthropic') {
+    return {
+      model,
+      max_tokens: extraParams.max_tokens ?? extraParams.maxTokens ?? 1024,
+      ...(stream ? { stream: true } : {}),
+      messages,
+      ...(systemPrompt ? { system: systemPrompt } : {}),
+      ...extraParams,
+    };
+  }
+  return {
+    model,
+    ...(stream ? { stream: true } : {}),
+    messages: systemPrompt ? [{ role: 'system', content: systemPrompt }, ...messages] : messages,
+    ...extraParams,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -159,67 +194,85 @@ function useByokRelay ({ relayUrl, appId, storageKey = 'byok_relay' } = {}) {
   const [token, setToken] = useState(() => _safeGet(tokenKey) || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const pendingRef = useRef(null);
 
   /** Retrieve an existing token from localStorage or register a new user. */
   const getToken = useCallback(async () => {
     const stored = _safeGet(tokenKey);
     if (stored) { setToken(stored); return stored; }
+    if (pendingRef.current) return pendingRef.current;
     setLoading(true);
     setError(null);
-    try {
-      const res = await fetch(`${relayUrl}/users`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ app_id: appId }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      const t = data.token;
-      _safeSet(tokenKey, t);
-      setToken(t);
-      return t;
-    } catch (err) {
-      setError(err.message);
-      return null;
-    } finally {
-      setLoading(false);
-    }
+    pendingRef.current = (async () => {
+      try {
+        const res = await fetch(`${relayUrl}/users`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ app_id: appId }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const t = data.token;
+        _safeSet(tokenKey, t);
+        setToken(t);
+        return t;
+      } catch (err) {
+        setError(err.message);
+        return null;
+      } finally {
+        setLoading(false);
+        pendingRef.current = null;
+      }
+    })();
+    return pendingRef.current;
   }, [relayUrl, appId, tokenKey]);
 
   /** Store (or update) a provider API key in the relay. */
   const storeKey = useCallback(async (provider, apiKey) => {
     const t = token || await getToken();
     if (!t) return { ok: false, error: 'No relay token' };
-    const res = await fetch(`${relayUrl}/keys/${provider}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${t}` },
-      body: JSON.stringify({ key: apiKey }),
-    });
-    const data = await res.json();
-    return { ok: res.ok, ...data };
+    try {
+      const res = await fetch(`${relayUrl}/keys/${provider}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${t}` },
+        body: JSON.stringify({ key: apiKey }),
+      });
+      const data = await res.json();
+      return { ok: res.ok, ...data };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   }, [relayUrl, token, getToken]);
 
   /** Delete a stored provider key. */
   const deleteKey = useCallback(async (provider) => {
     const t = token || await getToken();
     if (!t) return { ok: false, error: 'No relay token' };
-    const res = await fetch(`${relayUrl}/keys/${provider}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${t}` },
-    });
-    return { ok: res.ok };
+    try {
+      const res = await fetch(`${relayUrl}/keys/${provider}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${t}` },
+      });
+      return { ok: res.ok };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   }, [relayUrl, token, getToken]);
 
   /** List all stored provider keys (returns key names, not values). */
   const listKeys = useCallback(async () => {
     const t = token || await getToken();
     if (!t) return [];
-    const res = await fetch(`${relayUrl}/keys`, {
-      headers: { 'Authorization': `Bearer ${t}` },
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.keys || [];
+    try {
+      const res = await fetch(`${relayUrl}/keys`, {
+        headers: { 'Authorization': `Bearer ${t}` },
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.keys || [];
+    } catch (_) {
+      return [];
+    }
   }, [relayUrl, token, getToken]);
 
   /** Remove the relay token from localStorage (logout). */
@@ -268,13 +321,8 @@ function useChat ({
     if (!t) { setError('No relay token'); setLoading(false); return; }
 
     const history = [...messages, userMsg];
-    const body = {
-      model,
-      messages: systemPrompt ? [{ role: 'system', content: systemPrompt }, ...history] : history,
-      ...extraParams,
-    };
-
     const provInfo = _PROVIDERS[provider] || _PROVIDERS.openai;
+    const body = _chatBody({ provider, model, messages: history, systemPrompt, extraParams });
     try {
       const res = await fetch(`${relayUrl}/relay/${provInfo.relayPath}`, {
         method: 'POST',
@@ -324,6 +372,14 @@ function useStreamingChat ({
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState(null);
   const abortRef = useRef(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
 
   const sendMessage = useCallback(async (content) => {
     const userMsg = { role: 'user', content };
@@ -339,36 +395,42 @@ function useStreamingChat ({
     abortRef.current = controller;
 
     const history = [...messages, userMsg];
-    const body = {
-      model,
-      messages: systemPrompt ? [{ role: 'system', content: systemPrompt }, ...history] : history,
-      stream: true,
-      ...extraParams,
-    };
-
     const provInfo = _PROVIDERS[provider] || _PROVIDERS.openai;
+    const body = _chatBody({ provider, model, messages: history, systemPrompt, stream: true, extraParams });
     let accumulated = '';
 
-    await _streamSSE(
-      `${relayUrl}/relay/${provInfo.relayPath}`,
-      body,
-      { 'Content-Type': 'application/json', 'Authorization': `Bearer ${t}` },
-      controller.signal,
-      (chunk) => {
-        accumulated += chunk;
-        setStreamingContent(accumulated);
-      },
-      () => {
-        setMessages(prev => [...prev, { role: 'assistant', content: accumulated }]);
-        setStreamingContent('');
-        setIsStreaming(false);
-      },
-      (err) => {
-        setError(err);
-        setMessages(prev => prev.slice(0, -1));
-        setIsStreaming(false);
-      },
-    );
+    try {
+      await _streamSSE(
+        `${relayUrl}/relay/${provInfo.relayPath}`,
+        body,
+        { 'Content-Type': 'application/json', 'Authorization': `Bearer ${t}` },
+        controller.signal,
+        (chunk) => {
+          if (!mountedRef.current) return;
+          accumulated += chunk;
+          setStreamingContent(accumulated);
+        },
+        () => {
+          if (!mountedRef.current) return;
+          setMessages(prev => [...prev, { role: 'assistant', content: accumulated }]);
+          setStreamingContent('');
+          setIsStreaming(false);
+        },
+        (err) => {
+          if (!mountedRef.current) return;
+          setError(err);
+          setMessages(prev => prev.slice(0, -1));
+          setIsStreaming(false);
+        },
+      );
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setError(err.message || 'Stream error');
+      setMessages(prev => prev.slice(0, -1));
+      setIsStreaming(false);
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+    }
   }, [relayUrl, provider, model, systemPrompt, extraParams, messages, token, getToken]);
 
   const stopStreaming = useCallback(() => {

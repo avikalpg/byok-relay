@@ -303,7 +303,9 @@ await test('exports expected API', () => {
 
 await test('stopStreaming does not throw when no stream active', () => {
   const h = useStreamingChat({ relayUrl: 'http://relay', appId: 'test' });
-  assert(() => { h.stopStreaming(); return true; }, 'no throw');
+  let threw = false;
+  try { h.stopStreaming(); } catch (_) { threw = true; }
+  assert(!threw, 'no throw');
   afterEach();
 });
 
