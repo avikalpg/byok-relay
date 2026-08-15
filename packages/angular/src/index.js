@@ -342,8 +342,9 @@ class ChatService {
       this._messages.update((prev) => [...prev, { role: 'assistant', content: reply }]);
       return reply;
     } catch (err) {
-      // Roll back user message on failure
-      this._messages.update((prev) => prev.slice(0, -1));
+      // Roll back this request's user message on failure.
+      // Concurrent sends may have appended newer messages; keep those intact.
+      this._messages.update((prev) => prev.filter((message) => message !== newUserMsg));
       this._error.set(err.message);
       throw err;
     } finally {
@@ -401,6 +402,7 @@ class StreamingChatService {
   async streamMessage(content, options = {}) {
     const trimmedContent = content?.trim();
     if (!trimmedContent) throw new Error('Message content is required');
+    if (this._streaming.value()) throw new Error('A stream is already active');
 
     const {
       provider = 'openai',
@@ -413,7 +415,8 @@ class StreamingChatService {
     const tok = this._relay.token();
     if (!tok) throw new Error('Not registered. Call ByokRelayService.register() first.');
 
-    this._messages.update((prev) => [...prev, { role: 'user', content: trimmedContent }]);
+    const newUserMsg = { role: 'user', content: trimmedContent };
+    this._messages.update((prev) => [...prev, newUserMsg]);
     this._streaming.set(true);
     this._streamingContent.set('');
     this._error.set(null);
@@ -487,12 +490,12 @@ class StreamingChatService {
             { role: 'assistant', content: accumulated + ' [stopped]' },
           ]);
         } else {
-          // Nothing streamed — roll back user message
-          this._messages.update((prev) => prev.slice(0, -1));
+          // Nothing streamed — roll back this stream's user message.
+          this._messages.update((prev) => prev.filter((message) => message !== newUserMsg));
         }
         this._streamingContent.set('');
       } else {
-        this._messages.update((prev) => prev.slice(0, -1));
+        this._messages.update((prev) => prev.filter((message) => message !== newUserMsg));
         this._error.set(err.message);
         throw err;
       }

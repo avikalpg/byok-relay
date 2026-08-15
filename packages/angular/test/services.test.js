@@ -62,6 +62,16 @@ function registerMock(pattern, handler) {
 
 function clearMocks() { _handlers = []; }
 
+function makeDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 global.fetch = mockFetch;
 
 // ─── In-memory storage helper ─────────────────────────────────────────────────
@@ -305,6 +315,42 @@ await test('sendMessage() rolls back user message on error', async () => {
   assert(chat.error() !== null, 'error signal set');
 });
 
+await test('sendMessage() preserves newer messages when an earlier concurrent request fails', async () => {
+  clearMocks();
+  const first = makeDeferred();
+  registerMock(/\/relay\//, (url, opts) => {
+    const body = JSON.parse(opts.body);
+    const latest = body.messages[body.messages.length - 1]?.content;
+    if (latest === 'First') return first.promise;
+    if (latest === 'Second') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ choices: [{ message: { content: 'Second reply' } }] }),
+      });
+    }
+    return Promise.reject(new Error(`Unexpected message: ${latest}`));
+  });
+
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const chat = new ChatService(relay);
+
+  const firstRequest = chat.sendMessage('First');
+  const secondReply = await chat.sendMessage('Second');
+  assertEqual(secondReply, 'Second reply', 'second request completes first');
+
+  first.reject(new Error('Network failed'));
+  let firstThrew = false;
+  try { await firstRequest; } catch { firstThrew = true; }
+  assert(firstThrew, 'first request should fail');
+
+  const msgs = chat.messages();
+  assertEqual(msgs.length, 2, 'newer user + assistant messages remain');
+  assertEqual(msgs[0].content, 'Second', 'newer user message remains');
+  assertEqual(msgs[1].content, 'Second reply', 'newer assistant message remains');
+});
+
 await test('clearMessages() resets history', async () => {
   clearMocks();
   registerMock(/\/relay\//, () =>
@@ -369,6 +415,52 @@ await test('streamMessage() rejects empty content before mutating history', asyn
   assert(error, 'should throw for empty content');
   assertEqual(error.message, 'Message content is required', 'clear validation error');
   assertEqual(streaming.messages().length, 0, 'history remains empty');
+});
+
+await test('streamMessage() rejects a second active stream before mutating shared state', async () => {
+  clearMocks();
+  const unblockRead = makeDeferred();
+  const encoder = new TextEncoder();
+  let readCount = 0;
+  registerMock(/\/relay\//, (url, opts) => Promise.resolve({
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (readCount === 0) {
+              readCount++;
+              return { done: false, value: encoder.encode('data: {"choices":[{"delta":{"content":"Partial"}}]}\n\n') };
+            }
+            await unblockRead.promise;
+            if (opts.signal?.aborted) {
+              const err = new Error('The operation was aborted');
+              err.name = 'AbortError';
+              throw err;
+            }
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    },
+  }));
+
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const streaming = new StreamingChatService(relay);
+
+  const first = streaming.streamMessage('First');
+  let error = null;
+  try { await streaming.streamMessage('Second'); } catch (err) { error = err; }
+  assert(error, 'second stream should reject');
+  assertEqual(error.message, 'A stream is already active', 'concurrent stream guard');
+  assertEqual(streaming.messages().length, 1, 'second stream did not append a user message');
+  assertEqual(streaming.messages()[0].content, 'First', 'first stream remains active');
+
+  streaming.stopStreaming();
+  unblockRead.resolve();
+  await first;
 });
 
 await test('streamMessage() builds Anthropic payload and parses Anthropic deltas', async () => {
