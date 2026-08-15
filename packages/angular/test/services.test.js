@@ -72,6 +72,11 @@ function makeDeferred() {
   return { promise, resolve, reject };
 }
 
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 global.fetch = mockFetch;
 
 // ─── In-memory storage helper ─────────────────────────────────────────────────
@@ -319,8 +324,10 @@ await test('sendMessage() preserves loading and newer messages when an earlier c
   clearMocks();
   const first = makeDeferred();
   const second = makeDeferred();
+  const capturedBodies = [];
   registerMock(/\/relay\//, (url, opts) => {
     const body = JSON.parse(opts.body);
+    capturedBodies.push(body);
     const latest = body.messages[body.messages.length - 1]?.content;
     if (latest === 'First') return first.promise;
     if (latest === 'Second') return second.promise;
@@ -334,7 +341,10 @@ await test('sendMessage() preserves loading and newer messages when an earlier c
 
   const firstRequest = chat.sendMessage('First');
   const secondRequest = chat.sendMessage('Second');
+  await flushMicrotasks();
   assertEqual(chat.loading(), true, 'loading starts with active requests');
+  assertEqual(capturedBodies.length, 1, 'second request waits for the first history mutation to settle');
+  assertEqual(capturedBodies[0].messages.map((m) => m.content).join(','), 'First', 'first request uses only its user message');
 
   first.reject(new Error('Network failed'));
   let firstThrew = false;
@@ -342,6 +352,9 @@ await test('sendMessage() preserves loading and newer messages when an earlier c
   assert(firstThrew, 'first request should fail');
   assertEqual(chat.loading(), true, 'loading remains true while second request is pending');
 
+  await flushMicrotasks();
+  assertEqual(capturedBodies.length, 2, 'second request starts after first rollback');
+  assertEqual(capturedBodies[1].messages.map((m) => m.content).join(','), 'Second', 'second request excludes rolled-back first message');
   second.resolve({
     ok: true,
     json: () => Promise.resolve({ choices: [{ message: { content: 'Second reply' } }] }),
@@ -354,6 +367,55 @@ await test('sendMessage() preserves loading and newer messages when an earlier c
   assertEqual(msgs.length, 2, 'newer user + assistant messages remain');
   assertEqual(msgs[0].content, 'Second', 'newer user message remains');
   assertEqual(msgs[1].content, 'Second reply', 'newer assistant message remains');
+});
+
+await test('sendMessage() keeps request bodies aligned when a later queued send fails', async () => {
+  clearMocks();
+  const first = makeDeferred();
+  const second = makeDeferred();
+  const capturedBodies = [];
+  registerMock(/\/relay\//, (url, opts) => {
+    const body = JSON.parse(opts.body);
+    capturedBodies.push(body);
+    const latest = body.messages[body.messages.length - 1]?.content;
+    if (latest === 'First') return first.promise;
+    if (latest === 'Second') return second.promise;
+    return Promise.reject(new Error(`Unexpected message: ${latest}`));
+  });
+
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const chat = new ChatService(relay);
+
+  const firstRequest = chat.sendMessage('First');
+  const secondRequest = chat.sendMessage('Second');
+  await flushMicrotasks();
+  first.resolve({
+    ok: true,
+    json: () => Promise.resolve({ choices: [{ message: { content: 'First reply' } }] }),
+  });
+  assertEqual(await firstRequest, 'First reply', 'first request succeeds');
+
+  await flushMicrotasks();
+  assertEqual(capturedBodies.length, 2, 'second request starts after first response is in history');
+  assertEqual(capturedBodies[0].messages.map((m) => m.content).join(','), 'First', 'first body is isolated');
+  assertEqual(
+    capturedBodies[1].messages.map((m) => m.content).join(','),
+    'First,First reply,Second',
+    'second body includes committed first exchange plus its user message',
+  );
+
+  second.resolve({ ok: false, status: 502, text: () => Promise.resolve('Gateway failed') });
+  let secondThrew = false;
+  try { await secondRequest; } catch { secondThrew = true; }
+  assert(secondThrew, 'second request should fail');
+  assertEqual(chat.loading(), false, 'loading clears after queued failure');
+
+  const msgs = chat.messages();
+  assertEqual(msgs.length, 2, 'failed second user message rolled back');
+  assertEqual(msgs[0].content, 'First', 'first user remains');
+  assertEqual(msgs[1].content, 'First reply', 'first assistant remains');
 });
 
 await test('clearMessages() resets history', async () => {

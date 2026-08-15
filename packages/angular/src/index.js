@@ -281,6 +281,7 @@ class ChatService {
     this._loading = createAngularSignal(false);
     this._error = createAngularSignal(null);
     this._activeRequests = 0;
+    this._sendQueue = Promise.resolve();
   }
 
   get messages() { return this._messages.value; }
@@ -312,43 +313,52 @@ class ChatService {
     const tok = this._relay.token();
     if (!tok) throw new Error('Not registered. Call ByokRelayService.register() first.');
 
-    const newUserMsg = { role: 'user', content: trimmedContent };
-    this._messages.update((prev) => [...prev, newUserMsg]);
     this._activeRequests += 1;
     this._loading.set(true);
-    this._error.set(null);
 
-    const history = this._messages.value();
-    const body = buildChatBody(provider, model, history, systemPrompt, extra);
+    const run = async () => {
+      const newUserMsg = { role: 'user', content: trimmedContent };
+      this._messages.update((prev) => [...prev, newUserMsg]);
+      this._error.set(null);
+
+      const history = this._messages.value();
+      const body = buildChatBody(provider, model, history, systemPrompt, extra);
+
+      try {
+        const path = PROVIDER_PATHS[provider] || 'chat/completions';
+        const resp = await fetch(
+          `${this._relay.relayUrl}/relay/${provider}/${path}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-token': tok },
+            body: JSON.stringify(body),
+          },
+        );
+        if (!resp.ok) {
+          const msg = await resp.text().catch(() => String(resp.status));
+          throw new Error(`Chat request failed (${resp.status}): ${msg}`);
+        }
+        const data = await resp.json();
+        // OpenAI-compatible + Anthropic response shapes
+        const reply =
+          data.choices?.[0]?.message?.content ??
+          data.content?.[0]?.text ??
+          '';
+        this._messages.update((prev) => [...prev, { role: 'assistant', content: reply }]);
+        return reply;
+      } catch (err) {
+        // Roll back this request's user message on failure.
+        this._messages.update((prev) => prev.filter((message) => message !== newUserMsg));
+        this._error.set(err.message);
+        throw err;
+      }
+    };
+
+    const current = this._sendQueue.catch(() => undefined).then(run);
+    this._sendQueue = current.catch(() => undefined);
 
     try {
-      const path = PROVIDER_PATHS[provider] || 'chat/completions';
-      const resp = await fetch(
-        `${this._relay.relayUrl}/relay/${provider}/${path}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-relay-token': tok },
-          body: JSON.stringify(body),
-        },
-      );
-      if (!resp.ok) {
-        const msg = await resp.text().catch(() => String(resp.status));
-        throw new Error(`Chat request failed (${resp.status}): ${msg}`);
-      }
-      const data = await resp.json();
-      // OpenAI-compatible + Anthropic response shapes
-      const reply =
-        data.choices?.[0]?.message?.content ??
-        data.content?.[0]?.text ??
-        '';
-      this._messages.update((prev) => [...prev, { role: 'assistant', content: reply }]);
-      return reply;
-    } catch (err) {
-      // Roll back this request's user message on failure.
-      // Concurrent sends may have appended newer messages; keep those intact.
-      this._messages.update((prev) => prev.filter((message) => message !== newUserMsg));
-      this._error.set(err.message);
-      throw err;
+      return await current;
     } finally {
       this._activeRequests = Math.max(0, this._activeRequests - 1);
       if (this._activeRequests === 0) this._loading.set(false);
