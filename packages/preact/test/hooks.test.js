@@ -39,9 +39,18 @@ function assertDeepEqual (a, b) {
 
 // ─── Module‐level mocks ───────────────────────────────────────────────────────
 
-// preact/hooks and react are NOT installed — the inline shim will be used.
-// We mock them by pointing require resolution away (not needed; they simply aren't
-// in node_modules). If either were present the shim falls through anyway.
+// Force the inline hook shim even when this monorepo's other workspaces install
+// React into the root node_modules. These tests call hooks directly outside a
+// renderer, so loading real React/Preact hooks would correctly trip invalid-hook
+// guards instead of exercising the package's SSR-safe fallback.
+const Module = require('module');
+const originalLoad = Module._load;
+Module._load = function patchedLoad (request) {
+  if (request === 'preact/hooks' || request === 'react') {
+    throw new Error(`Mocked missing optional dependency: ${request}`);
+  }
+  return originalLoad.apply(this, arguments);
+};
 
 // localStorage shim (SSR-like environment — no window)
 const _store = {};

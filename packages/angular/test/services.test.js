@@ -62,6 +62,21 @@ function registerMock(pattern, handler) {
 
 function clearMocks() { _handlers = []; }
 
+function makeDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 global.fetch = mockFetch;
 
 // ─── In-memory storage helper ─────────────────────────────────────────────────
@@ -252,6 +267,43 @@ await test('sendMessage() appends user + assistant messages', async () => {
   assertEqual(chat.messages()[1].role, 'assistant', 'second message is assistant');
 });
 
+await test('sendMessage() rejects empty content before mutating history', async () => {
+  const relay = new ByokRelayService({ storage: makeStorage() });
+  const chat = new ChatService(relay);
+  let error = null;
+  try { await chat.sendMessage('   '); } catch (err) { error = err; }
+  assert(error, 'should throw for empty content');
+  assertEqual(error.message, 'Message content is required', 'clear validation error');
+  assertEqual(chat.messages().length, 0, 'history remains empty');
+});
+
+await test('sendMessage() builds Anthropic Messages payload shape', async () => {
+  clearMocks();
+  let capturedBody = null;
+  registerMock(/\/relay\/anthropic\/messages$/, (url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ content: [{ text: 'Hello from Claude!' }] }),
+    });
+  });
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const chat = new ChatService(relay);
+  const reply = await chat.sendMessage('  Hi Claude  ', {
+    provider: 'anthropic',
+    model: 'claude-test',
+    systemPrompt: 'Be brief.',
+  });
+  assertEqual(reply, 'Hello from Claude!', 'anthropic reply returned');
+  assertEqual(capturedBody.model, 'claude-test', 'model forwarded');
+  assertEqual(capturedBody.max_tokens, 1024, 'default max_tokens set');
+  assertEqual(capturedBody.system, 'Be brief.', 'system prompt is top-level');
+  assert(!capturedBody.messages.some((m) => m.role === 'system'), 'no system role in Anthropic messages');
+  assertEqual(capturedBody.messages[0].content, 'Hi Claude', 'content trimmed before send');
+});
+
 await test('sendMessage() rolls back user message on error', async () => {
   clearMocks();
   registerMock(/\/relay\//, () =>
@@ -266,6 +318,104 @@ await test('sendMessage() rolls back user message on error', async () => {
   assert(threw, 'should throw on error');
   assertEqual(chat.messages().length, 0, 'message rolled back');
   assert(chat.error() !== null, 'error signal set');
+});
+
+await test('sendMessage() preserves loading and newer messages when an earlier concurrent request fails', async () => {
+  clearMocks();
+  const first = makeDeferred();
+  const second = makeDeferred();
+  const capturedBodies = [];
+  registerMock(/\/relay\//, (url, opts) => {
+    const body = JSON.parse(opts.body);
+    capturedBodies.push(body);
+    const latest = body.messages[body.messages.length - 1]?.content;
+    if (latest === 'First') return first.promise;
+    if (latest === 'Second') return second.promise;
+    return Promise.reject(new Error(`Unexpected message: ${latest}`));
+  });
+
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const chat = new ChatService(relay);
+
+  const firstRequest = chat.sendMessage('First');
+  const secondRequest = chat.sendMessage('Second');
+  await flushMicrotasks();
+  assertEqual(chat.loading(), true, 'loading starts with active requests');
+  assertEqual(capturedBodies.length, 1, 'second request waits for the first history mutation to settle');
+  assertEqual(capturedBodies[0].messages.map((m) => m.content).join(','), 'First', 'first request uses only its user message');
+
+  first.reject(new Error('Network failed'));
+  let firstThrew = false;
+  try { await firstRequest; } catch { firstThrew = true; }
+  assert(firstThrew, 'first request should fail');
+  assertEqual(chat.loading(), true, 'loading remains true while second request is pending');
+
+  await flushMicrotasks();
+  assertEqual(capturedBodies.length, 2, 'second request starts after first rollback');
+  assertEqual(capturedBodies[1].messages.map((m) => m.content).join(','), 'Second', 'second request excludes rolled-back first message');
+  second.resolve({
+    ok: true,
+    json: () => Promise.resolve({ choices: [{ message: { content: 'Second reply' } }] }),
+  });
+  const secondReply = await secondRequest;
+  assertEqual(secondReply, 'Second reply', 'second request completes after first failure');
+  assertEqual(chat.loading(), false, 'loading clears after all requests complete');
+
+  const msgs = chat.messages();
+  assertEqual(msgs.length, 2, 'newer user + assistant messages remain');
+  assertEqual(msgs[0].content, 'Second', 'newer user message remains');
+  assertEqual(msgs[1].content, 'Second reply', 'newer assistant message remains');
+});
+
+await test('sendMessage() keeps request bodies aligned when a later queued send fails', async () => {
+  clearMocks();
+  const first = makeDeferred();
+  const second = makeDeferred();
+  const capturedBodies = [];
+  registerMock(/\/relay\//, (url, opts) => {
+    const body = JSON.parse(opts.body);
+    capturedBodies.push(body);
+    const latest = body.messages[body.messages.length - 1]?.content;
+    if (latest === 'First') return first.promise;
+    if (latest === 'Second') return second.promise;
+    return Promise.reject(new Error(`Unexpected message: ${latest}`));
+  });
+
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const chat = new ChatService(relay);
+
+  const firstRequest = chat.sendMessage('First');
+  const secondRequest = chat.sendMessage('Second');
+  await flushMicrotasks();
+  first.resolve({
+    ok: true,
+    json: () => Promise.resolve({ choices: [{ message: { content: 'First reply' } }] }),
+  });
+  assertEqual(await firstRequest, 'First reply', 'first request succeeds');
+
+  await flushMicrotasks();
+  assertEqual(capturedBodies.length, 2, 'second request starts after first response is in history');
+  assertEqual(capturedBodies[0].messages.map((m) => m.content).join(','), 'First', 'first body is isolated');
+  assertEqual(
+    capturedBodies[1].messages.map((m) => m.content).join(','),
+    'First,First reply,Second',
+    'second body includes committed first exchange plus its user message',
+  );
+
+  second.resolve({ ok: false, status: 502, text: () => Promise.resolve('Gateway failed') });
+  let secondThrew = false;
+  try { await secondRequest; } catch { secondThrew = true; }
+  assert(secondThrew, 'second request should fail');
+  assertEqual(chat.loading(), false, 'loading clears after queued failure');
+
+  const msgs = chat.messages();
+  assertEqual(msgs.length, 2, 'failed second user message rolled back');
+  assertEqual(msgs[0].content, 'First', 'first user remains');
+  assertEqual(msgs[1].content, 'First reply', 'first assistant remains');
 });
 
 await test('clearMessages() resets history', async () => {
@@ -322,6 +472,119 @@ await test('streamMessage() collects SSE chunks and commits to messages', async 
   assert(collected.includes(' world'), 'onChunk called with second delta');
   assertEqual(streaming.messages().length, 2, 'user + assistant messages committed');
   assertEqual(streaming.streamingContent(), '', 'streamingContent cleared after done');
+});
+
+await test('streamMessage() rejects empty content before mutating history', async () => {
+  const relay = new ByokRelayService({ storage: makeStorage() });
+  const streaming = new StreamingChatService(relay);
+  let error = null;
+  try { await streaming.streamMessage('\t'); } catch (err) { error = err; }
+  assert(error, 'should throw for empty content');
+  assertEqual(error.message, 'Message content is required', 'clear validation error');
+  assertEqual(streaming.messages().length, 0, 'history remains empty');
+});
+
+await test('streamMessage() rejects a second active stream before mutating shared state', async () => {
+  clearMocks();
+  const unblockRead = makeDeferred();
+  const encoder = new TextEncoder();
+  let readCount = 0;
+  registerMock(/\/relay\//, (url, opts) => Promise.resolve({
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (readCount === 0) {
+              readCount++;
+              return { done: false, value: encoder.encode('data: {"choices":[{"delta":{"content":"Partial"}}]}\n\n') };
+            }
+            await unblockRead.promise;
+            if (opts.signal?.aborted) {
+              const err = new Error('The operation was aborted');
+              err.name = 'AbortError';
+              throw err;
+            }
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    },
+  }));
+
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const streaming = new StreamingChatService(relay);
+
+  const first = streaming.streamMessage('First');
+  let error = null;
+  try { await streaming.streamMessage('Second'); } catch (err) { error = err; }
+  assert(error, 'second stream should reject');
+  assertEqual(error.message, 'A stream is already active', 'concurrent stream guard');
+  assertEqual(streaming.messages().length, 1, 'second stream did not append a user message');
+  assertEqual(streaming.messages()[0].content, 'First', 'first stream remains active');
+
+  streaming.stopStreaming();
+  unblockRead.resolve();
+  await first;
+});
+
+await test('streamMessage() builds Anthropic payload and parses Anthropic deltas', async () => {
+  clearMocks();
+  let capturedBody = null;
+  const chunks = [
+    'data: {"type":"content_block_delta","delta":{"text":"Hi"}}\n\n',
+    'data: [DONE]\n\n',
+  ];
+  registerMock(/\/relay\/anthropic\/messages$/, (url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return Promise.resolve({ ok: true, ...makeSseStream(chunks) });
+  });
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const streaming = new StreamingChatService(relay);
+
+  const result = await streaming.streamMessage('Hello', {
+    provider: 'anthropic',
+    model: 'claude-test',
+    systemPrompt: 'Be concise.',
+  });
+
+  assertEqual(result, 'Hi', 'anthropic stream returned text');
+  assertEqual(capturedBody.max_tokens, 1024, 'default max_tokens set');
+  assertEqual(capturedBody.stream, true, 'stream flag set');
+  assertEqual(capturedBody.system, 'Be concise.', 'system prompt is top-level');
+  assert(!capturedBody.messages.some((m) => m.role === 'system'), 'no system role in Anthropic messages');
+});
+
+await test('streamMessage() stops reading after terminal DONE event', async () => {
+  clearMocks();
+  const encoder = new TextEncoder();
+  let reads = 0;
+  registerMock(/\/relay\//, () => Promise.resolve({
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            reads++;
+            if (reads === 1) return { done: false, value: encoder.encode('data: [DONE]\n\n') };
+            throw new Error('read called after DONE');
+          },
+        };
+      },
+    },
+  }));
+
+  const storage = makeStorage();
+  storage.setItem('byok_relay_token', 'tok-123');
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage });
+  const streaming = new StreamingChatService(relay);
+  const result = await streaming.streamMessage('Hi');
+  assertEqual(result, '', 'empty terminal stream returns empty content');
+  assertEqual(reads, 1, 'reader not called after DONE');
 });
 
 await test('stopStreaming() partial-commits accumulated content', async () => {
@@ -435,6 +698,23 @@ await test('check() sets error signal on failure', async () => {
   assert(threw, 'should throw on network error');
   assert(health.error() !== null, 'error signal set');
   assertEqual(health.status(), null, 'status remains null');
+});
+
+await test('check() preserves previous health status on transient failure', async () => {
+  clearMocks();
+  registerMock(/\/health$/, () =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok', uptime: 1 }) }),
+  );
+  const relay = new ByokRelayService({ relayUrl: 'http://localhost:3000', storage: makeStorage() });
+  const health = new RelayHealthService(relay);
+  await health.check();
+  clearMocks();
+  registerMock(/\/health$/, () => Promise.reject(new Error('Network error')));
+  let threw = false;
+  try { await health.check(); } catch { threw = true; }
+  assert(threw, 'should throw on transient failure');
+  assertEqual(health.status().status, 'ok', 'last known-good status preserved');
+  assert(health.error() !== null, 'error signal set');
 });
 
 await test('startPolling() / destroy() lifecycle', async () => {

@@ -30,12 +30,15 @@ export const appConfig: ApplicationConfig = {
 ### 2. Inject and use
 
 ```typescript
+import { NgFor } from '@angular/common';
 import { Component, inject, OnInit } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import { ByokRelayService, ChatService } from '@byok-relay/angular';
 
 @Component({
   selector: 'app-chat',
   standalone: true,
+  imports: [FormsModule, NgFor],
   template: `
     <input [(ngModel)]="apiKey" placeholder="Your OpenAI API key" type="password" />
     <button (click)="saveKey()">Save key</button>
@@ -208,7 +211,6 @@ Without Angular 16+, the services fall back to a plain getter shim that reads th
 | Groq | `groq` | llama3-70b, mixtral-8x7b, … |
 | Mistral | `mistral` | mistral-large, codestral, … |
 | OpenRouter | `openrouter` | any model via openrouter.ai |
-| Google | `google` | gemini-2.5-pro, gemini-2.0-flash, … |
 
 ---
 

@@ -29,7 +29,7 @@ npm install solid-js
 
 ```jsx
 // App.jsx (SolidJS)
-import { createSignal } from 'solid-js';
+import { createSignal, For, Show } from 'solid-js';
 import { createByokRelayStore, createStreamingChatStore } from '@byok-relay/solid';
 
 export default function App() {
@@ -201,7 +201,6 @@ function StatusBadge() {
 |---|---|---|
 | OpenAI | `openai` | GPT-4o, GPT-4o-mini, o1, o3-mini |
 | Anthropic | `anthropic` | Claude 3.5 Haiku, Sonnet, Opus |
-| Google Gemini | `google` | gemini-1.5-flash, gemini-2.0-flash |
 | Groq | `groq` | Llama 3, Mixtral (fast inference) |
 | Mistral | `mistral` | mistral-large-latest |
 | OpenRouter | `openrouter` | Any model via openrouter.ai |
@@ -247,6 +246,6 @@ Or use [Railway one-click deploy](https://byokrelay.com) (persistent SQLite, rec
 
 ## License
 
-MIT — [byokrelay.com](https://byokrelay.com)
+Apache-2.0 — [byokrelay.com](https://byokrelay.com)
 
 If this package saved you time, consider ⭐ starring [avikalpg/byok-relay](https://github.com/avikalpg/byok-relay).
