@@ -191,6 +191,25 @@ Four reactive stores with SolidJS's `[getter, setter]` signal contract:
 
 npm: https://www.npmjs.com/package/@byok-relay/solid
 
+## Angular Injectable Services (`@byok-relay/angular`)
+
+For Angular 14+ or Analog apps, install the Angular services package:
+
+```bash
+npm install @byok-relay/angular
+```
+
+Four Angular injectable services with optional Angular 16+ signal reactivity:
+- `ByokRelayService` — token registration + key CRUD + logout (localStorage persistence, Analog SSR-safe)
+- `ChatService` — stateful message list, non-streaming, openai/anthropic/groq/mistral/openrouter
+- `StreamingChatService` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent()` live signal
+- `RelayHealthService` — polls /health, `destroy()` for ngOnDestroy cleanup
+
+Setup: `provideByokRelay({ relayUrl: 'https://relay.byokrelay.com' })` in `app.config.ts` providers.
+Services use Angular `signal()` when @angular/core 16+ is detected; plain getter shim otherwise.
+
+npm: https://www.npmjs.com/package/@byok-relay/angular
+
 ## API Reference
 
 Full OpenAPI 3.0 specification available at runtime:
@@ -236,5 +255,6 @@ See https://github.com/avikalpg/byok-relay/blob/main/packages/mcp/README.md for 
 - @byok-relay/vue (Vue 3 composables): https://www.npmjs.com/package/@byok-relay/vue
 - @byok-relay/svelte (Svelte stores): https://www.npmjs.com/package/@byok-relay/svelte
 - @byok-relay/react (React hooks): https://www.npmjs.com/package/@byok-relay/react
+- @byok-relay/angular (Angular services): https://www.npmjs.com/package/@byok-relay/angular
 - @byok-relay/client (framework-agnostic): https://www.npmjs.com/package/@byok-relay/client
 - @byok-relay/mcp (Claude Desktop/Code MCP): https://www.npmjs.com/package/@byok-relay/mcp
