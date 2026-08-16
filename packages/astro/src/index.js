@@ -28,13 +28,30 @@
 
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const DEFAULT_RELAY_PATH_PREFIX = '/api/relay';
+const DEFAULT_PROXY_TIMEOUT_MS = 30_000;
 
 /* ========================================================================== */
 /* Utility — SSR-safe storage                                                  */
 /* ========================================================================== */
 
 function _isClient () {
-  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch (_) {
+    return false;
+  }
+}
+
+function _timeoutSignal (timeoutMs) {
+  if (!timeoutMs || typeof AbortSignal === 'undefined') return undefined;
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(timeoutMs);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
+}
+
+function _isTimeoutError (err) {
+  return err?.name === 'TimeoutError' || err?.name === 'AbortError';
 }
 
 function _safeGet (key) {
@@ -82,6 +99,7 @@ function createByokRelayMiddleware (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
   const pathPrefix = opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX;
   const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   return async function byokRelayMiddleware (context, next) {
     const { request } = context;
@@ -95,7 +113,8 @@ function createByokRelayMiddleware (opts = {}) {
     const subPath = url.pathname.slice(pathPrefix.length) || '/';
     const upstreamUrl = relayUrl + subPath + url.search;
 
-    // Optional app_id guard
+    // Optional coarse app_id filter. This is not an auth boundary; relay tokens
+    // still carry the real user/account authorization.
     if (allowedApps) {
       const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
       if (!appId || !allowedApps.has(appId)) {
@@ -122,6 +141,7 @@ function createByokRelayMiddleware (opts = {}) {
       method: request.method,
       headers: forwardHeaders,
       redirect: 'follow',
+      signal: _timeoutSignal(timeoutMs),
     };
     if (!['GET', 'HEAD'].includes(request.method)) {
       init.body = request.body;
@@ -144,8 +164,9 @@ function createByokRelayMiddleware (opts = {}) {
         headers: respHeaders,
       });
     } catch (err) {
-      return new Response(JSON.stringify({ error: 'Relay proxy error', details: err.message }), {
-        status: 502,
+      const timedOut = _isTimeoutError(err);
+      return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
+        status: timedOut ? 504 : 502,
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -177,6 +198,7 @@ function createByokRelayMiddleware (opts = {}) {
 function createRelayApiRoute (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
   const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   async function handler ({ request, params }) {
     // Reconstruct sub-path from catch-all param
@@ -210,6 +232,7 @@ function createRelayApiRoute (opts = {}) {
       method: request.method,
       headers: forwardHeaders,
       redirect: 'follow',
+      signal: _timeoutSignal(timeoutMs),
     };
     if (!['GET', 'HEAD'].includes(request.method)) {
       init.body = request.body;
@@ -230,8 +253,9 @@ function createRelayApiRoute (opts = {}) {
         headers: respHeaders,
       });
     } catch (err) {
-      return new Response(JSON.stringify({ error: 'Relay proxy error', details: err.message }), {
-        status: 502,
+      const timedOut = _isTimeoutError(err);
+      return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
+        status: timedOut ? 504 : 502,
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -275,6 +299,7 @@ class ByokRelayClient {
     this._appId = opts.appId || 'astro-app';
     this._storageKey = opts.storageKey || 'byok_relay_token';
     this._token = _safeGet(this._storageKey) || null;
+    this._registering = null;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -310,7 +335,12 @@ class ByokRelayClient {
    */
   async ensureToken () {
     if (this._token) return this._token;
-    return this.register();
+    if (!this._registering) {
+      this._registering = this.register().finally(() => {
+        this._registering = null;
+      });
+    }
+    return this._registering;
   }
 
   /**
@@ -338,7 +368,7 @@ class ByokRelayClient {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this._token}`,
       },
-      body: JSON.stringify({ api_key: apiKey }),
+      body: JSON.stringify({ key: apiKey }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
@@ -394,7 +424,7 @@ class ByokRelayClient {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this._token}`,
       },
-      body: JSON.stringify({ api_key: newApiKey }),
+      body: JSON.stringify({ key: newApiKey }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));

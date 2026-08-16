@@ -430,9 +430,9 @@ export const action = createRelayAction({ relayUrl: process.env.RELAY_URL });
 import { useByokRelay, useStreamingChat } from '@byok-relay/remix';
 
 export function AiChat() {
-  const { token } = useByokRelay({ relayUrl: window.ENV.RELAY_URL });
+  const { token } = useByokRelay({ relayUrl: '/api/relay' });
   const { messages, streamingContent, send, stopStreaming } = useStreamingChat({
-    relayUrl: window.ENV.RELAY_URL,
+    relayUrl: '/api/relay',
     token,
     provider: 'openai',
     model: 'gpt-4o-mini',

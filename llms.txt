@@ -353,8 +353,8 @@ export const action = createRelayAction({ relayUrl: process.env.RELAY_URL });
 ```tsx
 // app/components/AiChat.tsx
 import { useByokRelay, useStreamingChat } from '@byok-relay/remix';
-const { token } = useByokRelay({ relayUrl: window.ENV.RELAY_URL });
-const { messages, streamingContent, send } = useStreamingChat({ relayUrl: window.ENV.RELAY_URL, token });
+const { token } = useByokRelay({ relayUrl: '/api/relay' });
+const { messages, streamingContent, send } = useStreamingChat({ relayUrl: '/api/relay', token });
 ```
 
 npm: https://www.npmjs.com/package/@byok-relay/remix
