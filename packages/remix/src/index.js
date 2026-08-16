@@ -506,7 +506,11 @@ function useStreamingChat ({
   const abortRef = useRef(null);
 
   const stopStreaming = useCallback(() => {
-    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
+    if (abortRef.current) {
+      abortRef.current.discardOnAbort = false;
+      abortRef.current.controller.abort();
+      abortRef.current = null;
+    }
   }, []);
 
   const send = useCallback(async (userMessage) => {
@@ -518,7 +522,8 @@ function useStreamingChat ({
     setStreamingContent('');
 
     const ctrl = new AbortController();
-    abortRef.current = ctrl;
+    const abortState = { controller: ctrl, discardOnAbort: false };
+    abortRef.current = abortState;
     let accumulated = '';
 
     const body = {
@@ -576,22 +581,26 @@ function useStreamingChat ({
       setStreamingContent('');
     } catch (e) {
       if (e.name !== 'AbortError') setError(e.message);
-      else if (accumulated) {
-        // partial commit on abort
+      else if (!abortState.discardOnAbort && accumulated) {
+        // Preserve partial content only for explicit stopStreaming aborts.
         setMessages(m => [...m, { role: 'assistant', content: accumulated }]);
         setStreamingContent('');
       }
     } finally {
       setLoading(false);
-      abortRef.current = null;
+      if (abortRef.current === abortState) abortRef.current = null;
     }
   }, [relayUrl, token, provider, model, systemPrompt, extraParams, messages]);
 
   const clear = useCallback(() => {
-    stopStreaming();
+    if (abortRef.current) {
+      abortRef.current.discardOnAbort = true;
+      abortRef.current.controller.abort();
+      abortRef.current = null;
+    }
     setMessages([]);
     setStreamingContent('');
-  }, [stopStreaming]);
+  }, []);
 
   return { messages, streamingContent, send, stopStreaming, clear, loading, error };
 }

@@ -43,11 +43,16 @@ function _isClient () {
 }
 
 function _timeoutSignal (timeoutMs) {
-  if (!timeoutMs || typeof AbortSignal === 'undefined') return undefined;
-  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(timeoutMs);
+  if (!timeoutMs || typeof AbortController === 'undefined') {
+    return { signal: undefined, cancel: () => {} };
+  }
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), timeoutMs);
-  return controller.signal;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  return {
+    signal: controller.signal,
+    cancel: () => clearTimeout(timer),
+  };
 }
 
 function _isTimeoutError (err) {
@@ -92,7 +97,7 @@ function _safeRemove (key) {
  * @param {object} opts
  * @param {string} opts.relayUrl         Upstream relay base URL (server-only env var).
  * @param {string} [opts.pathPrefix]     URL prefix to intercept. Default: '/api/relay'.
- * @param {string[]} [opts.allowedApps]  Optional app_id allowlist.
+ * @param {string[]} [opts.allowedApps]  Optional client-controlled app_id filter.
  * @returns Astro `onRequest` middleware function.
  */
 function createByokRelayMiddleware (opts = {}) {
@@ -113,8 +118,9 @@ function createByokRelayMiddleware (opts = {}) {
     const subPath = url.pathname.slice(pathPrefix.length) || '/';
     const upstreamUrl = relayUrl + subPath + url.search;
 
-    // Optional coarse app_id filter. This is not an auth boundary; relay tokens
-    // still carry the real user/account authorization.
+    // Optional coarse app_id filter. app_id comes from the client, so this is
+    // not authentication or authorization; upstream relay tokens carry the real
+    // user/account authorization.
     if (allowedApps) {
       const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
       if (!appId || !allowedApps.has(appId)) {
@@ -137,11 +143,12 @@ function createByokRelayMiddleware (opts = {}) {
       }
     }
 
+    const timeout = _timeoutSignal(timeoutMs);
     const init = {
       method: request.method,
       headers: forwardHeaders,
       redirect: 'follow',
-      signal: _timeoutSignal(timeoutMs),
+      signal: timeout.signal,
     };
     if (!['GET', 'HEAD'].includes(request.method)) {
       init.body = request.body;
@@ -150,6 +157,7 @@ function createByokRelayMiddleware (opts = {}) {
 
     try {
       const upstreamResp = await fetch(upstreamUrl, init);
+      timeout.cancel();
 
       // Stream response body back to client
       const respHeaders = new Headers();
@@ -164,6 +172,7 @@ function createByokRelayMiddleware (opts = {}) {
         headers: respHeaders,
       });
     } catch (err) {
+      timeout.cancel();
       const timedOut = _isTimeoutError(err);
       return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
         status: timedOut ? 504 : 502,
@@ -192,7 +201,7 @@ function createByokRelayMiddleware (opts = {}) {
  *
  * @param {object} opts
  * @param {string} opts.relayUrl         Upstream relay URL (server-side env var).
- * @param {string[]} [opts.allowedApps]  Optional app_id whitelist.
+ * @param {string[]} [opts.allowedApps]  Optional client-controlled app_id filter.
  * @returns Object with GET, POST, PUT, PATCH, DELETE, OPTIONS Astro APIRoute handlers.
  */
 function createRelayApiRoute (opts = {}) {
@@ -206,6 +215,9 @@ function createRelayApiRoute (opts = {}) {
     const reqUrl = new URL(request.url);
     const upstreamUrl = relayUrl + subPath + reqUrl.search;
 
+    // Optional coarse app_id filter. app_id comes from the client, so this is
+    // not authentication or authorization; upstream relay tokens carry the real
+    // user/account authorization.
     if (allowedApps) {
       const appId = request.headers.get('x-app-id') || reqUrl.searchParams.get('app_id');
       if (!appId || !allowedApps.has(appId)) {
@@ -228,11 +240,12 @@ function createRelayApiRoute (opts = {}) {
       }
     }
 
+    const timeout = _timeoutSignal(timeoutMs);
     const init = {
       method: request.method,
       headers: forwardHeaders,
       redirect: 'follow',
-      signal: _timeoutSignal(timeoutMs),
+      signal: timeout.signal,
     };
     if (!['GET', 'HEAD'].includes(request.method)) {
       init.body = request.body;
@@ -241,6 +254,7 @@ function createRelayApiRoute (opts = {}) {
 
     try {
       const upstream = await fetch(upstreamUrl, init);
+      timeout.cancel();
       const respHeaders = new Headers();
       for (const [k, v] of upstream.headers.entries()) {
         if (!hopByHop.has(k.toLowerCase())) {
@@ -253,6 +267,7 @@ function createRelayApiRoute (opts = {}) {
         headers: respHeaders,
       });
     } catch (err) {
+      timeout.cancel();
       const timedOut = _isTimeoutError(err);
       return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
         status: timedOut ? 504 : 502,

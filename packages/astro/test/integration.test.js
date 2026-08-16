@@ -468,6 +468,29 @@ test('middleware proxies matching path prefix', async () => {
   assertEqual(capturedUpstreamUrl, 'http://relay/health');
 });
 
+test('middleware cancels proxy timeout after upstream headers arrive', async () => {
+  const mw = createByokRelayMiddleware({
+    relayUrl: 'http://relay',
+    pathPrefix: '/api/relay',
+    timeoutMs: 10,
+  });
+  let capturedSignal;
+  mockFetch((url, init) => {
+    capturedSignal = init.signal;
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({}),
+      body: '{}',
+    });
+  });
+  const context = { request: new Request('http://localhost:4321/api/relay/stream') };
+  await mw(context, () => { throw new Error('should not call next'); });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert(capturedSignal && capturedSignal.aborted === false, 'timeout should be canceled after fetch returns headers');
+});
+
 test('middleware strips prefix correctly for sub-paths', async () => {
   const mw = createByokRelayMiddleware({ relayUrl: 'http://relay', pathPrefix: '/api/relay' });
   let capturedUrl;
@@ -553,6 +576,23 @@ test('GET handler proxies to relay with correct sub-path', async () => {
   const resp = await route.GET({ request: req, params: { path: 'health' } });
   assertEqual(capturedUrl, 'http://relay/health');
   assertEqual(resp.status, 200);
+});
+
+test('route cancels proxy timeout after upstream headers arrive', async () => {
+  const route = createRelayApiRoute({ relayUrl: 'http://relay', timeoutMs: 10 });
+  let capturedSignal;
+  mockFetch((url, init) => {
+    capturedSignal = init.signal;
+    return Promise.resolve({
+      ok: true, status: 200, statusText: 'OK',
+      headers: new Headers({}),
+      body: '{}',
+    });
+  });
+  const req = new Request('http://localhost:4321/api/relay/stream');
+  await route.GET({ request: req, params: { path: 'stream' } });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert(capturedSignal && capturedSignal.aborted === false, 'timeout should be canceled after fetch returns headers');
 });
 
 test('POST handler proxies with correct method', async () => {

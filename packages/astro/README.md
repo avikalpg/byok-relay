@@ -102,12 +102,14 @@ export const onRequest = sequence(
   createByokRelayMiddleware({
     relayUrl: import.meta.env.RELAY_URL,
     pathPrefix: '/api/relay',       // default; all sub-paths proxied
-    allowedApps: ['my-app'],        // optional app_id whitelist
+    allowedApps: ['my-app'],        // optional coarse app_id filter, not auth
   }),
 );
 ```
 
 The middleware intercepts any request whose pathname starts with `pathPrefix` and proxies it to the relay, streaming the response back. Requests to other paths call `next()` normally.
+
+`allowedApps` only checks a client-supplied `x-app-id` header or `app_id` query parameter. It is a coarse routing/filtering aid, not authentication or authorization; the upstream relay token remains the account authorization boundary.
 
 ---
 
@@ -180,11 +182,13 @@ const relay = new ByokRelayClient({
 ```ts
 createRelayApiRoute({
   relayUrl: string,         // Upstream relay URL. Uses managed relay by default.
-  allowedApps?: string[],   // If set, rejects requests whose x-app-id header is not listed.
+  allowedApps?: string[],   // Client-supplied app_id filter; not auth.
 })
 ```
 
 Returns an object with `{ GET, POST, PUT, PATCH, DELETE, OPTIONS }` Astro `APIRoute` handlers.
+
+`allowedApps` only checks a client-supplied `x-app-id` header or `app_id` query parameter. It is a coarse routing/filtering aid, not authentication or authorization; the upstream relay token remains the account authorization boundary.
 
 The `params.path` catch-all value is used to construct the upstream sub-path:
 - `/api/relay/health` → params.path = `'health'` → proxies to `RELAY_URL/health`
@@ -198,7 +202,7 @@ The `params.path` catch-all value is used to construct the upstream sub-path:
 createByokRelayMiddleware({
   relayUrl: string,         // Upstream relay URL.
   pathPrefix?: string,      // URL prefix to intercept. Default: '/api/relay'.
-  allowedApps?: string[],   // If set, checks x-app-id header against this list.
+  allowedApps?: string[],   // Client-supplied app_id filter; not auth.
 })
 ```
 
