@@ -30,6 +30,8 @@ const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const DEFAULT_RELAY_PATH_PREFIX = '/api/relay';
 const DEFAULT_PROXY_TIMEOUT_MS = 30_000;
 const DEFAULT_APP_SIGNATURE_TOLERANCE_MS = 5 * 60 * 1000;
+const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
+const _appSignatureNonces = new Map();
 
 /* ========================================================================== */
 /* Utility — SSR-safe storage                                                  */
@@ -82,6 +84,23 @@ function _normalizeAppSecrets (appSecrets) {
   return null;
 }
 
+function _normalizeAllowedApps (allowedApps) {
+  if (!allowedApps) return null;
+  if (allowedApps instanceof Set) return new Set(allowedApps);
+  if (typeof allowedApps === 'string') {
+    const apps = allowedApps.split(',').map((app) => app.trim()).filter(Boolean);
+    return apps.length ? new Set(apps) : null;
+  }
+  if (typeof allowedApps[Symbol.iterator] === 'function') return new Set(allowedApps);
+  return null;
+}
+
+function _normalizePositiveMs (value, fallback) {
+  if (value == null) return fallback;
+  const normalized = Number(value);
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : fallback;
+}
+
 function _jsonError (message, status) {
   return new Response(JSON.stringify({ error: message }), {
     status,
@@ -89,14 +108,26 @@ function _jsonError (message, status) {
   });
 }
 
-function _appSignaturePayload ({ request, url, appId, timestamp }) {
+function _appSignaturePayload ({ request, url, appId, timestamp, bodyDigest, nonce }) {
   return [
     request.method.toUpperCase(),
     url.pathname,
     url.search || '',
     String(timestamp),
     appId,
+    bodyDigest || '',
+    nonce || '',
   ].join('\n');
+}
+
+async function _sha256Hex (value) {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle) throw new Error('Web Crypto SHA-256 is unavailable');
+  const bytes = value instanceof ArrayBuffer ? value : new TextEncoder().encode(String(value));
+  const digest = await cryptoApi.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 async function _hmacSha256Hex (secret, payload) {
@@ -130,14 +161,20 @@ function _constantTimeEqual (left, right) {
 }
 
 async function _verifyAppAccess ({ request, url, allowedApps, appSecrets, verifyApp, appSignatureToleranceMs }) {
-  if (!allowedApps) return null;
+  const verificationConfigured = Boolean(allowedApps || appSecrets || verifyApp);
+  if (!verificationConfigured) return null;
 
   const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
-  if (!appId || !allowedApps.has(appId)) return _jsonError('Forbidden app_id', 403);
+  if (!appId) return _jsonError('Forbidden app_id', 403);
+  if (allowedApps && !allowedApps.has(appId)) return _jsonError('Forbidden app_id', 403);
 
   if (verifyApp) {
-    const result = await verifyApp({ request, url, appId });
-    if (result === true || result === appId) return null;
+    try {
+      const result = await verifyApp({ request, url, appId });
+      if (result === true || result === appId) return null;
+    } catch (_) {
+      return _jsonError('App verification failed', 500);
+    }
     return _jsonError('Forbidden app_id', 403);
   }
 
@@ -146,16 +183,39 @@ async function _verifyAppAccess ({ request, url, allowedApps, appSecrets, verify
 
   const timestamp = request.headers.get('x-app-timestamp');
   const signature = request.headers.get('x-app-signature');
+  const nonce = request.headers.get('x-app-nonce');
   const timestampMs = Number(timestamp);
-  if (!timestamp || !signature || !Number.isFinite(timestampMs)) {
+  if (!timestamp || !signature || !nonce || !Number.isFinite(timestampMs)) {
     return _jsonError('Forbidden app_id', 403);
   }
   if (Math.abs(Date.now() - timestampMs) > appSignatureToleranceMs) {
     return _jsonError('Forbidden app_id', 403);
   }
 
-  const expected = await _hmacSha256Hex(secret, _appSignaturePayload({ request, url, appId, timestamp }));
+  const now = Date.now();
+  for (const [key, expiresAt] of _appSignatureNonces.entries()) {
+    if (expiresAt <= now) _appSignatureNonces.delete(key);
+  }
+  const nonceKey = `${appId}:${nonce}`;
+  if (_appSignatureNonces.has(nonceKey)) return _jsonError('Forbidden app_id', 403);
+
+  let bodyDigest = '';
+  if (!BODYLESS_METHODS.has(request.method.toUpperCase())) {
+    try {
+      bodyDigest = await _sha256Hex(await request.clone().arrayBuffer());
+    } catch (_) {
+      return _jsonError('App verification failed', 500);
+    }
+  }
+
+  let expected;
+  try {
+    expected = await _hmacSha256Hex(secret, _appSignaturePayload({ request, url, appId, timestamp, bodyDigest, nonce }));
+  } catch (_) {
+    return _jsonError('App verification failed', 500);
+  }
   if (!_constantTimeEqual(signature, expected)) return _jsonError('Forbidden app_id', 403);
+  _appSignatureNonces.set(nonceKey, now + appSignatureToleranceMs);
   return null;
 }
 
@@ -180,9 +240,9 @@ async function _verifyAppAccess ({ request, url, allowedApps, appSecrets, verify
  *   );
  *
  * @param {object} opts
- * @param {string} opts.relayUrl         Upstream relay base URL (server-only env var).
+ * @param {string} [opts.relayUrl]       Upstream relay base URL (server-only env var). Default: managed relay.
  * @param {string} [opts.pathPrefix]     URL prefix to intercept. Default: '/api/relay'.
- * @param {string[]} [opts.allowedApps]  Optional list of app IDs allowed through the proxy.
+ * @param {Iterable<string>|string} [opts.allowedApps] Optional app IDs allowed through the proxy.
  * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
  * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
  * @returns Astro `onRequest` middleware function.
@@ -190,10 +250,10 @@ async function _verifyAppAccess ({ request, url, allowedApps, appSecrets, verify
 function createByokRelayMiddleware (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
   const pathPrefix = opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX;
-  const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const allowedApps = _normalizeAllowedApps(opts.allowedApps);
   const appSecrets = _normalizeAppSecrets(opts.appSecrets);
   const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
-  const appSignatureToleranceMs = opts.appSignatureToleranceMs ?? DEFAULT_APP_SIGNATURE_TOLERANCE_MS;
+  const appSignatureToleranceMs = _normalizePositiveMs(opts.appSignatureToleranceMs, DEFAULT_APP_SIGNATURE_TOLERANCE_MS);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   return async function byokRelayMiddleware (context, next) {
@@ -224,7 +284,7 @@ function createByokRelayMiddleware (opts = {}) {
       'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
       'te', 'trailers', 'transfer-encoding', 'upgrade', 'host',
     ]);
-    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp']);
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp', 'x-app-nonce']);
     for (const [k, v] of request.headers.entries()) {
       const headerName = k.toLowerCase();
       if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
@@ -289,18 +349,18 @@ function createByokRelayMiddleware (opts = {}) {
  * All HTTP methods are forwarded. The client never sees the real RELAY_URL.
  *
  * @param {object} opts
- * @param {string} opts.relayUrl         Upstream relay URL (server-side env var).
- * @param {string[]} [opts.allowedApps]  Optional list of app IDs allowed through the proxy.
+ * @param {string} [opts.relayUrl]       Upstream relay URL (server-side env var). Default: managed relay.
+ * @param {Iterable<string>|string} [opts.allowedApps] Optional app IDs allowed through the proxy.
  * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
  * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
  * @returns Object with GET, POST, PUT, PATCH, DELETE, OPTIONS Astro APIRoute handlers.
  */
 function createRelayApiRoute (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
-  const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const allowedApps = _normalizeAllowedApps(opts.allowedApps);
   const appSecrets = _normalizeAppSecrets(opts.appSecrets);
   const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
-  const appSignatureToleranceMs = opts.appSignatureToleranceMs ?? DEFAULT_APP_SIGNATURE_TOLERANCE_MS;
+  const appSignatureToleranceMs = _normalizePositiveMs(opts.appSignatureToleranceMs, DEFAULT_APP_SIGNATURE_TOLERANCE_MS);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   async function handler ({ request, params }) {
@@ -325,7 +385,7 @@ function createRelayApiRoute (opts = {}) {
     ]);
 
     const forwardHeaders = new Headers();
-    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp']);
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp', 'x-app-nonce']);
     for (const [k, v] of request.headers.entries()) {
       const headerName = k.toLowerCase();
       if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
