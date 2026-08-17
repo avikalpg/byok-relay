@@ -510,6 +510,7 @@ class StreamingChatService {
       } else {
         this._messages.update((prev) => prev.filter((message) => message !== newUserMsg));
         this._error.set(err.message);
+        this._streamingContent.set('');
         throw err;
       }
     } finally {
