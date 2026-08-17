@@ -102,14 +102,18 @@ export const onRequest = sequence(
   createByokRelayMiddleware({
     relayUrl: import.meta.env.RELAY_URL,
     pathPrefix: '/api/relay',       // default; all sub-paths proxied
-    allowedApps: ['my-app'],        // optional coarse app_id filter, not auth
+    allowedApps: ['my-app'],        // optional verified app allowlist
+    verifyApp: async ({ request, appId }) => {
+      const session = await getSession(request); // your server-side session lookup
+      return session?.appId === appId;
+    },
   }),
 );
 ```
 
 The middleware intercepts any request whose pathname starts with `pathPrefix` and proxies it to the relay, streaming the response back. Requests to other paths call `next()` normally.
 
-`allowedApps` only checks a client-supplied `x-app-id` header or `app_id` query parameter. It is a coarse routing/filtering aid, not authentication or authorization; the upstream relay token remains the account authorization boundary.
+When `allowedApps` is set, the app ID must be verified by trusted server-side state. Provide either `verifyApp` for session/cookie based apps or `appSecrets` for signed server-to-server requests. The proxy never authorizes a request based on a client-supplied `x-app-id` or `app_id` alone.
 
 ---
 
@@ -181,14 +185,17 @@ const relay = new ByokRelayClient({
 
 ```ts
 createRelayApiRoute({
-  relayUrl: string,         // Upstream relay URL. Uses managed relay by default.
-  allowedApps?: string[],   // Client-supplied app_id filter; not auth.
+  relayUrl: string,                         // Upstream relay URL. Uses managed relay by default.
+  allowedApps?: string[],                   // Optional verified app allowlist.
+  verifyApp?: ({ request, appId }) => boolean | string | Promise<boolean | string>,
+  appSecrets?: Record<string, string>,      // Server-only HMAC secrets keyed by app ID.
+  appSignatureToleranceMs?: number,         // Default: 5 minutes.
 })
 ```
 
 Returns an object with `{ GET, POST, PUT, PATCH, DELETE, OPTIONS }` Astro `APIRoute` handlers.
 
-`allowedApps` only checks a client-supplied `x-app-id` header or `app_id` query parameter. It is a coarse routing/filtering aid, not authentication or authorization; the upstream relay token remains the account authorization boundary.
+When `allowedApps` is set, the route requires a server-side proof. Use `verifyApp` to bind the app ID to a trusted session/cookie, or send signed server-to-server requests with `x-app-id`, `x-app-timestamp`, and `x-app-signature`. The signature is `sha256=<hex_hmac_sha256(secret, METHOD + '\\n' + PATHNAME + '\\n' + SEARCH + '\\n' + TIMESTAMP + '\\n' + APP_ID)>`. Never ship `appSecrets` to browser code.
 
 The `params.path` catch-all value is used to construct the upstream sub-path:
 - `/api/relay/health` → params.path = `'health'` → proxies to `RELAY_URL/health`
@@ -200,9 +207,12 @@ The `params.path` catch-all value is used to construct the upstream sub-path:
 
 ```ts
 createByokRelayMiddleware({
-  relayUrl: string,         // Upstream relay URL.
-  pathPrefix?: string,      // URL prefix to intercept. Default: '/api/relay'.
-  allowedApps?: string[],   // Client-supplied app_id filter; not auth.
+  relayUrl: string,                         // Upstream relay URL.
+  pathPrefix?: string,                      // URL prefix to intercept. Default: '/api/relay'.
+  allowedApps?: string[],                   // Optional verified app allowlist.
+  verifyApp?: ({ request, appId }) => boolean | string | Promise<boolean | string>,
+  appSecrets?: Record<string, string>,      // Server-only HMAC secrets keyed by app ID.
+  appSignatureToleranceMs?: number,         // Default: 5 minutes.
 })
 ```
 

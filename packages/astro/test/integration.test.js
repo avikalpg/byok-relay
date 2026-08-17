@@ -10,6 +10,8 @@
 
 'use strict';
 
+const { createHmac } = require('crypto');
+
 /* ─── Test framework ─────────────────────────────────────────────────────── */
 
 let passed = 0;
@@ -42,6 +44,17 @@ function assertEqual (a, b) {
 }
 function assertIncludes (str, sub) {
   if (!str.includes(sub)) throw new Error(`Expected "${str}" to include "${sub}"`);
+}
+
+function signedAppHeaders ({ appId, secret, method = 'GET', path = '/api/relay/users', search = '', timestamp = Date.now() }) {
+  const timestampText = String(timestamp);
+  const payload = [method.toUpperCase(), path, search, timestampText, appId].join('\n');
+  const signature = createHmac('sha256', secret).update(payload).digest('hex');
+  return new Headers({
+    'x-app-id': appId,
+    'x-app-timestamp': timestampText,
+    'x-app-signature': `sha256=${signature}`,
+  });
 }
 
 /* ─── localStorage shim ──────────────────────────────────────────────────── */
@@ -507,26 +520,43 @@ test('middleware strips prefix correctly for sub-paths', async () => {
   assertEqual(capturedUrl, 'http://relay/keys/openai');
 });
 
-test('middleware blocks disallowed app_id', async () => {
+test('middleware blocks unsigned app_id', async () => {
   const mw = createByokRelayMiddleware({
     relayUrl: 'http://relay',
     pathPrefix: '/api/relay',
     allowedApps: ['allowed-app'],
+    appSecrets: { 'allowed-app': 'server-secret' },
   });
   const context = {
     request: new Request('http://localhost:4321/api/relay/users', {
-      headers: new Headers({ 'x-app-id': 'evil-app' }),
+      headers: new Headers({ 'x-app-id': 'allowed-app' }),
     }),
   };
   const resp = await mw(context, () => {});
   assertEqual(resp.status, 403);
 });
 
-test('middleware allows listed app_id', async () => {
+test('middleware rejects allowedApps without server verification', async () => {
   const mw = createByokRelayMiddleware({
     relayUrl: 'http://relay',
     pathPrefix: '/api/relay',
     allowedApps: ['good-app'],
+  });
+  const context = {
+    request: new Request('http://localhost:4321/api/relay/users', {
+      headers: new Headers({ 'x-app-id': 'good-app' }),
+    }),
+  };
+  const resp = await mw(context, () => {});
+  assertEqual(resp.status, 500);
+});
+
+test('middleware allows listed app_id with valid signature', async () => {
+  const mw = createByokRelayMiddleware({
+    relayUrl: 'http://relay',
+    pathPrefix: '/api/relay',
+    allowedApps: ['good-app'],
+    appSecrets: { 'good-app': 'server-secret' },
   });
   let called = false;
   mockFetch(() => {
@@ -539,7 +569,7 @@ test('middleware allows listed app_id', async () => {
   });
   const context = {
     request: new Request('http://localhost:4321/api/relay/users', {
-      headers: new Headers({ 'x-app-id': 'good-app' }),
+      headers: signedAppHeaders({ appId: 'good-app', secret: 'server-secret' }),
     }),
   };
   const resp = await mw(context, () => {});
@@ -635,12 +665,37 @@ test('route handler blocks disallowed app_id', async () => {
   const route = createRelayApiRoute({
     relayUrl: 'http://relay',
     allowedApps: ['good-app'],
+    appSecrets: { 'good-app': 'server-secret' },
   });
   const req = new Request('http://localhost:4321/api/relay/users', {
     headers: new Headers({ 'x-app-id': 'bad-app' }),
   });
   const resp = await route.POST({ request: req, params: { path: 'users' } });
   assertEqual(resp.status, 403);
+});
+
+test('route handler allows listed app_id with valid signature', async () => {
+  const route = createRelayApiRoute({
+    relayUrl: 'http://relay',
+    allowedApps: ['good-app'],
+    appSecrets: { 'good-app': 'server-secret' },
+  });
+  let called = false;
+  mockFetch(() => {
+    called = true;
+    return Promise.resolve({
+      ok: true, status: 200, statusText: 'OK',
+      headers: new Headers({}),
+      body: '{}',
+    });
+  });
+  const req = new Request('http://localhost:4321/api/relay/users', {
+    method: 'POST',
+    headers: signedAppHeaders({ appId: 'good-app', secret: 'server-secret', method: 'POST' }),
+  });
+  const resp = await route.POST({ request: req, params: { path: 'users' } });
+  assertEqual(resp.status, 200);
+  assert(called, 'fetch should have been called');
 });
 
 test('route returns 502 on upstream fetch error', async () => {

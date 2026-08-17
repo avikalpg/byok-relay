@@ -29,6 +29,7 @@
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const DEFAULT_RELAY_PATH_PREFIX = '/api/relay';
 const DEFAULT_PROXY_TIMEOUT_MS = 30_000;
+const DEFAULT_APP_SIGNATURE_TOLERANCE_MS = 5 * 60 * 1000;
 
 /* ========================================================================== */
 /* Utility — SSR-safe storage                                                  */
@@ -74,6 +75,90 @@ function _safeRemove (key) {
   try { window.localStorage.removeItem(key); } catch (_) {}
 }
 
+function _normalizeAppSecrets (appSecrets) {
+  if (!appSecrets) return null;
+  if (appSecrets instanceof Map) return appSecrets;
+  if (typeof appSecrets === 'object') return new Map(Object.entries(appSecrets));
+  return null;
+}
+
+function _jsonError (message, status) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function _appSignaturePayload ({ request, url, appId, timestamp }) {
+  return [
+    request.method.toUpperCase(),
+    url.pathname,
+    url.search || '',
+    String(timestamp),
+    appId,
+  ].join('\n');
+}
+
+async function _hmacSha256Hex (secret, payload) {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle) throw new Error('Web Crypto HMAC is unavailable');
+  const encoder = new TextEncoder();
+  const key = await cryptoApi.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await cryptoApi.subtle.sign('HMAC', key, encoder.encode(payload));
+  return Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function _normalizeSignature (signature) {
+  return String(signature || '').trim().replace(/^sha256=/i, '').toLowerCase();
+}
+
+function _constantTimeEqual (left, right) {
+  const a = _normalizeSignature(left);
+  const b = _normalizeSignature(right);
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function _verifyAppAccess ({ request, url, allowedApps, appSecrets, verifyApp, appSignatureToleranceMs }) {
+  if (!allowedApps) return null;
+
+  const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
+  if (!appId || !allowedApps.has(appId)) return _jsonError('Forbidden app_id', 403);
+
+  if (verifyApp) {
+    const result = await verifyApp({ request, url, appId });
+    if (result === true || result === appId) return null;
+    return _jsonError('Forbidden app_id', 403);
+  }
+
+  const secret = appSecrets?.get(appId);
+  if (!secret) return _jsonError('App verification is not configured', 500);
+
+  const timestamp = request.headers.get('x-app-timestamp');
+  const signature = request.headers.get('x-app-signature');
+  const timestampMs = Number(timestamp);
+  if (!timestamp || !signature || !Number.isFinite(timestampMs)) {
+    return _jsonError('Forbidden app_id', 403);
+  }
+  if (Math.abs(Date.now() - timestampMs) > appSignatureToleranceMs) {
+    return _jsonError('Forbidden app_id', 403);
+  }
+
+  const expected = await _hmacSha256Hex(secret, _appSignaturePayload({ request, url, appId, timestamp }));
+  if (!_constantTimeEqual(signature, expected)) return _jsonError('Forbidden app_id', 403);
+  return null;
+}
+
 /* ========================================================================== */
 /* 1. Astro middleware factory                                                 */
 /* ========================================================================== */
@@ -97,13 +182,18 @@ function _safeRemove (key) {
  * @param {object} opts
  * @param {string} opts.relayUrl         Upstream relay base URL (server-only env var).
  * @param {string} [opts.pathPrefix]     URL prefix to intercept. Default: '/api/relay'.
- * @param {string[]} [opts.allowedApps]  Optional client-controlled app_id filter.
+ * @param {string[]} [opts.allowedApps]  Optional list of app IDs allowed through the proxy.
+ * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
+ * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
  * @returns Astro `onRequest` middleware function.
  */
 function createByokRelayMiddleware (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
   const pathPrefix = opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX;
   const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const appSecrets = _normalizeAppSecrets(opts.appSecrets);
+  const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
+  const appSignatureToleranceMs = opts.appSignatureToleranceMs ?? DEFAULT_APP_SIGNATURE_TOLERANCE_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   return async function byokRelayMiddleware (context, next) {
@@ -118,18 +208,15 @@ function createByokRelayMiddleware (opts = {}) {
     const subPath = url.pathname.slice(pathPrefix.length) || '/';
     const upstreamUrl = relayUrl + subPath + url.search;
 
-    // Optional coarse app_id filter. app_id comes from the client, so this is
-    // not authentication or authorization; upstream relay tokens carry the real
-    // user/account authorization.
-    if (allowedApps) {
-      const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
-      if (!appId || !allowedApps.has(appId)) {
-        return new Response(JSON.stringify({ error: 'Forbidden app_id' }), {
-          status: 403,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-    }
+    const appAccessError = await _verifyAppAccess({
+      request,
+      url,
+      allowedApps,
+      appSecrets,
+      verifyApp,
+      appSignatureToleranceMs,
+    });
+    if (appAccessError) return appAccessError;
 
     // Forward headers, minus hop-by-hop
     const forwardHeaders = new Headers();
@@ -137,8 +224,10 @@ function createByokRelayMiddleware (opts = {}) {
       'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
       'te', 'trailers', 'transfer-encoding', 'upgrade', 'host',
     ]);
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp']);
     for (const [k, v] of request.headers.entries()) {
-      if (!hopByHop.has(k.toLowerCase())) {
+      const headerName = k.toLowerCase();
+      if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
         forwardHeaders.set(k, v);
       }
     }
@@ -201,12 +290,17 @@ function createByokRelayMiddleware (opts = {}) {
  *
  * @param {object} opts
  * @param {string} opts.relayUrl         Upstream relay URL (server-side env var).
- * @param {string[]} [opts.allowedApps]  Optional client-controlled app_id filter.
+ * @param {string[]} [opts.allowedApps]  Optional list of app IDs allowed through the proxy.
+ * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
+ * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
  * @returns Object with GET, POST, PUT, PATCH, DELETE, OPTIONS Astro APIRoute handlers.
  */
 function createRelayApiRoute (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
   const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const appSecrets = _normalizeAppSecrets(opts.appSecrets);
+  const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
+  const appSignatureToleranceMs = opts.appSignatureToleranceMs ?? DEFAULT_APP_SIGNATURE_TOLERANCE_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   async function handler ({ request, params }) {
@@ -215,18 +309,15 @@ function createRelayApiRoute (opts = {}) {
     const reqUrl = new URL(request.url);
     const upstreamUrl = relayUrl + subPath + reqUrl.search;
 
-    // Optional coarse app_id filter. app_id comes from the client, so this is
-    // not authentication or authorization; upstream relay tokens carry the real
-    // user/account authorization.
-    if (allowedApps) {
-      const appId = request.headers.get('x-app-id') || reqUrl.searchParams.get('app_id');
-      if (!appId || !allowedApps.has(appId)) {
-        return new Response(JSON.stringify({ error: 'Forbidden app_id' }), {
-          status: 403,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-    }
+    const appAccessError = await _verifyAppAccess({
+      request,
+      url: reqUrl,
+      allowedApps,
+      appSecrets,
+      verifyApp,
+      appSignatureToleranceMs,
+    });
+    if (appAccessError) return appAccessError;
 
     const hopByHop = new Set([
       'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -234,8 +325,10 @@ function createRelayApiRoute (opts = {}) {
     ]);
 
     const forwardHeaders = new Headers();
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp']);
     for (const [k, v] of request.headers.entries()) {
-      if (!hopByHop.has(k.toLowerCase())) {
+      const headerName = k.toLowerCase();
+      if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
         forwardHeaders.set(k, v);
       }
     }
