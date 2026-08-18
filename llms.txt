@@ -388,6 +388,39 @@ app.all('/relay/*', createRelayRoute({ relayUrl: process.env.RELAY_URL }));
 
 npm: https://www.npmjs.com/package/@byok-relay/hono
 
+## Next.js App Router Integration (`@byok-relay/next`)
+
+Route Handler factory, middleware, React hooks (`'use client'`), and `ByokRelayClient` for Server Components and Server Actions. RELAY_URL lives in `process.env` — it never ships to the browser bundle.
+
+```
+npm install @byok-relay/next
+```
+
+- `createRelayRouteHandler(opts)` — returns `{ GET, POST, PUT, PATCH, DELETE, OPTIONS }` for `app/api/relay/[...path]/route.js`; `[...path]` maps to relay sub-path; optional app_id allowlist; 30 s timeout
+- `createRelayMiddleware(opts)` — Next.js `middleware.js` export; intercepts requests matching `pathPrefix` (default `/relay`); Edge Runtime compatible
+- `useByokRelay(opts)` — register user + key CRUD + logout, localStorage persistence, `'use client'` safe
+- `useChat(opts)` — stateful non-streaming chat, openai/anthropic/groq/mistral/openrouter, systemPrompt + extraParams
+- `useStreamingChat(opts)` — SSE streaming with AbortController, `stopStreaming()`, `streamingContent` live string
+- `useRelayHealth(opts)` — polls `/health`, `check(deep?)`, `intervalMs` control
+- `ByokRelayClient` — plain-JS class for Server Components, Server Actions, API Routes; custom `storage` adapter for cookies/session; `register`, `ensureToken`, `logout`, `storeKey`, `listKeys`, `deleteKey`, `rotateKey`, `chat`, `streamChat` (async generator), `health`, `stats`, `getModels`, `deleteAccount`
+
+```js
+// app/api/relay/[...path]/route.js
+import { createRelayRouteHandler } from '@byok-relay/next';
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } =
+  createRelayRouteHandler({ relayUrl: process.env.RELAY_URL });
+```
+
+```jsx
+// 'use client' component
+import { useByokRelay, useStreamingChat } from '@byok-relay/next';
+const { token, registerUser } = useByokRelay({ relayUrl: '/api/relay' });
+const { messages, streamingContent, sendMessage } =
+  useStreamingChat({ relayUrl: '/api/relay', token, model: 'openai/gpt-4o' });
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/next
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay

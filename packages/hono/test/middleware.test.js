@@ -121,6 +121,30 @@ await testAsync('middleware blocks request with disallowed app_id', async () => 
   assert.ok(respondedWith403, 'should return 403 for disallowed app_id');
 });
 
+await testAsync('middleware blocks missing app_id when allowlist is configured', async () => {
+  const mw = createByokRelayMiddleware({
+    pathPrefix: '/relay',
+    allowedAppIds: ['allowed-app'],
+    relayUrl: 'http://localhost:3000',
+  });
+  let respondedWith403 = false;
+  const fakeCtx = {
+    req: {
+      url: 'http://localhost/relay/health',
+      method: 'GET',
+      raw: { headers: { entries: () => [].entries() } },
+      header: () => null,
+    },
+    env: {},
+    json: (data, status) => {
+      if (status === 403) respondedWith403 = true;
+      return { data, status };
+    },
+  };
+  await mw(fakeCtx, async () => {});
+  assert.ok(respondedWith403, 'should return 403 when app_id is missing');
+});
+
 /* ------------------------------------------------------------------ */
 /* createRelayRoute                                                     */
 /* ------------------------------------------------------------------ */
@@ -157,6 +181,27 @@ await testAsync('createRelayRoute blocks disallowed app_id', async () => {
   };
   await handler(fakeCtx);
   assert.ok(got403, 'should return 403 for disallowed app_id');
+});
+
+await testAsync('createRelayRoute blocks missing app_id when allowlist is configured', async () => {
+  const handler = createRelayRoute({ allowedAppIds: ['app1'] });
+  let got403 = false;
+  const fakeCtx = {
+    req: {
+      url: 'http://localhost/relay/health',
+      method: 'GET',
+      raw: { headers: { entries: () => [].entries() } },
+      header: () => null,
+      param: () => 'health',
+    },
+    env: {},
+    json: (data, status) => {
+      if (status === 403) got403 = true;
+      return { data, status };
+    },
+  };
+  await handler(fakeCtx);
+  assert.ok(got403, 'should return 403 when app_id is missing');
 });
 
 /* ------------------------------------------------------------------ */
