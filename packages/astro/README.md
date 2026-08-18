@@ -102,12 +102,18 @@ export const onRequest = sequence(
   createByokRelayMiddleware({
     relayUrl: import.meta.env.RELAY_URL,
     pathPrefix: '/api/relay',       // default; all sub-paths proxied
-    allowedApps: ['my-app'],        // optional app_id whitelist
+    allowedApps: ['my-app'],        // optional verified app allowlist
+    verifyApp: async ({ request, appId }) => {
+      const session = await getSession(request); // your server-side session lookup
+      return session?.appId === appId;
+    },
   }),
 );
 ```
 
 The middleware intercepts any request whose pathname starts with `pathPrefix` and proxies it to the relay, streaming the response back. Requests to other paths call `next()` normally.
+
+When `allowedApps`, `verifyApp`, or `appSecrets` is set, the app ID must be verified by trusted server-side state. Provide either `verifyApp` for session/cookie based apps or `appSecrets` for signed server-to-server requests with `x-app-id`, `x-app-timestamp`, `x-app-nonce`, and `x-app-signature`. The proxy never authorizes a request based on a client-supplied `x-app-id` or `app_id` alone.
 
 ---
 
@@ -179,12 +185,26 @@ const relay = new ByokRelayClient({
 
 ```ts
 createRelayApiRoute({
-  relayUrl: string,         // Upstream relay URL. Uses managed relay by default.
-  allowedApps?: string[],   // If set, rejects requests whose x-app-id header is not listed.
+  relayUrl?: string,                        // Upstream relay URL. Uses managed relay by default.
+  allowedApps?: Iterable<string> | string,  // Optional verified app allowlist.
+  verifyApp?: ({ request, appId }) => boolean | string | Promise<boolean | string>,
+  appSecrets?: Record<string, string> | Map<string, string>, // Server-only HMAC secrets keyed by app ID.
+  appSignatureToleranceMs?: number,         // Positive milliseconds. Default: 5 minutes.
 })
 ```
 
 Returns an object with `{ GET, POST, PUT, PATCH, DELETE, OPTIONS }` Astro `APIRoute` handlers.
+
+When `allowedApps`, `verifyApp`, or `appSecrets` is set, the route requires a server-side proof. Use `verifyApp` to bind the app ID to a trusted session/cookie, or send signed server-to-server requests with `x-app-id`, `x-app-timestamp`, `x-app-nonce`, and `x-app-signature`. The signature is `sha256=<hex_hmac_sha256(secret, METHOD + '\\n' + PATHNAME + '\\n' + SEARCH + '\\n' + TIMESTAMP + '\\n' + APP_ID + '\\n' + BODY_SHA256 + '\\n' + NONCE)>`.
+
+HMAC wire contract:
+- `TIMESTAMP` is Unix time in milliseconds and must be within `appSignatureToleranceMs`.
+- `METHOD` is uppercased, `PATHNAME` is `url.pathname`, and `SEARCH` is raw `url.search` including the leading `?` when present or an empty string otherwise.
+- `BODY_SHA256` is lowercase hexadecimal SHA-256 of the request body for methods that carry a body, and an empty string for `GET` and `HEAD`.
+- `NONCE` is the exact `x-app-nonce` header value and is rejected on replay until the tolerance window expires.
+- Fields are separated by literal newline characters. The digest is lowercase hexadecimal HMAC-SHA256, and the `sha256=` prefix is optional.
+
+Never ship `appSecrets` to browser code. HMAC signatures attest the server-side app integration; relay tokens remain the authorization boundary for user/provider access.
 
 The `params.path` catch-all value is used to construct the upstream sub-path:
 - `/api/relay/health` → params.path = `'health'` → proxies to `RELAY_URL/health`
@@ -196,9 +216,12 @@ The `params.path` catch-all value is used to construct the upstream sub-path:
 
 ```ts
 createByokRelayMiddleware({
-  relayUrl: string,         // Upstream relay URL.
-  pathPrefix?: string,      // URL prefix to intercept. Default: '/api/relay'.
-  allowedApps?: string[],   // If set, checks x-app-id header against this list.
+  relayUrl?: string,                        // Upstream relay URL. Uses managed relay by default.
+  pathPrefix?: string,                      // URL prefix to intercept. Default: '/api/relay'.
+  allowedApps?: Iterable<string> | string,  // Optional verified app allowlist.
+  verifyApp?: ({ request, appId }) => boolean | string | Promise<boolean | string>,
+  appSecrets?: Record<string, string> | Map<string, string>, // Server-only HMAC secrets keyed by app ID.
+  appSignatureToleranceMs?: number,         // Positive milliseconds. Default: 5 minutes.
 })
 ```
 

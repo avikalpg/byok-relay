@@ -1,0 +1,18 @@
+modules = ["nodejs-20:v8-20231227-322e88b"]
+run = "npm start"
+
+hidden = [".config", "package-lock.json", "node_modules"]
+
+[nix]
+channel = "stable-23_11"
+
+[env]
+PORT = "3000"
+
+[deployment]
+run = ["sh", "-c", "npm start"]
+deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
