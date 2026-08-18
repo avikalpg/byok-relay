@@ -25,7 +25,7 @@
   "author": "Alokit Innovations",
   "license": "MIT",
   "peerDependencies": {
-    "ai": ">=3.0.0"
+    "ai": ">=3.0.0 <5.0.0"
   },
   "peerDependenciesMeta": {
     "ai": {

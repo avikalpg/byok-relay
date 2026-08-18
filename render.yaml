@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: byok-relay
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    disk:
+      name: byok-relay-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ENCRYPTION_SECRET
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        sync: false          # Set to your frontend domain during deploy
+      - key: APP_SECRET
+        generateValue: true
+      - key: DB_PATH
+        value: /app/data/relay.db

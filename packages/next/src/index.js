@@ -324,18 +324,31 @@ function createRelayMiddleware ({
  * Resolve React hooks — same shim pattern used across the package family.
  * Works with React 17/18, Next.js 13+ (App + Pages Router).
  */
+function _hookShim () {
+  return {
+    useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+    useEffect: () => {},
+    useRef: (initial) => ({ current: initial ?? null }),
+    useCallback: (fn) => fn,
+  };
+}
+
+function _hasActiveReactDispatcher (react) {
+  const clientInternals = react.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  if (clientInternals && clientInternals.H) return true;
+
+  const secretInternals = react.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+  const dispatcher = secretInternals && secretInternals.ReactCurrentDispatcher;
+  return Boolean(dispatcher && dispatcher.current);
+}
+
 function _getHooks () {
   try {
     const r = require('react');
-    if (r && r.useState && r.useEffect && r.useRef && r.useCallback) return r;
+    if (r && r.useState && r.useEffect && r.useRef && r.useCallback && _hasActiveReactDispatcher(r)) return r;
   } catch (_) {}
-  // No-op shims for environments without React (tests, edge)
-  return {
-    useState: () => [undefined, () => {}],
-    useEffect: () => {},
-    useRef: () => ({ current: null }),
-    useCallback: (fn) => fn,
-  };
+  // No-op shims for environments without an active React render dispatcher (tests, edge)
+  return _hookShim();
 }
 
 /**
@@ -569,28 +582,47 @@ function useStreamingChat ({
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let accumulated = '';
+      let sseBuffer = '';
 
-      while (true) {
+      const processSseLine = (line) => {
+        if (!line.startsWith('data: ')) return false;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') return true;
+        try {
+          const parsed = JSON.parse(raw);
+          const delta =
+            parsed.choices?.[0]?.delta?.content ||
+            parsed.delta?.text || '';
+          if (delta) {
+            accumulated += delta;
+            setStreamingContent(accumulated);
+          }
+        } catch (_) {}
+        return false;
+      };
+
+      let streamComplete = false;
+      while (!streamComplete) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          sseBuffer += decoder.decode();
+          if (sseBuffer) streamComplete = processSseLine(sseBuffer);
+          break;
+        }
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const raw = line.slice(6).trim();
-          if (raw === '[DONE]') continue;
-          try {
-            const parsed = JSON.parse(raw);
-            const delta =
-              parsed.choices?.[0]?.delta?.content ||
-              parsed.delta?.text || '';
-            if (delta) {
-              accumulated += delta;
-              setStreamingContent(accumulated);
-            }
-          } catch (_) {}
+          if (processSseLine(line)) {
+            streamComplete = true;
+            break;
+          }
+        }
+
+        if (streamComplete && typeof reader.cancel === 'function') {
+          try { await reader.cancel(); } catch (_) {}
         }
       }
 
@@ -860,13 +892,22 @@ class ByokRelayClient {
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
+    let sseBuffer = '';
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
+        if (done) {
+          sseBuffer += decoder.decode();
+          if (!sseBuffer) break;
+        } else {
+          sseBuffer += decoder.decode(value, { stream: true });
+        }
+
+        const lines = done ? [sseBuffer] : sseBuffer.split('\n');
+        sseBuffer = done ? '' : (lines.pop() ?? '');
+
+        for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const raw = line.slice(6).trim();
           if (raw === '[DONE]') return;
@@ -878,6 +919,8 @@ class ByokRelayClient {
             if (delta) yield delta;
           } catch (_) {}
         }
+
+        if (done) break;
       }
     } finally {
       reader.releaseLock();

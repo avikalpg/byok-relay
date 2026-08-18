@@ -79,13 +79,13 @@ import { useByokRelay, useStreamingChat } from '@byok-relay/remix';
 
 export function AiChat() {
   const { token, loading: registering } = useByokRelay({
-    relayUrl: window.ENV.RELAY_URL,
+    relayUrl: '/api/relay',
     appId: 'my-app',
   });
 
   const { messages, streamingContent, send, stopStreaming, loading } =
     useStreamingChat({
-      relayUrl: window.ENV.RELAY_URL,
+      relayUrl: '/api/relay',
       token,
       provider: 'openai',
       model: 'gpt-4o-mini',
@@ -228,8 +228,8 @@ import { ByokRelayClient } from '@byok-relay/remix';
 // In a Remix loader (server) — use private RELAY_URL
 const serverClient = new ByokRelayClient({ relayUrl: process.env.RELAY_URL });
 
-// In browser — use public relay path
-const browserClient = new ByokRelayClient({ relayUrl: window.ENV.RELAY_URL });
+// In browser - use the same-origin relay route
+const browserClient = new ByokRelayClient({ relayUrl: '/api/relay' });
 ```
 
 | Method | Description |

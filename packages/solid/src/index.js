@@ -17,6 +17,11 @@
 
 'use strict';
 
+let solidCreateSignal = null;
+let solidCreateStore = null;
+try { ({ createSignal: solidCreateSignal } = require('solid-js')); } catch { /* optional peer dependency */ }
+try { ({ createStore: solidCreateStore } = require('solid-js/store')); } catch { /* optional peer dependency */ }
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
@@ -24,7 +29,6 @@ const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const PROVIDER_PATHS = {
   openai:     'chat/completions',
   anthropic:  'messages',
-  google:     'models/{model}:generateContent',
   groq:       'chat/completions',
   mistral:    'chat/completions',
   openrouter: 'chat/completions',
@@ -40,10 +44,8 @@ const PROVIDER_PATHS = {
  * Returns [getter, setter] — identical contract to SolidJS's `createSignal`.
  */
 function createSignal(initial) {
-  // Use native SolidJS signals when available (works inside components/stores)
-  if (typeof globalThis !== 'undefined' && globalThis.__solidCreateSignal) {
-    return globalThis.__solidCreateSignal(initial);
-  }
+  // Use native SolidJS signals when the optional peer dependency is installed.
+  if (solidCreateSignal) return solidCreateSignal(initial);
 
   let value = initial;
   const getter = () => value;
@@ -59,9 +61,7 @@ function createSignal(initial) {
  * Returns [state proxy, setState] — mirrors SolidJS `createStore`.
  */
 function createStore(initial) {
-  if (typeof globalThis !== 'undefined' && globalThis.__solidCreateStore) {
-    return globalThis.__solidCreateStore(initial);
-  }
+  if (solidCreateStore) return solidCreateStore(initial);
 
   // Minimal shim: plain object + setter that merges patches
   let state = { ...initial };
@@ -110,14 +110,36 @@ function storageRemove(key) {
 
 // ─── SSE parsing ─────────────────────────────────────────────────────────────
 
-function* parseSSE(chunk) {
-  const lines = chunk.split('\n');
+function* parseSSE(frame) {
+  const lines = frame.split(/\r?\n/);
   for (const line of lines) {
     if (!line.startsWith('data:')) continue;
     const data = line.slice(5).trim();
     if (data === '[DONE]') { yield null; continue; }
     try { yield JSON.parse(data); } catch { /* skip malformed */ }
   }
+}
+
+function createSSEParser() {
+  let buffer = '';
+
+  function* drainFrames(frames) {
+    for (const frame of frames) yield* parseSSE(frame);
+  }
+
+  return {
+    *push(chunk) {
+      buffer += chunk;
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() || '';
+      yield* drainFrames(frames);
+    },
+    *flush() {
+      const trailing = buffer;
+      buffer = '';
+      if (trailing.trim()) yield* parseSSE(trailing);
+    },
+  };
 }
 
 function extractDelta(event, provider) {
@@ -422,7 +444,8 @@ function createStreamingChatStore(opts = {}) {
     setStreamingContent('');
     setError(null);
 
-    abortController = new AbortController();
+    const controller = new AbortController();
+    abortController = controller;
 
     try {
       const history = messages();
@@ -447,40 +470,51 @@ function createStreamingChatStore(opts = {}) {
           'x-relay-token': relayToken,
         },
         body:   JSON.stringify(body),
-        signal: abortController.signal,
+        signal: controller.signal,
       });
 
       if (!res.ok) throw new Error(`Relay error: ${res.status}`);
 
       const reader  = res.body.getReader();
       const decoder = new TextDecoder();
+      const sseParser = createSSEParser();
       let accumulated = '';
+
+      function applyEvent(event) {
+        if (abortController !== controller) return;
+        const delta = extractDelta(event, provider);
+        if (delta) {
+          accumulated += delta;
+          setStreamingContent(accumulated);
+        }
+      }
 
       while (true) {
         const { done, value } = await reader.read();
+        if (abortController !== controller) return;
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        for (const event of parseSSE(chunk)) {
-          const delta = extractDelta(event, provider);
-          if (delta) {
-            accumulated += delta;
-            setStreamingContent(accumulated);
-          }
-        }
+        for (const event of sseParser.push(chunk)) applyEvent(event);
       }
+
+      for (const event of sseParser.flush()) applyEvent(event);
+      if (abortController !== controller) return;
 
       // Commit finished message
       setMessages(prev => [...prev, { role: 'assistant', content: accumulated }]);
       setStreamingContent('');
     } catch (err) {
       if (err.name === 'AbortError') return; // user-initiated stop
+      if (abortController !== controller) return;
       setError(err.message);
       setMessages(prev => prev.slice(0, -1)); // rollback user message
       throw err;
     } finally {
-      abortController = null;
-      setLoading(false);
+      if (abortController === controller) {
+        abortController = null;
+        setLoading(false);
+      }
     }
   }
 
