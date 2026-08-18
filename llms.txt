@@ -359,6 +359,35 @@ const { messages, streamingContent, send } = useStreamingChat({ relayUrl: '/api/
 
 npm: https://www.npmjs.com/package/@byok-relay/remix
 
+## Hono Middleware (`@byok-relay/hono`)
+
+Hono middleware and route factory for BYOK AI relay. Works on Cloudflare Workers, Deno Deploy, Bun, and Node.js. RELAY_URL is read from `c.env` (Workers binding) so it never ships to the browser bundle.
+
+```
+npm install @byok-relay/hono
+```
+
+- `createByokRelayMiddleware(opts)` — Hono `MiddlewareHandler`; intercepts paths matching `pathPrefix` (default `/relay`); reads `c.env.RELAY_URL`; optional app_id allowlist; strips hop-by-hop headers
+- `createRelayRoute(opts)` — Hono `Handler` for explicit catch-all route registration (`app.all('/relay/*', handler)`)
+- `ByokRelayClient` — plain-JS class; in-memory storage on edge (no localStorage); accepts custom `storage` adapter for Workers KV; `register`, `ensureToken`, `storeKey`, `listKeys`, `deleteKey`, `rotateKey`, `chat`, `streamChat` (async generator), `health`, `stats`, `getModels`, `deleteAccount`
+
+```typescript
+// Cloudflare Workers
+import { Hono } from 'hono';
+import { createByokRelayMiddleware } from '@byok-relay/hono';
+const app = new Hono();
+app.use('/relay/*', createByokRelayMiddleware());  // reads c.env.RELAY_URL
+export default app;
+```
+
+```typescript
+// Bun / Node.js — explicit route
+import { createRelayRoute } from '@byok-relay/hono';
+app.all('/relay/*', createRelayRoute({ relayUrl: process.env.RELAY_URL }));
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/hono
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
@@ -372,3 +401,4 @@ npm: https://www.npmjs.com/package/@byok-relay/remix
 - @byok-relay/angular (Angular services): https://www.npmjs.com/package/@byok-relay/angular
 - @byok-relay/client (framework-agnostic): https://www.npmjs.com/package/@byok-relay/client
 - @byok-relay/mcp (Claude Desktop/Code MCP): https://www.npmjs.com/package/@byok-relay/mcp
+- @byok-relay/hono (Hono middleware): https://www.npmjs.com/package/@byok-relay/hono
