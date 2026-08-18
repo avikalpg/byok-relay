@@ -582,28 +582,38 @@ function useStreamingChat ({
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let accumulated = '';
+      let sseBuffer = '';
+
+      const processSseLine = (line) => {
+        if (!line.startsWith('data: ')) return;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') return;
+        try {
+          const parsed = JSON.parse(raw);
+          const delta =
+            parsed.choices?.[0]?.delta?.content ||
+            parsed.delta?.text || '';
+          if (delta) {
+            accumulated += delta;
+            setStreamingContent(accumulated);
+          }
+        } catch (_) {}
+      };
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          sseBuffer += decoder.decode();
+          if (sseBuffer) processSseLine(sseBuffer);
+          break;
+        }
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const raw = line.slice(6).trim();
-          if (raw === '[DONE]') continue;
-          try {
-            const parsed = JSON.parse(raw);
-            const delta =
-              parsed.choices?.[0]?.delta?.content ||
-              parsed.delta?.text || '';
-            if (delta) {
-              accumulated += delta;
-              setStreamingContent(accumulated);
-            }
-          } catch (_) {}
+          processSseLine(line);
         }
       }
 
@@ -873,13 +883,22 @@ class ByokRelayClient {
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
+    let sseBuffer = '';
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
+        if (done) {
+          sseBuffer += decoder.decode();
+          if (!sseBuffer) break;
+        } else {
+          sseBuffer += decoder.decode(value, { stream: true });
+        }
+
+        const lines = done ? [sseBuffer] : sseBuffer.split('\n');
+        sseBuffer = done ? '' : (lines.pop() ?? '');
+
+        for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const raw = line.slice(6).trim();
           if (raw === '[DONE]') return;
@@ -891,6 +910,8 @@ class ByokRelayClient {
             if (delta) yield delta;
           } catch (_) {}
         }
+
+        if (done) break;
       }
     } finally {
       reader.releaseLock();

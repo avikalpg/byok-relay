@@ -420,6 +420,45 @@ asyncTests.push(asyncTest('streamChat() yields text deltas from SSE stream', asy
   assert.deepStrictEqual(deltas, ['Hello', ' world']);
 }));
 
+asyncTests.push(asyncTest('streamChat() preserves SSE lines split across chunks', async () => {
+  const chunks = [
+    'data: {"choices":[{"delta":{"content":"Hel',
+    'lo"}}]}\ndata: {"choices":[{"delta":{"content":" world"}}]}',
+    '\ndata: [DONE]',
+  ];
+
+  const encoder = typeof TextEncoder !== 'undefined'
+    ? new TextEncoder()
+    : { encode: (s) => Buffer.from(s) };
+
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    body: {
+      getReader () {
+        let i = 0;
+        return {
+          async read () {
+            if (i >= chunks.length) return { done: true, value: undefined };
+            return { done: false, value: encoder.encode(chunks[i++]) };
+          },
+          releaseLock () {},
+        };
+      },
+    },
+  });
+
+  const client = new ByokRelayClient({ relayUrl: 'http://relay' });
+  client._token = 'tok';
+  const deltas = [];
+  for await (const delta of client.streamChat({
+    model: 'openai/gpt-4o',
+    messages: [{ role: 'user', content: 'Hi' }],
+  })) {
+    deltas.push(delta);
+  }
+  assert.deepStrictEqual(deltas, ['Hello', ' world']);
+}));
+
 /* ── Route handler allowedApps gate ─────────────────────────────────────────── */
 asyncTests.push(asyncTest('createRelayRouteHandler enforces allowedApps', async () => {
   const { POST } = createRelayRouteHandler({
