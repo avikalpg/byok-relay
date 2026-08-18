@@ -94,9 +94,7 @@ function test (name, fn) {
 }
 
 function asyncTest (name, fn) {
-  return fn()
-    .then(() => { console.log(`  ✅ ${name}`); passed++; })
-    .catch(e => { console.error(`  ❌ ${name}: ${e.message}`); failed++; });
+  return { name, fn };
 }
 
 /* ── createRelayRouteHandler ────────────────────────────────────────────────── */
@@ -391,33 +389,38 @@ asyncTests.push(asyncTest('streamChat() yields text deltas from SSE stream', asy
     : { encode: (s) => Buffer.from(s) };
   const encoded = encoder.encode(sseLines);
 
-  globalThis.fetch = async () => ({
-    ok: true, status: 200,
-    body: {
-      getReader () {
-        let done = false;
-        return {
-          async read () {
-            if (done) return { done: true, value: undefined };
-            done = true;
-            return { done: false, value: encoded };
-          },
-          releaseLock () {},
-        };
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true, status: 200,
+      body: {
+        getReader () {
+          let done = false;
+          return {
+            async read () {
+              if (done) return { done: true, value: undefined };
+              done = true;
+              return { done: false, value: encoded };
+            },
+            releaseLock () {},
+          };
+        },
       },
-    },
-  });
+    });
 
-  const client = new ByokRelayClient({ relayUrl: 'http://relay' });
-  client._token = 'tok';
-  const deltas = [];
-  for await (const delta of client.streamChat({
-    model: 'openai/gpt-4o',
-    messages: [{ role: 'user', content: 'Hi' }],
-  })) {
-    deltas.push(delta);
+    const client = new ByokRelayClient({ relayUrl: 'http://relay' });
+    client._token = 'tok';
+    const deltas = [];
+    for await (const delta of client.streamChat({
+      model: 'openai/gpt-4o',
+      messages: [{ role: 'user', content: 'Hi' }],
+    })) {
+      deltas.push(delta);
+    }
+    assert.deepStrictEqual(deltas, ['Hello', ' world']);
+  } finally {
+    globalThis.fetch = previousFetch;
   }
-  assert.deepStrictEqual(deltas, ['Hello', ' world']);
 }));
 
 asyncTests.push(asyncTest('streamChat() preserves SSE lines split across chunks', async () => {
@@ -431,32 +434,37 @@ asyncTests.push(asyncTest('streamChat() preserves SSE lines split across chunks'
     ? new TextEncoder()
     : { encode: (s) => Buffer.from(s) };
 
-  globalThis.fetch = async () => ({
-    ok: true, status: 200,
-    body: {
-      getReader () {
-        let i = 0;
-        return {
-          async read () {
-            if (i >= chunks.length) return { done: true, value: undefined };
-            return { done: false, value: encoder.encode(chunks[i++]) };
-          },
-          releaseLock () {},
-        };
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: true, status: 200,
+      body: {
+        getReader () {
+          let i = 0;
+          return {
+            async read () {
+              if (i >= chunks.length) return { done: true, value: undefined };
+              return { done: false, value: encoder.encode(chunks[i++]) };
+            },
+            releaseLock () {},
+          };
+        },
       },
-    },
-  });
+    });
 
-  const client = new ByokRelayClient({ relayUrl: 'http://relay' });
-  client._token = 'tok';
-  const deltas = [];
-  for await (const delta of client.streamChat({
-    model: 'openai/gpt-4o',
-    messages: [{ role: 'user', content: 'Hi' }],
-  })) {
-    deltas.push(delta);
+    const client = new ByokRelayClient({ relayUrl: 'http://relay' });
+    client._token = 'tok';
+    const deltas = [];
+    for await (const delta of client.streamChat({
+      model: 'openai/gpt-4o',
+      messages: [{ role: 'user', content: 'Hi' }],
+    })) {
+      deltas.push(delta);
+    }
+    assert.deepStrictEqual(deltas, ['Hello', ' world']);
+  } finally {
+    globalThis.fetch = previousFetch;
   }
-  assert.deepStrictEqual(deltas, ['Hello', ' world']);
 }));
 
 /* ── Route handler allowedApps gate ─────────────────────────────────────────── */
@@ -481,7 +489,18 @@ asyncTests.push(asyncTest('createRelayRouteHandler enforces allowedApps', async 
 }));
 
 /* ── Run all async tests ─────────────────────────────────────────────────────── */
-Promise.all(asyncTests).then(() => {
+(async () => {
+  for (const { name, fn } of asyncTests) {
+    try {
+      await fn();
+      console.log(`  ✅ ${name}`);
+      passed++;
+    } catch (e) {
+      console.error(`  ❌ ${name}: ${e.message}`);
+      failed++;
+    }
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
-});
+})();

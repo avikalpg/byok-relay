@@ -585,9 +585,9 @@ function useStreamingChat ({
       let sseBuffer = '';
 
       const processSseLine = (line) => {
-        if (!line.startsWith('data: ')) return;
+        if (!line.startsWith('data: ')) return false;
         const raw = line.slice(6).trim();
-        if (raw === '[DONE]') return;
+        if (raw === '[DONE]') return true;
         try {
           const parsed = JSON.parse(raw);
           const delta =
@@ -598,13 +598,15 @@ function useStreamingChat ({
             setStreamingContent(accumulated);
           }
         } catch (_) {}
+        return false;
       };
 
-      while (true) {
+      let streamComplete = false;
+      while (!streamComplete) {
         const { done, value } = await reader.read();
         if (done) {
           sseBuffer += decoder.decode();
-          if (sseBuffer) processSseLine(sseBuffer);
+          if (sseBuffer) streamComplete = processSseLine(sseBuffer);
           break;
         }
 
@@ -613,7 +615,14 @@ function useStreamingChat ({
         sseBuffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          processSseLine(line);
+          if (processSseLine(line)) {
+            streamComplete = true;
+            break;
+          }
+        }
+
+        if (streamComplete && typeof reader.cancel === 'function') {
+          try { await reader.cancel(); } catch (_) {}
         }
       }
 
