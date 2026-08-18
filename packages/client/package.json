@@ -1,0 +1,41 @@
+{
+  "name": "@byok-relay/client",
+  "version": "1.0.0",
+  "description": "Framework-agnostic JavaScript client for byok-relay — browser and Node.js compatible",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "require": "./src/index.js",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "api-key",
+    "frontend",
+    "no-backend"
+  ],
+  "homepage": "https://byokrelay.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/client"
+  },
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -324,18 +324,31 @@ function createRelayMiddleware ({
  * Resolve React hooks — same shim pattern used across the package family.
  * Works with React 17/18, Next.js 13+ (App + Pages Router).
  */
+function _hookShim () {
+  return {
+    useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+    useEffect: () => {},
+    useRef: (initial) => ({ current: initial ?? null }),
+    useCallback: (fn) => fn,
+  };
+}
+
+function _hasActiveReactDispatcher (react) {
+  const clientInternals = react.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  if (clientInternals && clientInternals.H) return true;
+
+  const secretInternals = react.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+  const dispatcher = secretInternals && secretInternals.ReactCurrentDispatcher;
+  return Boolean(dispatcher && dispatcher.current);
+}
+
 function _getHooks () {
   try {
     const r = require('react');
-    if (r && r.useState && r.useEffect && r.useRef && r.useCallback) return r;
+    if (r && r.useState && r.useEffect && r.useRef && r.useCallback && _hasActiveReactDispatcher(r)) return r;
   } catch (_) {}
-  // No-op shims for environments without React (tests, edge)
-  return {
-    useState: () => [undefined, () => {}],
-    useEffect: () => {},
-    useRef: () => ({ current: null }),
-    useCallback: (fn) => fn,
-  };
+  // No-op shims for environments without an active React render dispatcher (tests, edge)
+  return _hookShim();
 }
 
 /**
