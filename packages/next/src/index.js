@@ -562,6 +562,7 @@ function useStreamingChat ({
 
     const ac = new AbortController();
     abortRef.current = ac;
+    let accumulated = '';
 
     try {
       const resp = await fetch(`${base}/relay`, {
@@ -581,7 +582,6 @@ function useStreamingChat ({
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
-      let accumulated = '';
       let sseBuffer = '';
 
       const processSseLine = (line) => {
@@ -639,9 +639,9 @@ function useStreamingChat ({
         setError(e.message);
         throw e;
       }
-      // Committed partial content on abort
-      if (streamingContent) {
-        setMessages([...history, { role: 'assistant', content: streamingContent }]);
+      // Commit partial content accumulated in this invocation before abort.
+      if (accumulated) {
+        setMessages([...history, { role: 'assistant', content: accumulated }]);
       } else {
         setMessages(messages);
       }
@@ -650,7 +650,7 @@ function useStreamingChat ({
       setLoading(false);
       if (abortRef.current === ac) abortRef.current = null;
     }
-  }, [base, token, model, messages, systemPrompt, extraParams, streamingContent, stopStreaming]);
+  }, [base, token, model, messages, systemPrompt, extraParams, stopStreaming]);
 
   const clearMessages = React.useCallback(() => {
     stopStreaming();

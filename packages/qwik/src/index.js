@@ -395,7 +395,7 @@ function createRelayLoader (opts = {}) {
     const subPath = params['path'] || '';
 
     const appId = request.headers.get('x-app-id') || '';
-    if (opts.allowedApps && appId && !opts.allowedApps.includes(appId)) {
+    if (opts.allowedApps && opts.allowedApps.length > 0 && (!appId || !opts.allowedApps.includes(appId))) {
       throw error(403, 'App not allowed');
     }
 
@@ -411,6 +411,9 @@ function createRelayLoader (opts = {}) {
         headers,
         signal  : ctrl.signal,
       });
+    } catch (err) {
+      const status = err && err.name === 'AbortError' ? 504 : 502;
+      throw error(status, status === 504 ? 'Upstream timeout' : 'Failed to reach relay');
     } finally {
       clearTimeout(timer);
     }
@@ -452,7 +455,7 @@ function createRelayAction (opts = {}) {
     const bodyData = data.body;
 
     const appId = data.appId || request.headers.get('x-app-id') || '';
-    if (opts.allowedApps && appId && !opts.allowedApps.includes(appId)) {
+    if (opts.allowedApps && opts.allowedApps.length > 0 && (!appId || !opts.allowedApps.includes(appId))) {
       throw error(403, 'App not allowed');
     }
 
@@ -473,6 +476,13 @@ function createRelayAction (opts = {}) {
         body    : JSON.stringify(bodyData),
         signal  : ctrl.signal,
       });
+    } catch (err) {
+      const status = err && err.name === 'AbortError' ? 504 : 502;
+      return {
+        success : false,
+        status,
+        error   : status === 504 ? 'Upstream timeout' : 'Failed to reach relay',
+      };
     } finally {
       clearTimeout(timer);
     }

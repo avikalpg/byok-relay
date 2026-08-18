@@ -103,7 +103,7 @@ class ByokRelayClient {
     this._relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
     this._appId    = opts.appId || 'nuxt-app';
     this._storage  = _buildStorage(opts.storage);
-    this._TOKEN_KEY = 'byok_relay_token';
+    this._TOKEN_KEY = `byok_token_${this._appId}`;
   }
 
   /* ── Token management ── */
@@ -368,14 +368,6 @@ function createRelayServerRoute (opts) {
     const params  = (event.context && event.context.params) || {};
     const subPath = params._ || params[''] || '';  // Nuxt uses '_' for [...] catch-all
 
-    // Optional app_id allowlist check — read from Authorization header body or query
-    if (opts.allowedAppIds && opts.allowedAppIds.length > 0) {
-      const appId = _getAppIdFromEvent(event);
-      if (appId && !opts.allowedAppIds.includes(appId)) {
-        return _h3Response(event, 403, { error: 'app_id not allowed' });
-      }
-    }
-
     const method  = (event.req || event.node && event.node.req || {}).method || 'GET';
     const reqHeaders = _getRequestHeaders(event);
     const fwdHeaders = _filterHeaders(reqHeaders);
@@ -384,6 +376,15 @@ function createRelayServerRoute (opts) {
     let bodyBuffer = null;
     if (method !== 'GET' && method !== 'HEAD') {
       bodyBuffer = await _readBody(event);
+    }
+
+    // Optional app_id allowlist check. Fail closed when an allowlist is
+    // configured and the caller did not provide an app id.
+    if (opts.allowedAppIds && opts.allowedAppIds.length > 0) {
+      const appId = _getAppIdFromEvent(event, reqHeaders, bodyBuffer);
+      if (!appId || !opts.allowedAppIds.includes(appId)) {
+        return _h3Response(event, 403, { error: 'app_id not allowed' });
+      }
     }
 
     const upstream = `${relayUrl}/relay/${subPath}`;
@@ -416,12 +417,32 @@ function createRelayServerRoute (opts) {
 }
 
 /* H3 helper shims — work both with h3 imported and without (for tests) */
-function _getAppIdFromEvent (event) {
+function _getAppIdFromEvent (event, headers, bodyBuffer) {
   try {
-    const auth = (event.req || event.node && event.node.req || {}).headers || {};
-    const authHeader = auth.authorization || '';
-    // app_id is not in the auth header; it's in the body — skip whitelist for streaming
+    const h = headers || (event.req || event.node && event.node.req || {}).headers || {};
+    const headerAppId = h['x-app-id'] || h['X-App-Id'];
+    if (headerAppId) return Array.isArray(headerAppId) ? headerAppId[0] : String(headerAppId);
+
+    const url =
+      (event.request && event.request.url) ||
+      (event.req && event.req.url) ||
+      (event.node && event.node.req && event.node.req.url) ||
+      '';
+    const queryAppId = _getQueryParam(url, 'app_id') || _getQueryParam(url, 'appId');
+    if (queryAppId) return queryAppId;
+
+    if (bodyBuffer && bodyBuffer.length) {
+      const parsed = JSON.parse(Buffer.from(bodyBuffer).toString('utf8'));
+      if (parsed && typeof parsed === 'object') return parsed.app_id || parsed.appId || null;
+    }
     return null;
+  } catch (_) { return null; }
+}
+
+function _getQueryParam (url, name) {
+  try {
+    const parsed = new URL(url, 'http://localhost');
+    return parsed.searchParams.get(name);
   } catch (_) { return null; }
 }
 
