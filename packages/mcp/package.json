@@ -1,0 +1,44 @@
+{
+  "name": "@byok-relay/mcp",
+  "version": "1.0.0",
+  "description": "MCP server for byok-relay — use BYOK AI keys from Claude Desktop, Claude Code, and any MCP client",
+  "main": "src/index.js",
+  "bin": {
+    "byok-relay-mcp": "src/index.js"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "byok",
+    "ai-gateway",
+    "claude",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "api-key"
+  ],
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "Apache-2.0"
+}

@@ -16,7 +16,7 @@
  *   3. React hooks (useByokRelay, useChat, useStreamingChat, useRelayHealth)
  *      Client-side React hooks identical in API to @byok-relay/react, but
  *      designed for use with Remix's client-side hydration model. Use the
- *      public relay URL (exposed via `window.ENV` or a loader `json`).
+ *      same-origin relay route (for example `/api/relay`).
  *
  *   4. ByokRelayClient plain-JS class
  *      Framework-agnostic client, safe in both Remix loaders (server) and
@@ -33,13 +33,101 @@
 /* ========================================================================== */
 
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
+const DEFAULT_PROXY_TIMEOUT_MS = 30_000;
+const REGISTRATION_IN_FLIGHT = new Map();
 
 /* ========================================================================== */
 /* Utility                                                                     */
 /* ========================================================================== */
 
 function _isClient () {
-  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch (_) {
+    return false;
+  }
+}
+
+function _timeoutSignal (timeoutMs) {
+  if (!timeoutMs || typeof AbortSignal === 'undefined') return undefined;
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(timeoutMs);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
+}
+
+function _isTimeoutError (err) {
+  return err?.name === 'TimeoutError' || err?.name === 'AbortError';
+}
+
+function _proxyErrorResponse (err) {
+  const timedOut = _isTimeoutError(err);
+  return new Response(JSON.stringify({ error: timedOut ? 'relay timeout' : 'relay unreachable' }), {
+    status: timedOut ? 504 : 502,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function _responseHeaders (headers) {
+  const responseHeaders = {};
+  headers.forEach((v, k) => {
+    if (!HOP_BY_HOP.has(k.toLowerCase())) responseHeaders[k] = v;
+  });
+  return responseHeaders;
+}
+
+function _forceReactShim () {
+  return typeof process !== 'undefined' && process.env?.BYOK_RELAY_FORCE_REACT_SHIM === '1';
+}
+
+function _getRegistrationEntry (storageKey, relayUrl, appId) {
+  let entry = REGISTRATION_IN_FLIGHT.get(storageKey);
+  if (!entry) {
+    const controller = new AbortController();
+    entry = {
+      controller,
+      consumers: 0,
+      settled: false,
+      abortTimer: null,
+    };
+    entry.promise = fetch(`${relayUrl}/users`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(appId ? { 'x-app-id': appId } : {}) },
+      body: JSON.stringify({ app_id: appId || 'remix-app' }),
+      signal: controller.signal,
+    })
+      .then(r => r.json())
+      .finally(() => {
+        entry.settled = true;
+        if (entry.abortTimer) clearTimeout(entry.abortTimer);
+        REGISTRATION_IN_FLIGHT.delete(storageKey);
+      });
+    REGISTRATION_IN_FLIGHT.set(storageKey, entry);
+  }
+  if (entry.abortTimer) {
+    clearTimeout(entry.abortTimer);
+    entry.abortTimer = null;
+  }
+  entry.consumers++;
+  return entry;
+}
+
+function _releaseRegistrationEntry (storageKey, entry) {
+  entry.consumers = Math.max(0, entry.consumers - 1);
+  if (entry.consumers === 0 && !entry.settled) {
+    entry.abortTimer = setTimeout(() => {
+      if (entry.consumers === 0 && !entry.settled) {
+        entry.controller.abort();
+        REGISTRATION_IN_FLIGHT.delete(storageKey);
+      }
+    }, 0);
+  }
+}
+
+function _sseLines (buffer, chunk) {
+  const text = buffer + chunk;
+  const lines = text.split('\n');
+  return { lines, buffer: lines.pop() ?? '' };
 }
 
 function _safeGet (key) {
@@ -62,6 +150,8 @@ const HOP_BY_HOP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade',
   'content-length', // let fetch set it
+  'host', // belongs to the app origin, not the relay origin
+  'content-encoding', // fetch already decoded the upstream body
 ]);
 
 function _filterHeaders (headers) {
@@ -96,13 +186,13 @@ function _filterHeaders (headers) {
  * @param {string[]} [opts.allowedApps]  Optional app_id allowlist.
  * @returns Remix LoaderFunction
  */
-function createRelayLoader ({ relayUrl = DEFAULT_RELAY_URL, allowedApps } = {}) {
+function createRelayLoader ({ relayUrl = DEFAULT_RELAY_URL, allowedApps, timeoutMs = DEFAULT_PROXY_TIMEOUT_MS } = {}) {
   return async function relayLoader ({ request, params }) {
     const subPath = params['*'] || '';
+    const url = new URL(request.url);
 
     // app_id allowlist check
     if (allowedApps && allowedApps.length > 0) {
-      const url = new URL(request.url);
       const appId = url.searchParams.get('app_id') ||
         request.headers.get('x-app-id') || '';
       if (!allowedApps.includes(appId)) {
@@ -113,21 +203,21 @@ function createRelayLoader ({ relayUrl = DEFAULT_RELAY_URL, allowedApps } = {}) 
       }
     }
 
-    const targetUrl = `${relayUrl.replace(/\/$/, '')}/${subPath}`;
-    const upstream = await fetch(targetUrl, {
-      method: 'GET',
-      headers: _filterHeaders(Object.fromEntries(request.headers.entries())),
-    });
+    const targetUrl = `${relayUrl.replace(/\/$/, '')}/${subPath}${url.search}`;
+    let upstream;
+    try {
+      upstream = await fetch(targetUrl, {
+        method: 'GET',
+        headers: _filterHeaders(Object.fromEntries(request.headers.entries())),
+        signal: _timeoutSignal(timeoutMs),
+      });
+    } catch (e) {
+      return _proxyErrorResponse(e);
+    }
 
-    const body = await upstream.arrayBuffer();
-    const responseHeaders = {};
-    upstream.headers.forEach((v, k) => {
-      if (!HOP_BY_HOP.has(k.toLowerCase())) responseHeaders[k] = v;
-    });
-
-    return new Response(body, {
+    return new Response(upstream.body, {
       status: upstream.status,
-      headers: responseHeaders,
+      headers: _responseHeaders(upstream.headers),
     });
   };
 }
@@ -155,13 +245,15 @@ function createRelayLoader ({ relayUrl = DEFAULT_RELAY_URL, allowedApps } = {}) 
  * @param {string[]} [opts.allowedApps]  Optional app_id allowlist.
  * @returns Remix ActionFunction
  */
-function createRelayAction ({ relayUrl = DEFAULT_RELAY_URL, allowedApps } = {}) {
+function createRelayAction ({ relayUrl = DEFAULT_RELAY_URL, allowedApps, timeoutMs = DEFAULT_PROXY_TIMEOUT_MS } = {}) {
   return async function relayAction ({ request, params }) {
     const subPath = params['*'] || '';
+    const url = new URL(request.url);
 
     // app_id allowlist check
     if (allowedApps && allowedApps.length > 0) {
-      const appId = request.headers.get('x-app-id') || '';
+      const appId = url.searchParams.get('app_id') ||
+        request.headers.get('x-app-id') || '';
       if (!allowedApps.includes(appId)) {
         return new Response(JSON.stringify({ error: 'app_id not allowed' }), {
           status: 403,
@@ -170,24 +262,24 @@ function createRelayAction ({ relayUrl = DEFAULT_RELAY_URL, allowedApps } = {}) 
       }
     }
 
-    const targetUrl = `${relayUrl.replace(/\/$/, '')}/${subPath}`;
+    const targetUrl = `${relayUrl.replace(/\/$/, '')}/${subPath}${url.search}`;
     const bodyBuffer = await request.arrayBuffer();
 
-    const upstream = await fetch(targetUrl, {
-      method: request.method,
-      headers: _filterHeaders(Object.fromEntries(request.headers.entries())),
-      body: bodyBuffer.byteLength > 0 ? bodyBuffer : undefined,
-    });
+    let upstream;
+    try {
+      upstream = await fetch(targetUrl, {
+        method: request.method,
+        headers: _filterHeaders(Object.fromEntries(request.headers.entries())),
+        body: bodyBuffer.byteLength > 0 ? bodyBuffer : undefined,
+        signal: _timeoutSignal(timeoutMs),
+      });
+    } catch (e) {
+      return _proxyErrorResponse(e);
+    }
 
-    const responseBody = await upstream.arrayBuffer();
-    const responseHeaders = {};
-    upstream.headers.forEach((v, k) => {
-      if (!HOP_BY_HOP.has(k.toLowerCase())) responseHeaders[k] = v;
-    });
-
-    return new Response(responseBody, {
+    return new Response(upstream.body, {
       status: upstream.status,
-      headers: responseHeaders,
+      headers: _responseHeaders(upstream.headers),
     });
   };
 }
@@ -198,11 +290,13 @@ function createRelayAction ({ relayUrl = DEFAULT_RELAY_URL, allowedApps } = {}) 
 
 /** Resolve React hooks — works with React 17/18/19 or a plain shim. */
 function _resolveReactHooks () {
-  try {
-    // eslint-disable-next-line global-require
-    const r = require('react');
-    if (r && r.useState) return r;
-  } catch (_) {}
+  if (!_forceReactShim()) {
+    try {
+      // eslint-disable-next-line global-require
+      const r = require('react');
+      if (r && r.useState) return r;
+    } catch (_) {}
+  }
   // Minimal shim for testing / non-React environments
   let _state = {};
   let _effects = [];
@@ -227,7 +321,7 @@ function _resolveReactHooks () {
  * Core hook — token registration, key CRUD, logout.
  *
  * @param {object} opts
- * @param {string} opts.relayUrl   Public relay URL (from window.ENV or loader data).
+ * @param {string} opts.relayUrl   Same-origin relay URL (for example `/api/relay`).
  * @param {string} [opts.appId]    Optional app identifier.
  * @returns {{ token, loading, error, storeKey, listKeys, deleteKey, rotateKey, logout }}
  */
@@ -235,7 +329,8 @@ function useByokRelay ({ relayUrl = DEFAULT_RELAY_URL, appId = '' } = {}) {
   const React = _resolveReactHooks();
   const { useState, useEffect, useCallback } = React;
 
-  const STORAGE_KEY = `byok_token_${relayUrl}_${appId}`;
+  const normalizedRelayUrl = relayUrl.replace(/\/$/, '');
+  const STORAGE_KEY = `byok_token_${normalizedRelayUrl}_${appId}`;
   const [token, setToken] = useState(() => _safeGet(STORAGE_KEY));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -250,14 +345,12 @@ function useByokRelay ({ relayUrl = DEFAULT_RELAY_URL, appId = '' } = {}) {
   // Auto-register if no token
   useEffect(() => {
     if (token) return;
+    let cancelled = false;
+    const entry = _getRegistrationEntry(STORAGE_KEY, normalizedRelayUrl, appId);
     setLoading(true);
-    fetch(`${relayUrl}/users`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(appId ? { 'x-app-id': appId } : {}) },
-      body: JSON.stringify({ app_id: appId || 'remix-app' }),
-    })
-      .then(r => r.json())
+    entry.promise
       .then(d => {
+        if (cancelled) return;
         if (d.token) {
           _safeSet(STORAGE_KEY, d.token);
           setToken(d.token);
@@ -265,44 +358,52 @@ function useByokRelay ({ relayUrl = DEFAULT_RELAY_URL, appId = '' } = {}) {
           setError(d.error || 'Registration failed');
         }
       })
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [relayUrl, appId, STORAGE_KEY, token]);
+      .catch(e => {
+        if (!cancelled && e.name !== 'AbortError') setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      _releaseRegistrationEntry(STORAGE_KEY, entry);
+    };
+  }, [normalizedRelayUrl, appId, STORAGE_KEY, token]);
 
   const storeKey = useCallback(async (provider, apiKey) => {
     if (!token) throw new Error('Not registered');
-    const r = await fetch(`${relayUrl}/keys/${provider}`, {
+    const r = await fetch(`${normalizedRelayUrl}/keys/${provider}`, {
       method: 'POST',
       headers: _headers(),
       body: JSON.stringify({ key: apiKey }),
     });
     return r.json();
-  }, [relayUrl, token, _headers]);
+  }, [normalizedRelayUrl, token, _headers]);
 
   const listKeys = useCallback(async () => {
     if (!token) throw new Error('Not registered');
-    const r = await fetch(`${relayUrl}/keys`, { headers: _headers() });
+    const r = await fetch(`${normalizedRelayUrl}/keys`, { headers: _headers() });
     return r.json();
-  }, [relayUrl, token, _headers]);
+  }, [normalizedRelayUrl, token, _headers]);
 
   const deleteKey = useCallback(async (provider) => {
     if (!token) throw new Error('Not registered');
-    const r = await fetch(`${relayUrl}/keys/${provider}`, {
+    const r = await fetch(`${normalizedRelayUrl}/keys/${provider}`, {
       method: 'DELETE',
       headers: _headers(),
     });
     return r.json();
-  }, [relayUrl, token, _headers]);
+  }, [normalizedRelayUrl, token, _headers]);
 
   const rotateKey = useCallback(async (provider, newApiKey) => {
     if (!token) throw new Error('Not registered');
-    const r = await fetch(`${relayUrl}/keys/${provider}/rotate`, {
+    const r = await fetch(`${normalizedRelayUrl}/keys/${provider}/rotate`, {
       method: 'POST',
       headers: _headers(),
       body: JSON.stringify({ key: newApiKey }),
     });
     return r.json();
-  }, [relayUrl, token, _headers]);
+  }, [normalizedRelayUrl, token, _headers]);
 
   const logout = useCallback(() => {
     _safeRemove(STORAGE_KEY);
@@ -405,7 +506,11 @@ function useStreamingChat ({
   const abortRef = useRef(null);
 
   const stopStreaming = useCallback(() => {
-    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
+    if (abortRef.current) {
+      abortRef.current.discardOnAbort = false;
+      abortRef.current.controller.abort();
+      abortRef.current = null;
+    }
   }, []);
 
   const send = useCallback(async (userMessage) => {
@@ -417,7 +522,9 @@ function useStreamingChat ({
     setStreamingContent('');
 
     const ctrl = new AbortController();
-    abortRef.current = ctrl;
+    const abortState = { controller: ctrl, discardOnAbort: false };
+    abortRef.current = abortState;
+    let accumulated = '';
 
     const body = {
       model,
@@ -442,17 +549,22 @@ function useStreamingChat ({
 
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
-      let accumulated = '';
+      let buffer = '';
+      let streamDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-        for (const line of lines) {
+        const parsedChunk = _sseLines(buffer, chunk);
+        buffer = parsedChunk.buffer;
+        for (const line of parsedChunk.lines) {
           if (!line.startsWith('data: ')) continue;
           const payload = line.slice(6).trim();
-          if (payload === '[DONE]') break;
+          if (payload === '[DONE]') {
+            streamDone = true;
+            break;
+          }
           try {
             const parsed = JSON.parse(payload);
             const delta = parsed.choices?.[0]?.delta?.content || '';
@@ -462,28 +574,33 @@ function useStreamingChat ({
             }
           } catch (_) {}
         }
+        if (streamDone) break;
       }
 
       setMessages(m => [...m, { role: 'assistant', content: accumulated }]);
       setStreamingContent('');
     } catch (e) {
       if (e.name !== 'AbortError') setError(e.message);
-      else if (streamingContent) {
-        // partial commit on abort
-        setMessages(m => [...m, { role: 'assistant', content: streamingContent }]);
+      else if (!abortState.discardOnAbort && accumulated) {
+        // Preserve partial content only for explicit stopStreaming aborts.
+        setMessages(m => [...m, { role: 'assistant', content: accumulated }]);
         setStreamingContent('');
       }
     } finally {
       setLoading(false);
-      abortRef.current = null;
+      if (abortRef.current === abortState) abortRef.current = null;
     }
-  }, [relayUrl, token, provider, model, systemPrompt, extraParams, messages, streamingContent]);
+  }, [relayUrl, token, provider, model, systemPrompt, extraParams, messages]);
 
   const clear = useCallback(() => {
-    stopStreaming();
+    if (abortRef.current) {
+      abortRef.current.discardOnAbort = true;
+      abortRef.current.controller.abort();
+      abortRef.current = null;
+    }
     setMessages([]);
     setStreamingContent('');
-  }, [stopStreaming]);
+  }, []);
 
   return { messages, streamingContent, send, stopStreaming, clear, loading, error };
 }
@@ -565,7 +682,7 @@ class ByokRelayClient {
   constructor ({ relayUrl = DEFAULT_RELAY_URL, appId = '', storage } = {}) {
     this.relayUrl = relayUrl.replace(/\/$/, '');
     this.appId = appId;
-    this._storageKey = `byok_token_${relayUrl}_${appId}`;
+    this._storageKey = `byok_token_${this.relayUrl}_${appId}`;
     this._storage = storage || {
       get: (k) => _safeGet(k),
       set: (k, v) => _safeSet(k, v),
@@ -694,22 +811,30 @@ class ByokRelayClient {
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
     let accumulated = '';
+    let buffer = '';
+    let streamDone = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
+        const parsedChunk = _sseLines(buffer, chunk);
+        buffer = parsedChunk.buffer;
+        for (const line of parsedChunk.lines) {
           if (!line.startsWith('data: ')) continue;
           const payload = line.slice(6).trim();
-          if (payload === '[DONE]') break;
+          if (payload === '[DONE]') {
+            streamDone = true;
+            break;
+          }
           try {
             const parsed = JSON.parse(payload);
             const delta = parsed.choices?.[0]?.delta?.content || '';
             if (delta) { accumulated += delta; if (onChunk) onChunk(delta, accumulated); }
           } catch (_) {}
         }
+        if (streamDone) break;
       }
     } finally {
       reader.releaseLock();
@@ -746,7 +871,7 @@ class ByokRelayClient {
       headers: this._headers(),
     });
     if (r.ok) this.logout();
-    return r.json();
+    return r.json().catch(() => ({ ok: r.ok, status: r.status }));
   }
 }
 

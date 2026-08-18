@@ -102,53 +102,55 @@ function bufferToBase64(buf) {
   return btoa(String.fromCharCode(...new Uint8Array(buf)));
 }
 
+function promptMessageToOpenAI(msg) {
+  if (msg.role === 'system') {
+    return { role: 'system', content: msg.content };
+  }
+  if (msg.role === 'user') {
+    const content = Array.isArray(msg.content)
+      ? msg.content.map(partToOpenAI)
+      : msg.content;
+    // If content is a single text part, flatten to a string
+    if (Array.isArray(content) && content.length === 1 && content[0].type === 'text') {
+      return { role: 'user', content: content[0].text };
+    }
+    return { role: 'user', content };
+  }
+  if (msg.role === 'assistant') {
+    const content = Array.isArray(msg.content)
+      ? msg.content
+          .map((part) => {
+            if (part.type === 'text') return part.text;
+            // tool-call: forward in OpenAI format
+            if (part.type === 'tool-call') {
+              return {
+                id: part.toolCallId,
+                type: 'function',
+                function: { name: part.toolName, arguments: JSON.stringify(part.args) },
+              };
+            }
+            return null;
+          })
+          .filter(Boolean)
+      : msg.content;
+    const text = Array.isArray(content) ? content.filter((c) => typeof c === 'string').join('') : content;
+    const toolCalls = Array.isArray(content) ? content.filter((c) => typeof c === 'object') : [];
+    const out = { role: 'assistant', content: text || null };
+    if (toolCalls.length) out.tool_calls = toolCalls;
+    return out;
+  }
+  if (msg.role === 'tool') {
+    return (Array.isArray(msg.content) ? msg.content : [msg.content]).map((part) => ({
+      role: 'tool',
+      tool_call_id: part?.toolCallId ?? '',
+      content: JSON.stringify(part?.result ?? {}),
+    }));
+  }
+  return { role: msg.role, content: '' };
+}
+
 function promptToMessages(prompt) {
-  return prompt.map((msg) => {
-    if (msg.role === 'system') {
-      return { role: 'system', content: msg.content };
-    }
-    if (msg.role === 'user') {
-      const content = Array.isArray(msg.content)
-        ? msg.content.map(partToOpenAI)
-        : msg.content;
-      // If content is a single text part, flatten to a string
-      if (Array.isArray(content) && content.length === 1 && content[0].type === 'text') {
-        return { role: 'user', content: content[0].text };
-      }
-      return { role: 'user', content };
-    }
-    if (msg.role === 'assistant') {
-      const content = Array.isArray(msg.content)
-        ? msg.content
-            .map((part) => {
-              if (part.type === 'text') return part.text;
-              // tool-call: forward in OpenAI format
-              if (part.type === 'tool-call') {
-                return {
-                  id: part.toolCallId,
-                  type: 'function',
-                  function: { name: part.toolName, arguments: JSON.stringify(part.args) },
-                };
-              }
-              return null;
-            })
-            .filter(Boolean)
-        : msg.content;
-      const text = Array.isArray(content) ? content.filter((c) => typeof c === 'string').join('') : content;
-      const toolCalls = Array.isArray(content) ? content.filter((c) => typeof c === 'object') : [];
-      const out = { role: 'assistant', content: text || null };
-      if (toolCalls.length) out.tool_calls = toolCalls;
-      return out;
-    }
-    if (msg.role === 'tool') {
-      return {
-        role: 'tool',
-        tool_call_id: msg.content[0]?.toolCallId ?? '',
-        content: JSON.stringify(msg.content[0]?.result ?? {}),
-      };
-    }
-    return { role: msg.role, content: '' };
-  });
+  return prompt.flatMap(promptMessageToOpenAI);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +178,46 @@ function parseModelId(modelId) {
   return { provider: modelId.slice(0, slash), model: modelId.slice(slash + 1) };
 }
 
+function normalizeSettings(source = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    switch (key) {
+      case 'maxTokens':
+      case 'max_tokens':
+        out.max_tokens = value;
+        break;
+      case 'topP':
+      case 'top_p':
+        out.top_p = value;
+        break;
+      case 'frequencyPenalty':
+      case 'frequency_penalty':
+        out.frequency_penalty = value;
+        break;
+      case 'presencePenalty':
+      case 'presence_penalty':
+        out.presence_penalty = value;
+        break;
+      case 'stopSequences':
+        if (Array.isArray(value) && value.length) out.stop = value;
+        break;
+      case 'stop':
+        if ((Array.isArray(value) && value.length) || typeof value === 'string') out.stop = value;
+        break;
+      case 'responseFormat':
+        if (value?.type === 'json') out.response_format = { type: 'json_object' };
+        break;
+      case 'response_format':
+        out.response_format = value;
+        break;
+      default:
+        out[key] = value;
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The LanguageModelV1 implementation
 // ---------------------------------------------------------------------------
@@ -188,7 +230,7 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
     const body = {
       model,
       messages,
-      ...settings,
+      ...normalizeSettings(settings),
     };
     if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens;
     if (options.temperature !== undefined) body.temperature = options.temperature;
@@ -290,6 +332,65 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
           let buf = '';
           let usage = { promptTokens: 0, completionTokens: 0 };
 
+          function processLine(line) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed === 'data: [DONE]') return;
+            if (!trimmed.startsWith('data: ')) return;
+
+            let chunk;
+            try {
+              chunk = JSON.parse(trimmed.slice(6));
+            } catch {
+              return;
+            }
+
+            const choice = chunk.choices?.[0];
+            if (!choice) return;
+
+            const delta = choice.delta ?? {};
+
+            if (delta.content) {
+              controller.enqueue({ type: 'text-delta', textDelta: delta.content });
+            }
+
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                if (tc.function?.name) {
+                  controller.enqueue({
+                    type: 'tool-call-delta',
+                    toolCallType: 'function',
+                    toolCallId: tc.id ?? `tool_${tc.index ?? 0}`,
+                    toolName: tc.function.name,
+                    argsTextDelta: tc.function.arguments ?? '',
+                  });
+                } else if (tc.function?.arguments) {
+                  controller.enqueue({
+                    type: 'tool-call-delta',
+                    toolCallType: 'function',
+                    toolCallId: tc.id ?? `tool_${tc.index ?? 0}`,
+                    toolName: '',
+                    argsTextDelta: tc.function.arguments,
+                  });
+                }
+              }
+            }
+
+            if (chunk.usage) {
+              usage = {
+                promptTokens: chunk.usage.prompt_tokens ?? 0,
+                completionTokens: chunk.usage.completion_tokens ?? 0,
+              };
+            }
+
+            if (choice.finish_reason) {
+              controller.enqueue({
+                type: 'finish',
+                finishReason: mapFinishReason(choice.finish_reason),
+                usage,
+              });
+            }
+          }
+
           try {
             while (true) {
               const { done, value } = await reader.read();
@@ -299,65 +400,9 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
               const lines = buf.split('\n');
               buf = lines.pop() ?? '';
 
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed === 'data: [DONE]') continue;
-                if (!trimmed.startsWith('data: ')) continue;
-
-                let chunk;
-                try {
-                  chunk = JSON.parse(trimmed.slice(6));
-                } catch {
-                  continue;
-                }
-
-                const choice = chunk.choices?.[0];
-                if (!choice) continue;
-
-                const delta = choice.delta ?? {};
-
-                if (delta.content) {
-                  controller.enqueue({ type: 'text-delta', textDelta: delta.content });
-                }
-
-                if (delta.tool_calls) {
-                  for (const tc of delta.tool_calls) {
-                    if (tc.function?.name) {
-                      controller.enqueue({
-                        type: 'tool-call-delta',
-                        toolCallType: 'function',
-                        toolCallId: tc.id ?? `tool_${tc.index ?? 0}`,
-                        toolName: tc.function.name,
-                        argsTextDelta: tc.function.arguments ?? '',
-                      });
-                    } else if (tc.function?.arguments) {
-                      controller.enqueue({
-                        type: 'tool-call-delta',
-                        toolCallType: 'function',
-                        toolCallId: tc.id ?? `tool_${tc.index ?? 0}`,
-                        toolName: '',
-                        argsTextDelta: tc.function.arguments,
-                      });
-                    }
-                  }
-                }
-
-                if (chunk.usage) {
-                  usage = {
-                    promptTokens: chunk.usage.prompt_tokens ?? 0,
-                    completionTokens: chunk.usage.completion_tokens ?? 0,
-                  };
-                }
-
-                if (choice.finish_reason) {
-                  controller.enqueue({
-                    type: 'finish',
-                    finishReason: mapFinishReason(choice.finish_reason),
-                    usage,
-                  });
-                }
-              }
+              for (const line of lines) processLine(line);
             }
+            if (buf.trim()) processLine(buf);
           } catch (err) {
             controller.enqueue({ type: 'error', error: err });
           } finally {
@@ -396,12 +441,21 @@ async function createByokRelayProvider({ relayUrl, appId = 'vercel-ai', storage,
   const storageKey = `byok_relay_token_${appId}`;
 
   let _token = store.getItem(storageKey) ?? null;
+  let _pending = null;
 
   async function getToken() {
-    if (!_token) {
-      _token = await registerToken({ relayUrl, appId, storage: store });
+    if (_token) return _token;
+    if (!_pending) {
+      _pending = registerToken({ relayUrl, appId, storage: store }).then((t) => {
+        _token = t;
+        _pending = null;
+        return t;
+      }, (err) => {
+        _pending = null;
+        throw err;
+      });
     }
-    return _token;
+    return _pending;
   }
 
   return {

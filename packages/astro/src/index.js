@@ -28,13 +28,38 @@
 
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const DEFAULT_RELAY_PATH_PREFIX = '/api/relay';
+const DEFAULT_PROXY_TIMEOUT_MS = 30_000;
+const DEFAULT_APP_SIGNATURE_TOLERANCE_MS = 5 * 60 * 1000;
+const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
+const _appSignatureNonces = new Map();
 
 /* ========================================================================== */
 /* Utility — SSR-safe storage                                                  */
 /* ========================================================================== */
 
 function _isClient () {
-  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch (_) {
+    return false;
+  }
+}
+
+function _timeoutSignal (timeoutMs) {
+  if (!timeoutMs || typeof AbortController === 'undefined') {
+    return { signal: undefined, cancel: () => {} };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  return {
+    signal: controller.signal,
+    cancel: () => clearTimeout(timer),
+  };
+}
+
+function _isTimeoutError (err) {
+  return err?.name === 'TimeoutError' || err?.name === 'AbortError';
 }
 
 function _safeGet (key) {
@@ -50,6 +75,148 @@ function _safeSet (key, val) {
 function _safeRemove (key) {
   if (!_isClient()) return;
   try { window.localStorage.removeItem(key); } catch (_) {}
+}
+
+function _normalizeAppSecrets (appSecrets) {
+  if (!appSecrets) return null;
+  if (appSecrets instanceof Map) return appSecrets;
+  if (typeof appSecrets === 'object') return new Map(Object.entries(appSecrets));
+  return null;
+}
+
+function _normalizeAllowedApps (allowedApps) {
+  if (!allowedApps) return null;
+  if (allowedApps instanceof Set) return new Set(allowedApps);
+  if (typeof allowedApps === 'string') {
+    const apps = allowedApps.split(',').map((app) => app.trim()).filter(Boolean);
+    return apps.length ? new Set(apps) : null;
+  }
+  if (typeof allowedApps[Symbol.iterator] === 'function') return new Set(allowedApps);
+  return null;
+}
+
+function _normalizePositiveMs (value, fallback) {
+  if (value == null) return fallback;
+  const normalized = Number(value);
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : fallback;
+}
+
+function _jsonError (message, status) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function _appSignaturePayload ({ request, url, appId, timestamp, bodyDigest, nonce }) {
+  return [
+    request.method.toUpperCase(),
+    url.pathname,
+    url.search || '',
+    String(timestamp),
+    appId,
+    bodyDigest || '',
+    nonce || '',
+  ].join('\n');
+}
+
+async function _sha256Hex (value) {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle) throw new Error('Web Crypto SHA-256 is unavailable');
+  const bytes = value instanceof ArrayBuffer ? value : new TextEncoder().encode(String(value));
+  const digest = await cryptoApi.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function _hmacSha256Hex (secret, payload) {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle) throw new Error('Web Crypto HMAC is unavailable');
+  const encoder = new TextEncoder();
+  const key = await cryptoApi.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await cryptoApi.subtle.sign('HMAC', key, encoder.encode(payload));
+  return Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function _normalizeSignature (signature) {
+  return String(signature || '').trim().replace(/^sha256=/i, '').toLowerCase();
+}
+
+function _constantTimeEqual (left, right) {
+  const a = _normalizeSignature(left);
+  const b = _normalizeSignature(right);
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function _verifyAppAccess ({ request, url, allowedApps, appSecrets, verifyApp, appSignatureToleranceMs }) {
+  const verificationConfigured = Boolean(allowedApps || appSecrets || verifyApp);
+  if (!verificationConfigured) return null;
+
+  const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
+  if (!appId) return _jsonError('Forbidden app_id', 403);
+  if (allowedApps && !allowedApps.has(appId)) return _jsonError('Forbidden app_id', 403);
+
+  if (verifyApp) {
+    try {
+      const result = await verifyApp({ request, url, appId });
+      if (result === true || result === appId) return null;
+    } catch (_) {
+      return _jsonError('App verification failed', 500);
+    }
+    return _jsonError('Forbidden app_id', 403);
+  }
+
+  const secret = appSecrets?.get(appId);
+  if (!secret) return _jsonError('App verification is not configured', 500);
+
+  const timestamp = request.headers.get('x-app-timestamp');
+  const signature = request.headers.get('x-app-signature');
+  const nonce = request.headers.get('x-app-nonce');
+  const timestampMs = Number(timestamp);
+  if (!timestamp || !signature || !nonce || !Number.isFinite(timestampMs)) {
+    return _jsonError('Forbidden app_id', 403);
+  }
+  if (Math.abs(Date.now() - timestampMs) > appSignatureToleranceMs) {
+    return _jsonError('Forbidden app_id', 403);
+  }
+
+  const now = Date.now();
+  for (const [key, expiresAt] of _appSignatureNonces.entries()) {
+    if (expiresAt <= now) _appSignatureNonces.delete(key);
+  }
+  const nonceKey = `${appId}:${nonce}`;
+  if (_appSignatureNonces.has(nonceKey)) return _jsonError('Forbidden app_id', 403);
+
+  let bodyDigest = '';
+  if (!BODYLESS_METHODS.has(request.method.toUpperCase())) {
+    try {
+      bodyDigest = await _sha256Hex(await request.clone().arrayBuffer());
+    } catch (_) {
+      return _jsonError('App verification failed', 500);
+    }
+  }
+
+  let expected;
+  try {
+    expected = await _hmacSha256Hex(secret, _appSignaturePayload({ request, url, appId, timestamp, bodyDigest, nonce }));
+  } catch (_) {
+    return _jsonError('App verification failed', 500);
+  }
+  if (!_constantTimeEqual(signature, expected)) return _jsonError('Forbidden app_id', 403);
+  _appSignatureNonces.set(nonceKey, now + appSignatureToleranceMs);
+  return null;
 }
 
 /* ========================================================================== */
@@ -73,15 +240,21 @@ function _safeRemove (key) {
  *   );
  *
  * @param {object} opts
- * @param {string} opts.relayUrl         Upstream relay base URL (server-only env var).
+ * @param {string} [opts.relayUrl]       Upstream relay base URL (server-only env var). Default: managed relay.
  * @param {string} [opts.pathPrefix]     URL prefix to intercept. Default: '/api/relay'.
- * @param {string[]} [opts.allowedApps]  Optional app_id allowlist.
+ * @param {Iterable<string>|string} [opts.allowedApps] Optional app IDs allowed through the proxy.
+ * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
+ * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
  * @returns Astro `onRequest` middleware function.
  */
 function createByokRelayMiddleware (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
   const pathPrefix = opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX;
-  const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const allowedApps = _normalizeAllowedApps(opts.allowedApps);
+  const appSecrets = _normalizeAppSecrets(opts.appSecrets);
+  const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
+  const appSignatureToleranceMs = _normalizePositiveMs(opts.appSignatureToleranceMs, DEFAULT_APP_SIGNATURE_TOLERANCE_MS);
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   return async function byokRelayMiddleware (context, next) {
     const { request } = context;
@@ -95,16 +268,15 @@ function createByokRelayMiddleware (opts = {}) {
     const subPath = url.pathname.slice(pathPrefix.length) || '/';
     const upstreamUrl = relayUrl + subPath + url.search;
 
-    // Optional app_id guard
-    if (allowedApps) {
-      const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
-      if (!appId || !allowedApps.has(appId)) {
-        return new Response(JSON.stringify({ error: 'Forbidden app_id' }), {
-          status: 403,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-    }
+    const appAccessError = await _verifyAppAccess({
+      request,
+      url,
+      allowedApps,
+      appSecrets,
+      verifyApp,
+      appSignatureToleranceMs,
+    });
+    if (appAccessError) return appAccessError;
 
     // Forward headers, minus hop-by-hop
     const forwardHeaders = new Headers();
@@ -112,16 +284,20 @@ function createByokRelayMiddleware (opts = {}) {
       'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
       'te', 'trailers', 'transfer-encoding', 'upgrade', 'host',
     ]);
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp', 'x-app-nonce']);
     for (const [k, v] of request.headers.entries()) {
-      if (!hopByHop.has(k.toLowerCase())) {
+      const headerName = k.toLowerCase();
+      if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
         forwardHeaders.set(k, v);
       }
     }
 
+    const timeout = _timeoutSignal(timeoutMs);
     const init = {
       method: request.method,
       headers: forwardHeaders,
       redirect: 'follow',
+      signal: timeout.signal,
     };
     if (!['GET', 'HEAD'].includes(request.method)) {
       init.body = request.body;
@@ -130,6 +306,7 @@ function createByokRelayMiddleware (opts = {}) {
 
     try {
       const upstreamResp = await fetch(upstreamUrl, init);
+      timeout.cancel();
 
       // Stream response body back to client
       const respHeaders = new Headers();
@@ -144,8 +321,10 @@ function createByokRelayMiddleware (opts = {}) {
         headers: respHeaders,
       });
     } catch (err) {
-      return new Response(JSON.stringify({ error: 'Relay proxy error', details: err.message }), {
-        status: 502,
+      timeout.cancel();
+      const timedOut = _isTimeoutError(err);
+      return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
+        status: timedOut ? 504 : 502,
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -170,13 +349,19 @@ function createByokRelayMiddleware (opts = {}) {
  * All HTTP methods are forwarded. The client never sees the real RELAY_URL.
  *
  * @param {object} opts
- * @param {string} opts.relayUrl         Upstream relay URL (server-side env var).
- * @param {string[]} [opts.allowedApps]  Optional app_id whitelist.
+ * @param {string} [opts.relayUrl]       Upstream relay URL (server-side env var). Default: managed relay.
+ * @param {Iterable<string>|string} [opts.allowedApps] Optional app IDs allowed through the proxy.
+ * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
+ * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
  * @returns Object with GET, POST, PUT, PATCH, DELETE, OPTIONS Astro APIRoute handlers.
  */
 function createRelayApiRoute (opts = {}) {
   const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
-  const allowedApps = Array.isArray(opts.allowedApps) ? new Set(opts.allowedApps) : null;
+  const allowedApps = _normalizeAllowedApps(opts.allowedApps);
+  const appSecrets = _normalizeAppSecrets(opts.appSecrets);
+  const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
+  const appSignatureToleranceMs = _normalizePositiveMs(opts.appSignatureToleranceMs, DEFAULT_APP_SIGNATURE_TOLERANCE_MS);
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
 
   async function handler ({ request, params }) {
     // Reconstruct sub-path from catch-all param
@@ -184,15 +369,15 @@ function createRelayApiRoute (opts = {}) {
     const reqUrl = new URL(request.url);
     const upstreamUrl = relayUrl + subPath + reqUrl.search;
 
-    if (allowedApps) {
-      const appId = request.headers.get('x-app-id') || reqUrl.searchParams.get('app_id');
-      if (!appId || !allowedApps.has(appId)) {
-        return new Response(JSON.stringify({ error: 'Forbidden app_id' }), {
-          status: 403,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-    }
+    const appAccessError = await _verifyAppAccess({
+      request,
+      url: reqUrl,
+      allowedApps,
+      appSecrets,
+      verifyApp,
+      appSignatureToleranceMs,
+    });
+    if (appAccessError) return appAccessError;
 
     const hopByHop = new Set([
       'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -200,16 +385,20 @@ function createRelayApiRoute (opts = {}) {
     ]);
 
     const forwardHeaders = new Headers();
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp', 'x-app-nonce']);
     for (const [k, v] of request.headers.entries()) {
-      if (!hopByHop.has(k.toLowerCase())) {
+      const headerName = k.toLowerCase();
+      if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
         forwardHeaders.set(k, v);
       }
     }
 
+    const timeout = _timeoutSignal(timeoutMs);
     const init = {
       method: request.method,
       headers: forwardHeaders,
       redirect: 'follow',
+      signal: timeout.signal,
     };
     if (!['GET', 'HEAD'].includes(request.method)) {
       init.body = request.body;
@@ -218,6 +407,7 @@ function createRelayApiRoute (opts = {}) {
 
     try {
       const upstream = await fetch(upstreamUrl, init);
+      timeout.cancel();
       const respHeaders = new Headers();
       for (const [k, v] of upstream.headers.entries()) {
         if (!hopByHop.has(k.toLowerCase())) {
@@ -230,8 +420,10 @@ function createRelayApiRoute (opts = {}) {
         headers: respHeaders,
       });
     } catch (err) {
-      return new Response(JSON.stringify({ error: 'Relay proxy error', details: err.message }), {
-        status: 502,
+      timeout.cancel();
+      const timedOut = _isTimeoutError(err);
+      return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
+        status: timedOut ? 504 : 502,
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -275,6 +467,7 @@ class ByokRelayClient {
     this._appId = opts.appId || 'astro-app';
     this._storageKey = opts.storageKey || 'byok_relay_token';
     this._token = _safeGet(this._storageKey) || null;
+    this._registering = null;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -310,7 +503,12 @@ class ByokRelayClient {
    */
   async ensureToken () {
     if (this._token) return this._token;
-    return this.register();
+    if (!this._registering) {
+      this._registering = this.register().finally(() => {
+        this._registering = null;
+      });
+    }
+    return this._registering;
   }
 
   /**
@@ -338,7 +536,7 @@ class ByokRelayClient {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this._token}`,
       },
-      body: JSON.stringify({ api_key: apiKey }),
+      body: JSON.stringify({ key: apiKey }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
@@ -394,7 +592,7 @@ class ByokRelayClient {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this._token}`,
       },
-      body: JSON.stringify({ api_key: newApiKey }),
+      body: JSON.stringify({ key: newApiKey }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));

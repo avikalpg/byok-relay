@@ -18,11 +18,28 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             set -e
-            export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"
+            export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
             cd ~/byok-relay
             git pull origin main
             npm ci --omit=dev
+            # Inject deployment attestation env vars into .env
+            COMMIT=$(git rev-parse HEAD)
+            BUILD_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            # Update or append COMMIT_SHA and BUILD_TIME in .env
+            if grep -q '^COMMIT_SHA=' .env; then
+              sed -i "s|^COMMIT_SHA=.*|COMMIT_SHA=${COMMIT}|" .env
+            else
+              echo "COMMIT_SHA=${COMMIT}" >> .env
+            fi
+            if grep -q '^BUILD_TIME=' .env; then
+              sed -i "s|^BUILD_TIME=.*|BUILD_TIME=${BUILD_TS}|" .env
+            else
+              echo "BUILD_TIME=${BUILD_TS}" >> .env
+            fi
             sudo systemctl restart byok-relay
             sleep 3
             curl -sf http://localhost:3000/health || (echo "Health check failed" && exit 1)
+            # Verify commit is reflected in /version response
+            VERSION_COMMIT=$(curl -s http://localhost:3000/version | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); console.log(JSON.parse(d).commit)")
+            [ "$VERSION_COMMIT" = "$COMMIT" ] && echo "Attestation OK: commit ${COMMIT}" || echo "WARNING: /version commit mismatch"
             echo "Deployed successfully"

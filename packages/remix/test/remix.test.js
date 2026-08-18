@@ -6,6 +6,8 @@
 
 'use strict';
 
+process.env.BYOK_RELAY_FORCE_REACT_SHIM = '1';
+
 const assert = require('assert');
 
 // ── Polyfills for Node < 18 (env may vary) ──────────────────────────────────
@@ -32,8 +34,22 @@ const {
 
 let passed = 0;
 let failed = 0;
+const promises = [];
 
 function test (name, fn) {
+  if (fn.constructor.name === 'AsyncFunction') {
+    promises.push(async () => {
+      try {
+        await fn();
+        console.log(`  ✅ ${name}`);
+        passed++;
+      } catch (e) {
+        console.error(`  ❌ ${name}: ${e.message}`);
+        failed++;
+      }
+    });
+    return;
+  }
   try {
     fn();
     console.log(`  ✅ ${name}`);
@@ -45,9 +61,16 @@ function test (name, fn) {
 }
 
 function asyncTest (name, fn) {
-  return fn()
-    .then(() => { console.log(`  ✅ ${name}`); passed++; })
-    .catch(e => { console.error(`  ❌ ${name}: ${e.message}`); failed++; });
+  return async () => {
+    try {
+      await fn();
+      console.log(`  ✅ ${name}`);
+      passed++;
+    } catch (e) {
+      console.error(`  ❌ ${name}: ${e.message}`);
+      failed++;
+    }
+  };
 }
 
 // ── 1. Export shape ──────────────────────────────────────────────────────────
@@ -100,6 +123,28 @@ test('rejects disallowed app_id in action', async () => {
   };
   const res = await action({ request: req, params: { '*': 'users' } });
   assert.strictEqual(res.status, 403);
+});
+
+test('allows app_id query parameter in action', async () => {
+  let capturedUrl;
+  await withMockFetch(async (url) => {
+    capturedUrl = url;
+    return { ok: true, status: 200, headers: new Headers(), body: null };
+  }, async () => {
+    const action = createRelayAction({
+      relayUrl: 'https://relay.example.com',
+      allowedApps: ['allowed-app'],
+    });
+    const req = {
+      url: 'https://myapp.com/api/relay/users?app_id=allowed-app',
+      method: 'POST',
+      headers: new Headers(),
+      arrayBuffer: async () => new ArrayBuffer(0),
+    };
+    const res = await action({ request: req, params: { '*': 'users' } });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(capturedUrl, 'https://relay.example.com/users?app_id=allowed-app');
+  });
 });
 
 // ── 4. ByokRelayClient ───────────────────────────────────────────────────────
@@ -162,8 +207,6 @@ async function withMockFetch (mockFn, testFn) {
   globalThis.fetch = mockFn;
   try { await testFn(); } finally { globalThis.fetch = orig; }
 }
-
-const promises = [];
 
 promises.push(asyncTest('register stores token', async () => {
   await withMockFetch(async (url, opts) => ({
@@ -356,7 +399,7 @@ test('useRelayHealth returns expected shape', () => {
 });
 
 // ── Run async tests then summarise ──────────────────────────────────────────
-Promise.all(promises).then(() => {
+promises.reduce((chain, run) => chain.then(run), Promise.resolve()).then(() => {
   console.log(`\n${'─'.repeat(50)}`);
   console.log(`Results: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

@@ -130,16 +130,11 @@ function createByokRelayMiddleware (opts = {}) {
     const subPath = url.pathname.slice(pathPrefix.length) || '/';
     const upstreamUrl = relayUrl.replace(/\/$/, '') + subPath + (url.search || '');
 
-    // Optional app_id allowlist: check Authorization header's relay token
+    // Optional app_id allowlist: fail closed unless the request names an allowed app.
     if (allowedAppIds && allowedAppIds.length > 0) {
-      const auth = c.req.header('authorization') || '';
-      if (auth) {
-        // We can't decode the JWT server-side without the HMAC secret, but we
-        // can check the app_id that the client explicitly sends.
-        const appId = c.req.header('x-app-id') || '';
-        if (appId && !allowedAppIds.includes(appId)) {
-          return c.json({ error: 'app_id not allowed' }, 403);
-        }
+      const appId = c.req.header('x-app-id') || '';
+      if (!appId || !allowedAppIds.includes(appId)) {
+        return c.json({ error: 'app_id not allowed' }, 403);
       }
     }
 
@@ -215,7 +210,7 @@ function createRelayRoute (opts = {}) {
 
     if (allowedAppIds && allowedAppIds.length > 0) {
       const appId = c.req.header('x-app-id') || '';
-      if (appId && !allowedAppIds.includes(appId)) {
+      if (!appId || !allowedAppIds.includes(appId)) {
         return c.json({ error: 'app_id not allowed' }, 403);
       }
     }
