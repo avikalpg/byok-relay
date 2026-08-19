@@ -467,6 +467,116 @@ asyncTests.push(asyncTest('streamChat() preserves SSE lines split across chunks'
   }
 }));
 
+
+asyncTests.push(asyncTest('useStreamingChat ignores stale abort updates from overlapping sends', async () => {
+  const Module = require('module');
+  const previousLoad = Module._load;
+  const previousFetch = globalThis.fetch;
+  const encoder = typeof TextEncoder !== 'undefined'
+    ? new TextEncoder()
+    : { encode: (v) => Buffer.from(v) };
+
+  const states = [];
+  const refs = [];
+  let hookIndex = 0;
+  let refIndex = 0;
+  const fakeReact = {
+    __CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE: { H: true },
+    useState (initial) {
+      const i = hookIndex++;
+      if (states.length <= i) states[i] = typeof initial === 'function' ? initial() : initial;
+      return [states[i], (value) => {
+        states[i] = typeof value === 'function' ? value(states[i]) : value;
+      }];
+    },
+    useEffect () {},
+    useRef (initial) {
+      const i = refIndex++;
+      if (refs.length <= i) refs[i] = { current: initial ?? null };
+      return refs[i];
+    },
+    useCallback (fn) { return fn; },
+  };
+
+  let firstReadStarted;
+  const firstReadStartedPromise = new Promise((resolve) => { firstReadStarted = resolve; });
+  let fetchCount = 0;
+
+  try {
+    Module._load = function (request, parent, isMain) {
+      if (request === 'react') return fakeReact;
+      return previousLoad.call(this, request, parent, isMain);
+    };
+
+    globalThis.fetch = async (_url, opts) => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader () {
+              return {
+                read () {
+                  return new Promise((_resolve, reject) => {
+                    opts.signal.addEventListener('abort', () => {
+                      const err = new Error('aborted');
+                      err.name = 'AbortError';
+                      reject(err);
+                    }, { once: true });
+                    firstReadStarted();
+                  });
+                },
+                cancel: async () => {},
+              };
+            },
+          },
+        };
+      }
+
+      const chunks = [
+        'data: {"choices":[{"delta":{"content":"second-reply"}}]}\n',
+        'data: [DONE]\n',
+      ];
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader () {
+            let i = 0;
+            return {
+              async read () {
+                if (i >= chunks.length) return { done: true, value: undefined };
+                return { done: false, value: encoder.encode(chunks[i++]) };
+              },
+              cancel: async () => {},
+            };
+          },
+        },
+      };
+    };
+
+    hookIndex = 0;
+    refIndex = 0;
+    const hook = useStreamingChat({ relayUrl: '/api/relay', token: 'tok' });
+    const first = hook.sendMessage('first');
+    await firstReadStartedPromise;
+    const second = await hook.sendMessage('second');
+    await first;
+
+    assert.strictEqual(second, 'second-reply');
+    assert.deepStrictEqual(states[0], [
+      { role: 'user', content: 'second' },
+      { role: 'assistant', content: 'second-reply' },
+    ]);
+    assert.strictEqual(states[1], '');
+    assert.strictEqual(states[2], false);
+  } finally {
+    Module._load = previousLoad;
+    globalThis.fetch = previousFetch;
+  }
+}));
+
 /* ── Route handler allowedApps gate ─────────────────────────────────────────── */
 asyncTests.push(asyncTest('createRelayRouteHandler enforces allowedApps', async () => {
   const { POST } = createRelayRouteHandler({

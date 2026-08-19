@@ -317,6 +317,37 @@ await testAsync('createRelayAction returns { success: false } on upstream error'
   assertEqual(result.status, 502);
 });
 
+
+await testAsync('createRelayAction rejects client-supplied appId without trusted header', async function() {
+  const action = createRelayAction({
+    relayUrl    : 'http://relay.test',
+    allowedApps : ['allowed-app'],
+  });
+  let errorThrown = false;
+  const mockEvent = {
+    request : {
+      method  : 'POST',
+      headers : {
+        get     : function() { return null; },
+        entries : function() { return [][Symbol.iterator](); },
+      },
+    },
+    error : function(code, msg) {
+      errorThrown = true;
+      const e = new Error(msg);
+      e.status = code;
+      throw e;
+    },
+  };
+  try {
+    await action({ path: 'relay', token: 'tok_xyz', appId: 'allowed-app', body: {} }, mockEvent);
+  } catch (e) {
+    assertEqual(e.status, 403);
+  }
+  assertTrue(errorThrown, 'Should reject client-controlled appId without x-app-id');
+  assertEqual(_fetchCalls.length, 0);
+});
+
 await testAsync('createRelayLoader respects allowedApps', async function() {
   const loader = createRelayLoader({
     relayUrl     : 'http://relay.test',

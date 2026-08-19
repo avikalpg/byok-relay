@@ -454,7 +454,7 @@ function createRelayAction (opts = {}) {
     const token    = data.token || request.headers.get('authorization')?.replace(/^Bearer /i, '') || '';
     const bodyData = data.body;
 
-    const appId = data.appId || request.headers.get('x-app-id') || '';
+    const appId = request.headers.get('x-app-id') || '';
     if (opts.allowedApps && opts.allowedApps.length > 0 && (!appId || !opts.allowedApps.includes(appId))) {
       throw error(403, 'App not allowed');
     }

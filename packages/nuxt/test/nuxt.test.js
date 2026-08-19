@@ -157,7 +157,7 @@ async function main () {
       setItem    : function(k, v) { storage[k] = v; },
       removeItem : function(k) { delete storage[k]; },
     };
-    storage['byok_relay_token'] = 'cached-tok';
+    storage[client._TOKEN_KEY] = 'cached-tok';
     var tok = await client.ensureToken();
     assert(tok === 'cached-tok', 'expected cached-tok, got ' + tok);
     assert(_fetchCalls.length === 0, 'unexpected fetch call');
@@ -247,21 +247,23 @@ async function main () {
   });
 
   await testAsync('logout() clears stored token', async function() {
-    var storage = { byok_relay_token: 'tok-to-clear' };
+    var storage = {};
     var client  = new ByokRelayClient({ relayUrl: 'http://relay.test' });
+    storage[client._TOKEN_KEY] = 'tok-to-clear';
     client._storage = {
       getItem    : function(k) { return storage[k] || null; },
       setItem    : function(k, v) { storage[k] = v; },
       removeItem : function(k) { delete storage[k]; },
     };
     client.logout();
-    assert(!storage['byok_relay_token'], 'token not removed');
+    assert(!storage[client._TOKEN_KEY], 'token not removed');
   });
 
   await testAsync('deleteAccount() DELETEs /users and clears token', async function() {
     _pushResponse({ ok: true });
-    var storage = { byok_relay_token: 'tok-gdpr' };
+    var storage = {};
     var client  = new ByokRelayClient({ relayUrl: 'http://relay.test' });
+    storage[client._TOKEN_KEY] = 'tok-gdpr';
     client._storage = {
       getItem    : function(k) { return storage[k] || null; },
       setItem    : function(k, v) { storage[k] = v; },
@@ -269,7 +271,7 @@ async function main () {
     };
     await client.deleteAccount();
     assert(_fetchCalls[0].method === 'DELETE', 'expected DELETE');
-    assert(!storage['byok_relay_token'], 'token should be cleared');
+    assert(!storage[client._TOKEN_KEY], 'token should be cleared');
   });
 
   /* ── createRelayServerRoute ── */
