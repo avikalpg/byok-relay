@@ -1335,7 +1335,7 @@ function App() {
 }
 ```
 
-Also available: [`@byok-relay/react`](https://npmjs.com/package/@byok-relay/react), [`@byok-relay/vue`](https://npmjs.com/package/@byok-relay/vue), [`@byok-relay/svelte`](https://npmjs.com/package/@byok-relay/svelte), [`@byok-relay/angular`](https://npmjs.com/package/@byok-relay/angular), [`@byok-relay/expo`](https://npmjs.com/package/@byok-relay/expo) (React Native)
+Also available: [`@byok-relay/react`](https://npmjs.com/package/@byok-relay/react), [`@byok-relay/vue`](https://npmjs.com/package/@byok-relay/vue), [`@byok-relay/svelte`](https://npmjs.com/package/@byok-relay/svelte), [`@byok-relay/angular`](https://npmjs.com/package/@byok-relay/angular), `@byok-relay/expo` (React Native, coming soon on npm)
 
 ## Angular injectable services
 
@@ -1628,7 +1628,7 @@ Also includes `defineByokRelayModule` (auto-registers `/relay` route via `nuxt.c
 
 ### React Native / Expo (`@byok-relay/expo`)
 
-Hooks and `ByokRelayClient` for **React Native** and **Expo** mobile apps. Uses **AsyncStorage** instead of `localStorage` for persistent token storage, and fetch-based SSE streaming compatible with the Hermes engine — no `EventSource` polyfill required.
+Hooks and `ByokRelayClient` for **React Native** and **Expo** mobile apps. Uses **AsyncStorage** instead of `localStorage` for persistent token storage, and fetch-based SSE streaming via `expo/fetch` or another ReadableStream-capable fetch — no `EventSource` polyfill required.
 
 ```bash
 npx expo install @byok-relay/expo @react-native-async-storage/async-storage
@@ -1636,6 +1636,7 @@ npx expo install @byok-relay/expo @react-native-async-storage/async-storage
 
 ```tsx
 import { useByokRelay, useStreamingChat } from '@byok-relay/expo';
+import { Button, FlatList, Text, TextInput, View } from 'react-native';
 
 // Settings screen — save the user's API key once
 function ApiKeySettings() {

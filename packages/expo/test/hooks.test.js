@@ -175,6 +175,24 @@ await test('ensureToken() registers when no token exists', async () => {
   assertEqual(token, 'new-tok');
 });
 
+await test('ensureToken() serializes concurrent registrations', async () => {
+  clearMocks();
+  let registrations = 0;
+  registerMock(/\/users$/, () => {
+    registrations++;
+    return new Promise(resolve => setTimeout(() => resolve({
+      ok: true,
+      json: () => Promise.resolve({ token: 'shared-tok', expires_at: null }),
+    }), 5));
+  });
+  const storage = createAsyncStorage(null);
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  const [a, b] = await Promise.all([client.ensureToken(), client.ensureToken()]);
+  assertEqual(a, 'shared-tok');
+  assertEqual(b, 'shared-tok');
+  assertEqual(registrations, 1, 'Concurrent ensureToken() calls should register once');
+});
+
 await test('logout() clears token from memory and storage', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
@@ -348,6 +366,38 @@ await test('streamChat() skips [DONE] and unparseable chunks', async () => {
   assertEqual(chunks.join(''), 'OK');
 });
 
+await test('streamChat() cancels and releases the reader on early termination', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem('byok_relay_token', 'tok');
+  let cancelled = false;
+  let released = false;
+  const encoder = new TextEncoder();
+  registerMock(/\/relay\/openai\//, () => Promise.resolve({
+    ok: true,
+    headers: { get: () => 'text/event-stream' },
+    body: {
+      getReader() {
+        return {
+          read: () => Promise.resolve({
+            done: false,
+            value: encoder.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'),
+          }),
+          cancel: () => { cancelled = true; return Promise.resolve(); },
+          releaseLock: () => { released = true; },
+        };
+      },
+    },
+  }));
+
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  for await (const _chunk of client.streamChat('openai/gpt-4o', [{ role: 'user', content: 'hi' }])) {
+    break;
+  }
+  assert(cancelled, 'Reader should be cancelled when stream consumption stops early');
+  assert(released, 'Reader lock should be released when stream consumption stops early');
+});
+
 // 6. ByokRelayClient — health & stats
 console.log('\nByokRelayClient — health & stats');
 
@@ -372,6 +422,35 @@ await test('health(deep=true) adds ?deep=1 query param', async () => {
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage: createAsyncStorage(null) });
   await client.health(true);
   assert(capturedUrl.includes('deep=1'), 'URL should include deep=1');
+});
+
+await test('health(false, provider) builds ?provider= without deep', async () => {
+  clearMocks();
+  let capturedUrl = null;
+  registerMock(/\/health/, (url) => {
+    capturedUrl = url;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+  });
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage: createAsyncStorage(null) });
+  await client.health(false, 'openai');
+  assert(capturedUrl.endsWith('/health?provider=openai'), 'URL should include provider as a query param');
+});
+
+await test('health() rejects non-OK responses', async () => {
+  clearMocks();
+  registerMock(/\/health/, () => Promise.resolve({
+    ok: false,
+    status: 503,
+    json: () => Promise.resolve({ status: 'error' }),
+  }));
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage: createAsyncStorage(null) });
+  let threw = false;
+  try {
+    await client.health();
+  } catch (e) {
+    threw = e.message.includes('503');
+  }
+  assert(threw, 'health() should reject non-OK responses');
 });
 
 await test('stats() requests /stats with Relay-Token', async () => {

@@ -8,6 +8,7 @@ npx expo install @byok-relay/expo @react-native-async-storage/async-storage
 
 ```tsx
 import { useStreamingChat, useByokRelay } from '@byok-relay/expo';
+import { FlatList, Text, TextInput, View } from 'react-native';
 
 export function ChatScreen() {
   const { token, register, storeKey } = useByokRelay({ relayUrl: 'https://relay.byokrelay.com' });
@@ -31,7 +32,7 @@ export function ChatScreen() {
 Mobile apps face the same BYOK problem as frontend apps — you can't ship API keys in your bundle. `@byok-relay/expo` is `@byok-relay/react` adapted for React Native:
 
 - **AsyncStorage persistence** — relay token survives app restarts (`@react-native-async-storage/async-storage`)
-- **fetch-based SSE streaming** — uses React Native's built-in `fetch` + `ReadableStream`; no `EventSource` polyfill needed
+- **fetch-based SSE streaming** — uses a ReadableStream-capable fetch (`expo/fetch` in Expo, or an injected/polyfilled fetch in bare React Native); no `EventSource` polyfill needed
 - **Hermes-safe** — no `window`, no `localStorage`, no browser globals assumed
 - **Expo SecureStore** — drop-in adapter for credential-grade key storage
 
@@ -51,9 +52,11 @@ npx react-native link @react-native-async-storage/async-storage   # RN <0.60
 ## Quick start — Expo
 
 ```tsx
-// 1. Store the user's API key once (e.g. in a settings screen)
-import { useByokRelay } from '@byok-relay/expo';
+import { useState } from 'react';
+import { Button, FlatList, Text, TextInput, View } from 'react-native';
+import { useByokRelay, useStreamingChat } from '@byok-relay/expo';
 
+// 1. Store the user's API key once (e.g. in a settings screen)
 function ApiKeySettings() {
   const { token, register, storeKey, listKeys } = useByokRelay({
     relayUrl: 'https://relay.byokrelay.com',
@@ -75,10 +78,8 @@ function ApiKeySettings() {
 }
 
 // 2. Chat in any screen
-import { useStreamingChat } from '@byok-relay/expo';
-
 function ChatScreen() {
-  const [input, setInput] = React.useState('');
+  const [input, setInput] = useState('');
   const { messages, streamingContent, loading, sendMessage } = useStreamingChat({
     relayUrl: 'https://relay.byokrelay.com',
     model: 'openai/gpt-4o',
@@ -115,7 +116,7 @@ function ChatScreen() {
 
 ## With Expo SecureStore (recommended for production)
 
-Use `expo-secure-store` for credential-grade encrypted storage — the API key UI in your settings screen, and the relay token, are stored in the device secure enclave.
+Use `expo-secure-store` for credential-grade storage of the relay token. The adapter stores `byok_relay_token` through platform secure storage: Android Keystore-managed encryption on Android and iOS Keychain on iOS. `storeKey` still sends the user's API key to the relay for encrypted server-side storage; this adapter does not store provider API keys locally.
 
 ```bash
 npx expo install expo-secure-store
@@ -155,6 +156,13 @@ function MyScreen() {
 Core hook — token registration, key CRUD, and logout. Persists the relay token to AsyncStorage.
 
 ```tsx
+type UseByokRelayOptions = {
+  relayUrl?: string;          // default: 'https://relay.byokrelay.com'
+  appId?: string;             // default: 'expo-app'
+  storage?: StorageAdapter;   // default: AsyncStorage (or in-memory fallback)
+  fetch?: typeof fetch;       // optional streaming-capable fetch override
+};
+
 const {
   token,      // string | null — relay token (null until registered or restored)
   loading,    // boolean — true while registering or restoring token
@@ -167,9 +175,8 @@ const {
   logout,     // () => Promise<void>
   client,     // ByokRelayClient instance for advanced use
 } = useByokRelay({
-  relayUrl?: string,    // default: 'https://relay.byokrelay.com'
-  appId?: string,       // default: 'expo-app'
-  storage?: StorageAdapter,  // default: AsyncStorage (or in-memory fallback)
+  relayUrl: 'https://relay.byokrelay.com',
+  appId: 'my-expo-app',
 });
 ```
 
@@ -180,6 +187,15 @@ const {
 Stateful non-streaming chat. Rolls back the user message on error.
 
 ```tsx
+type UseChatOptions = {
+  relayUrl?: string;
+  model?: string;          // default: 'openai/gpt-4o'
+  systemPrompt?: string;
+  storage?: StorageAdapter;
+  extraParams?: object;    // passed to the provider API (temperature, max_tokens, …)
+  fetch?: typeof fetch;
+};
+
 const {
   messages,       // { role: 'user'|'assistant', content: string }[]
   loading,        // boolean
@@ -187,11 +203,8 @@ const {
   sendMessage,    // (content: string) => Promise<void>
   clearMessages,  // () => void
 } = useChat({
-  relayUrl?: string,
-  model?: string,        // default: 'openai/gpt-4o'
-  systemPrompt?: string,
-  storage?: StorageAdapter,
-  extraParams?: object,  // passed to the provider API (temperature, max_tokens, …)
+  relayUrl: 'https://relay.byokrelay.com',
+  model: 'openai/gpt-4o',
 });
 ```
 
@@ -199,9 +212,18 @@ const {
 
 ### `useStreamingChat(opts)`
 
-Streaming chat using `fetch` + `ReadableStream`. Compatible with React Native Hermes.
+Streaming chat using `fetch` + `ReadableStream`. Expo projects should use `expo/fetch`; bare React Native projects must provide a streaming-capable fetch implementation or polyfill.
 
 ```tsx
+type UseStreamingChatOptions = {
+  relayUrl?: string;
+  model?: string;
+  systemPrompt?: string;
+  storage?: StorageAdapter;
+  extraParams?: object;
+  fetch?: typeof fetch;     // must support ReadableStream response bodies
+};
+
 const {
   messages,          // committed message history
   streamingContent,  // live string accumulating during stream
@@ -211,11 +233,8 @@ const {
   stopStreaming,      // () => void — abort in-progress stream
   clearMessages,     // () => void
 } = useStreamingChat({
-  relayUrl?: string,
-  model?: string,
-  systemPrompt?: string,
-  storage?: StorageAdapter,
-  extraParams?: object,
+  relayUrl: 'https://relay.byokrelay.com',
+  model: 'openai/gpt-4o',
 });
 ```
 
@@ -226,6 +245,12 @@ const {
 Poll `/health` at a configurable interval.
 
 ```tsx
+type UseRelayHealthOptions = {
+  relayUrl?: string;
+  intervalMs?: number;  // default: 30000; set to 0 to disable polling
+  fetch?: typeof fetch;
+};
+
 const {
   status,   // 'ok' | 'error' | 'unknown'
   data,     // raw /health response object
@@ -233,9 +258,10 @@ const {
   refetch,  // () => Promise<void>
   check,    // (deep?: boolean, provider?: string) => Promise<object>
 } = useRelayHealth({
-  relayUrl?: string,
-  intervalMs?: number,  // default: 30000; set to 0 to disable polling
+  relayUrl: 'https://relay.byokrelay.com',
 });
+
+await check(false, 'openai'); // GET /health?provider=openai
 ```
 
 ---
@@ -245,34 +271,42 @@ const {
 Plain-JS class. Works in React Native, Expo, and Node.js test environments.
 
 ```ts
+type ByokRelayClientOptions = {
+  relayUrl?: string;
+  appId?: string;
+  storage?: StorageAdapter;   // { getItem, setItem, removeItem } returning Promises
+  fetch?: typeof fetch;       // use expo/fetch or another streaming-capable fetch
+};
+
 const client = new ByokRelayClient({
-  relayUrl?: string,
-  appId?: string,
-  storage?: StorageAdapter,   // { getItem, setItem, removeItem } returning Promises
+  relayUrl: 'https://relay.byokrelay.com',
 });
 
 // Token
-await client.register(appId?)              // → token string
-await client.ensureToken(appId?)           // → token string (from memory, storage, or new registration)
-await client.logout()                      // clears token from memory + storage
+await client.register('my-expo-app')        // → token string
+await client.ensureToken('my-expo-app')     // → token string (from memory, storage, or new registration)
+await client.logout()                       // clears token from memory + storage
 
 // Keys
-await client.storeKey(provider, apiKey)    // → { ok }
-await client.listKeys()                    // → KeyMeta[]
-await client.deleteKey(provider)           // → { ok }
-await client.rotateKey(provider, newKey)   // → { ok, rotated }
+await client.storeKey('openai', 'sk-...')   // → { ok }
+await client.listKeys()                     // → KeyMeta[]
+await client.deleteKey('openai')            // → { ok }
+await client.rotateKey('openai', 'sk-new')  // → { ok, rotated }
 
 // Relay
-await client.relayRequest(provider, path, body, method?)   // low-level
-await client.chat(modelId, messages, extra?)               // non-streaming
-for await (const chunk of client.streamChat(modelId, messages, { signal?, extra? }))
-  // streaming text deltas
+await client.relayRequest('openai', 'chat/completions', body, 'POST') // low-level
+await client.chat('openai/gpt-4o', messages, { temperature: 0.7 })    // non-streaming
+const signal = new AbortController().signal;
+const extra = { temperature: 0.7 };
+for await (const chunk of client.streamChat('openai/gpt-4o', messages, { signal, extra })) {
+  appendStreamingText(chunk);
+}
 
 // Health & meta
-await client.health(deep?, provider?)   // → /health response
-await client.stats(appId?)             // → /stats response
-await client.getModels()               // → /models response
-await client.deleteAccount()           // GDPR erasure; clears token
+await client.health(false, 'openai')    // → /health?provider=openai response
+await client.stats('my-expo-app')       // → /stats/:appId response
+await client.getModels()                // → /models response
+await client.deleteAccount()            // GDPR erasure; clears token
 ```
 
 ---

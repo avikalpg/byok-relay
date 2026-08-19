@@ -7,8 +7,9 @@
  * Key differences from @byok-relay/react:
  *   - Storage: AsyncStorage (via @react-native-async-storage/async-storage)
  *     instead of localStorage. All storage operations are async.
- *   - SSE streaming: uses fetch-based ReadableStream reader, fully compatible
- *     with React Native's fetch implementation and Hermes engine.
+ *   - SSE streaming: uses a fetch implementation with ReadableStream support.
+ *     Expo apps should rely on `expo/fetch`; bare React Native apps should pass
+ *     a compatible `fetch` implementation or polyfill.
  *   - No `window` global assumptions — safe in Hermes, Fabric, and New Arch.
  *
  * Usage:
@@ -78,6 +79,28 @@ function _tryAsyncStorage() {
   } catch (_) {
     return null;
   }
+}
+
+/**
+ * Resolve the fetch implementation used by ByokRelayClient.
+ *
+ * Expo's `expo/fetch` supports streaming response bodies. React Native's global
+ * fetch may not, so callers can also pass `opts.fetch` to the client/hooks.
+ */
+function _resolveFetch(fetchImpl) {
+  if (fetchImpl) return fetchImpl;
+  try {
+    // eslint-disable-next-line global-require
+    const expoFetch = require('expo/fetch');
+    if (expoFetch && typeof expoFetch.fetch === 'function') return expoFetch.fetch;
+  } catch (_) {
+    // Fall back to the environment fetch below.
+  }
+  if (typeof fetch === 'function') return fetch;
+  throw new Error(
+    '@byok-relay/expo requires a fetch implementation. ' +
+    'Use Expo with expo/fetch or pass { fetch } when constructing ByokRelayClient.'
+  );
 }
 
 /**
@@ -164,6 +187,15 @@ function _buildHeaders(token, contentType) {
   return h;
 }
 
+function _buildHealthUrl(relayUrl, deep = false, provider) {
+  const base = relayUrl.replace(/\/$/, '');
+  const params = new URLSearchParams();
+  if (deep) params.set('deep', '1');
+  if (provider) params.set('provider', provider);
+  const query = params.toString();
+  return `${base}/health${query ? `?${query}` : ''}`;
+}
+
 // ─── SSE parser ──────────────────────────────────────────────────────────────
 
 /**
@@ -176,26 +208,35 @@ function _buildHeaders(token, contentType) {
 async function* _parseSSE(reader) {
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop(); // keep incomplete last line
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('data:')) {
-        const data = trimmed.slice(5).trim();
-        if (data && data !== '[DONE]') {
-          yield { data };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete last line
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('data:')) {
+          const data = trimmed.slice(5).trim();
+          if (data && data !== '[DONE]') {
+            yield { data };
+          }
         }
       }
     }
-  }
-  // Flush remaining buffer
-  if (buffer.trim().startsWith('data:')) {
-    const data = buffer.trim().slice(5).trim();
-    if (data && data !== '[DONE]') yield { data };
+    // Flush remaining buffer
+    if (buffer.trim().startsWith('data:')) {
+      const data = buffer.trim().slice(5).trim();
+      if (data && data !== '[DONE]') yield { data };
+    }
+  } finally {
+    try {
+      if (typeof reader.cancel === 'function') await reader.cancel();
+    } catch (_) { /* already closed */ }
+    try {
+      if (typeof reader.releaseLock === 'function') reader.releaseLock();
+    } catch (_) { /* already released */ }
   }
 }
 
@@ -247,12 +288,15 @@ class ByokRelayClient {
    * @param {string}  [opts.relayUrl]  Upstream relay URL (default: managed relay)
    * @param {string}  [opts.appId]     Application identifier for registration
    * @param {object}  [opts.storage]   Async storage adapter { getItem, setItem, removeItem }
+   * @param {Function} [opts.fetch]    Fetch implementation; use expo/fetch for streaming in RN
    */
   constructor(opts = {}) {
     this._relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
     this._appId    = opts.appId || 'expo-app';
     this._storage  = opts.storage || createAsyncStorage();
     this._token    = null; // in-memory cache; AsyncStorage is the persistent store
+    this._tokenPromise = null;
+    this._fetch    = _resolveFetch(opts.fetch);
   }
 
   // ── Token management ──
@@ -260,7 +304,7 @@ class ByokRelayClient {
   /** Register a new user and persist the token. */
   async register(appId) {
     const id = appId || this._appId;
-    const res = await fetch(`${this._relayUrl}/users`, {
+    const res = await this._fetch(`${this._relayUrl}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_id: id }),
@@ -275,14 +319,23 @@ class ByokRelayClient {
   /** Load token from storage if not already in memory. */
   async ensureToken(appId) {
     if (this._token) return this._token;
-    const stored = await this._storage.getItem('byok_relay_token');
-    if (stored) { this._token = stored; return stored; }
-    return this.register(appId);
+    if (this._tokenPromise) return this._tokenPromise;
+    this._tokenPromise = (async () => {
+      const stored = await this._storage.getItem('byok_relay_token');
+      if (stored) { this._token = stored; return stored; }
+      return this.register(appId);
+    })();
+    try {
+      return await this._tokenPromise;
+    } finally {
+      this._tokenPromise = null;
+    }
   }
 
   /** Remove the token from memory and storage. */
   async logout() {
     this._token = null;
+    this._tokenPromise = null;
     await this._storage.removeItem('byok_relay_token');
   }
 
@@ -291,7 +344,7 @@ class ByokRelayClient {
   /** Store an API key for a provider (encrypted at rest on the relay). */
   async storeKey(provider, apiKey) {
     const token = await this.ensureToken();
-    const res = await fetch(`${this._relayUrl}/keys/${provider}`, {
+    const res = await this._fetch(`${this._relayUrl}/keys/${provider}`, {
       method: 'POST',
       headers: _buildHeaders(token),
       body: JSON.stringify({ api_key: apiKey }),
@@ -303,7 +356,7 @@ class ByokRelayClient {
   /** List stored provider keys (returns key metadata, not the raw key values). */
   async listKeys() {
     const token = await this.ensureToken();
-    const res = await fetch(`${this._relayUrl}/keys`, {
+    const res = await this._fetch(`${this._relayUrl}/keys`, {
       headers: _buildHeaders(token),
     });
     if (!res.ok) throw new Error(`listKeys failed: ${res.status}`);
@@ -313,7 +366,7 @@ class ByokRelayClient {
   /** Delete a stored provider key. */
   async deleteKey(provider) {
     const token = await this.ensureToken();
-    const res = await fetch(`${this._relayUrl}/keys/${provider}`, {
+    const res = await this._fetch(`${this._relayUrl}/keys/${provider}`, {
       method: 'DELETE',
       headers: _buildHeaders(token),
     });
@@ -324,7 +377,7 @@ class ByokRelayClient {
   /** Atomically rotate a provider key (verify new key before replacing old). */
   async rotateKey(provider, newApiKey) {
     const token = await this.ensureToken();
-    const res = await fetch(`${this._relayUrl}/keys/${provider}/rotate`, {
+    const res = await this._fetch(`${this._relayUrl}/keys/${provider}/rotate`, {
       method: 'POST',
       headers: _buildHeaders(token),
       body: JSON.stringify({ api_key: newApiKey }),
@@ -339,7 +392,7 @@ class ByokRelayClient {
   async relayRequest(provider, path, body, method = 'POST') {
     const token = await this.ensureToken();
     const url = `${this._relayUrl}/relay/${provider}/${path}`;
-    const res = await fetch(url, {
+    const res = await this._fetch(url, {
       method,
       headers: _buildHeaders(token),
       body: method !== 'GET' ? JSON.stringify(body) : undefined,
@@ -360,7 +413,7 @@ class ByokRelayClient {
     const token = await this.ensureToken();
     const url = _buildRelayUrl(this._relayUrl, provider);
     const body = { model, messages, ...extra };
-    const res = await fetch(url, {
+    const res = await this._fetch(url, {
       method: 'POST',
       headers: _buildHeaders(token),
       body: JSON.stringify(body),
@@ -390,7 +443,7 @@ class ByokRelayClient {
     const token = await this.ensureToken();
     const url = _buildRelayUrl(this._relayUrl, provider);
     const body = { model, messages, stream: true, ...(opts.extra || {}) };
-    const res = await fetch(url, {
+    const res = await this._fetch(url, {
       method: 'POST',
       headers: _buildHeaders(token),
       body: JSON.stringify(body),
@@ -412,8 +465,9 @@ class ByokRelayClient {
 
   /** Check relay liveness and optional upstream readiness. */
   async health(deep = false, provider) {
-    const url = `${this._relayUrl}/health${deep ? '?deep=1' : ''}${provider ? `&provider=${provider}` : ''}`;
-    const res = await fetch(url);
+    const url = _buildHealthUrl(this._relayUrl, deep, provider);
+    const res = await this._fetch(url);
+    if (!res.ok) throw new Error(`health failed: ${res.status}`);
     return res.json();
   }
 
@@ -421,7 +475,7 @@ class ByokRelayClient {
   async stats(appId) {
     const token = await this.ensureToken();
     const path = appId ? `/stats/${appId}` : '/stats';
-    const res = await fetch(`${this._relayUrl}${path}`, {
+    const res = await this._fetch(`${this._relayUrl}${path}`, {
       headers: _buildHeaders(token),
     });
     if (!res.ok) throw new Error(`stats failed: ${res.status}`);
@@ -430,7 +484,7 @@ class ByokRelayClient {
 
   /** List available models (when ALLOWED_MODELS is configured on the relay). */
   async getModels() {
-    const res = await fetch(`${this._relayUrl}/models`);
+    const res = await this._fetch(`${this._relayUrl}/models`);
     if (!res.ok) throw new Error(`getModels failed: ${res.status}`);
     return res.json();
   }
@@ -438,12 +492,13 @@ class ByokRelayClient {
   /** Delete account and all stored keys (GDPR erasure). */
   async deleteAccount() {
     const token = await this.ensureToken();
-    const res = await fetch(`${this._relayUrl}/users`, {
+    const res = await this._fetch(`${this._relayUrl}/users`, {
       method: 'DELETE',
       headers: _buildHeaders(token),
     });
     if (!res.ok) throw new Error(`deleteAccount failed: ${res.status}`);
     this._token = null;
+    this._tokenPromise = null;
     await this._storage.removeItem('byok_relay_token');
     return res.json();
   }
@@ -483,6 +538,7 @@ function useByokRelay(opts = {}) {
       relayUrl: opts.relayUrl,
       appId:    opts.appId,
       storage:  opts.storage,
+      fetch:    opts.fetch,
     });
   }
   const client = clientRef.current;
@@ -591,6 +647,7 @@ function useChat(opts = {}) {
     clientRef.current = new ByokRelayClient({
       relayUrl: opts.relayUrl,
       storage:  opts.storage,
+      fetch:    opts.fetch,
     });
   }
   const client = clientRef.current;
@@ -632,8 +689,8 @@ function useChat(opts = {}) {
 /**
  * Streaming chat hook.
  *
- * Uses fetch + ReadableStream for SSE — compatible with React Native's Hermes engine
- * and the built-in fetch implementation. No EventSource polyfill required.
+ * Uses fetch + ReadableStream for SSE. Expo apps should use `expo/fetch` or
+ * pass a streaming-capable fetch implementation; no EventSource polyfill required.
  *
  * @param {object} opts
  * @param {string}  opts.relayUrl     Relay URL
@@ -660,6 +717,7 @@ function useStreamingChat(opts = {}) {
     clientRef.current = new ByokRelayClient({
       relayUrl: opts.relayUrl,
       storage:  opts.storage,
+      fetch:    opts.fetch,
     });
   }
   const client = clientRef.current;
@@ -696,6 +754,7 @@ function useStreamingChat(opts = {}) {
     abortRef.current = controller;
 
     let accumulated = '';
+    let aborted = false;
     try {
       for await (const chunk of client.streamChat(
         opts.model || 'openai/gpt-4o',
@@ -706,17 +765,19 @@ function useStreamingChat(opts = {}) {
         accumulated += chunk;
         setStreamingContent(accumulated);
       }
-      if (accumulated) {
-        const suffix = controller.signal.aborted ? ' [stopped]' : '';
-        setMessages(prev => [...prev, { role: 'assistant', content: accumulated + suffix }]);
-        setStreamingContent('');
-      }
     } catch (e) {
-      if (e.name !== 'AbortError') {
+      aborted = e.name === 'AbortError' || controller.signal.aborted;
+      if (!aborted) {
         setMessages(prev => prev.slice(0, -1));
         setError(e.message);
       }
     } finally {
+      aborted = aborted || controller.signal.aborted;
+      if (accumulated) {
+        const suffix = aborted ? ' [stopped]' : '';
+        setMessages(prev => [...prev, { role: 'assistant', content: accumulated + suffix }]);
+      }
+      setStreamingContent('');
       abortRef.current = null;
       setLoading(false);
     }
@@ -737,6 +798,7 @@ function useStreamingChat(opts = {}) {
  * @param {object} [opts]
  * @param {string}  [opts.relayUrl]   Relay URL
  * @param {number}  [opts.intervalMs] Poll interval in ms (default: 30 000)
+ * @param {Function} [opts.fetch]     Fetch implementation override
  *
  * @returns {{
  *   status: 'ok'|'error'|'unknown',
@@ -751,6 +813,7 @@ function useRelayHealth(opts = {}) {
 
   const relayUrl  = opts.relayUrl  || DEFAULT_RELAY_URL;
   const interval  = opts.intervalMs !== undefined ? opts.intervalMs : 30_000;
+  const fetchImpl = _resolveFetch(opts.fetch);
 
   const [status,  setStatus]  = useState('unknown');
   const [data,    setData]    = useState(null);
@@ -760,7 +823,8 @@ function useRelayHealth(opts = {}) {
   const refetch = useCallback(async () => {
     setLoading(true);
     try {
-      const res  = await fetch(`${relayUrl.replace(/\/$/, '')}/health`);
+      const res  = await fetchImpl(_buildHealthUrl(relayUrl));
+      if (!res.ok) throw new Error(`health failed: ${res.status}`);
       const json = await res.json();
       setStatus(json.status === 'ok' ? 'ok' : 'error');
       setData(json);
@@ -769,13 +833,14 @@ function useRelayHealth(opts = {}) {
     } finally {
       setLoading(false);
     }
-  }, [relayUrl]);
+  }, [relayUrl, fetchImpl]);
 
   const check = useCallback(async (deep = false, provider) => {
-    const url = `${relayUrl.replace(/\/$/, '')}/health${deep ? '?deep=1' : ''}${provider ? `&provider=${provider}` : ''}`;
-    const res  = await fetch(url);
+    const url = _buildHealthUrl(relayUrl, deep, provider);
+    const res  = await fetchImpl(url);
+    if (!res.ok) throw new Error(`health failed: ${res.status}`);
     return res.json();
-  }, [relayUrl]);
+  }, [relayUrl, fetchImpl]);
 
   useEffect(() => {
     refetch();

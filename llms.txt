@@ -484,7 +484,7 @@ npm: https://www.npmjs.com/package/@byok-relay/nuxt
 
 ## React Native / Expo Integration (`@byok-relay/expo`)
 
-For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming compatible with Hermes engine.
+For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming requires a ReadableStream-capable implementation such as expo/fetch or an injected/polyfilled fetch.
 
 ```bash
 npx expo install @byok-relay/expo @react-native-async-storage/async-storage
@@ -493,17 +493,21 @@ npx expo install @byok-relay/expo @react-native-async-storage/async-storage
 ```tsx
 import { useStreamingChat, useByokRelay } from '@byok-relay/expo';
 
-// API key settings screen
-const { token, register, storeKey } = useByokRelay({ relayUrl: 'https://relay.byokrelay.com' });
+function ApiKeySettings() {
+  const { token, register, storeKey } = useByokRelay({ relayUrl: 'https://relay.byokrelay.com' });
+  // render your settings form and call storeKey after register()
+}
 
-// Chat screen
-const { messages, streamingContent, sendMessage } = useStreamingChat({
-  relayUrl: 'https://relay.byokrelay.com',
-  model: 'openai/gpt-4o',
-});
+function ChatScreen() {
+  const { messages, streamingContent, sendMessage } = useStreamingChat({
+    relayUrl: 'https://relay.byokrelay.com',
+    model: 'openai/gpt-4o',
+  });
+  // render messages, streamingContent, and a send button
+}
 ```
 
-With Expo SecureStore for credential-grade storage:
+With Expo SecureStore for platform secure storage of the relay token (`byok_relay_token`):
 ```tsx
 import * as SecureStore from 'expo-secure-store';
 import { ByokRelayClient } from '@byok-relay/expo';
@@ -520,7 +524,7 @@ const client = new ByokRelayClient({
 
 Exported: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`.
 
-npm: https://www.npmjs.com/package/@byok-relay/expo
+npm: pending publication for @byok-relay/expo
 
 ## Links
 
