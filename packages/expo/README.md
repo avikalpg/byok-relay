@@ -116,7 +116,7 @@ function ChatScreen() {
 
 ## With Expo SecureStore (recommended for production)
 
-Use `expo-secure-store` for credential-grade storage of the relay token. The adapter stores `byok_relay_token` through platform secure storage: Android Keystore-managed encryption on Android and iOS Keychain on iOS. `storeKey` still sends the user's API key to the relay for encrypted server-side storage; this adapter does not store provider API keys locally.
+Use `expo-secure-store` for credential-grade storage of the relay token. The adapter stores the relay-scoped `byok_relay_token:<encoded relay URL>` token through platform secure storage: Android Keystore-managed encryption on Android and iOS Keychain on iOS. `storeKey` still sends the user's API key to the relay for encrypted server-side storage; this adapter does not store provider API keys locally.
 
 ```bash
 npx expo install expo-secure-store

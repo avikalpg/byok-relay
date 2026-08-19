@@ -42,6 +42,10 @@ function assertEqual(a, b, msg) {
   if (a !== b) throw new Error(msg || `Expected ${JSON.stringify(a)} === ${JSON.stringify(b)}`);
 }
 
+function tokenKey(relayUrl = 'https://relay.test') {
+  return `byok_relay_token:${encodeURIComponent(relayUrl)}`;
+}
+
 // ─── Fetch mock ───────────────────────────────────────────────────────────────
 
 let mockHandlers = [];
@@ -141,8 +145,26 @@ await test('register() stores token in AsyncStorage and in-memory', async () => 
   const token = await client.register('test-app');
   assertEqual(token, 'tok-abc123');
   assertEqual(client._token, 'tok-abc123');
-  const stored = await storage.getItem('byok_relay_token');
+  const stored = await storage.getItem(tokenKey());
   assertEqual(stored, 'tok-abc123');
+});
+
+await test('register() namespaces persisted tokens by relay URL', async () => {
+  clearMocks();
+  registerMock(/\/users$/, (url) => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({
+      token: url.includes('other.relay') ? 'tok-other' : 'tok-main',
+      expires_at: null,
+    }),
+  }));
+  const storage = createAsyncStorage(null);
+  const main = new ByokRelayClient({ relayUrl: 'https://relay.test/', storage });
+  const other = new ByokRelayClient({ relayUrl: 'https://other.relay', storage });
+  await main.register('main-app');
+  await other.register('other-app');
+  assertEqual(await storage.getItem(tokenKey('https://relay.test')), 'tok-main');
+  assertEqual(await storage.getItem(tokenKey('https://other.relay')), 'tok-other');
 });
 
 await test('ensureToken() returns in-memory token without hitting network', async () => {
@@ -157,7 +179,7 @@ await test('ensureToken() returns in-memory token without hitting network', asyn
 await test('ensureToken() restores token from AsyncStorage', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'stored-tok');
+  await storage.setItem(tokenKey(), 'stored-tok');
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
   const token = await client.ensureToken();
   assertEqual(token, 'stored-tok');
@@ -196,12 +218,54 @@ await test('ensureToken() serializes concurrent registrations', async () => {
 await test('logout() clears token from memory and storage', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
   client._token = 'tok';
   await client.logout();
   assertEqual(client._token, null);
-  assertEqual(await storage.getItem('byok_relay_token'), null);
+  assertEqual(await storage.getItem(tokenKey()), null);
+});
+
+await test('logout() prevents stale registration from restoring a token', async () => {
+  clearMocks();
+  let finishRegistration;
+  registerMock(/\/users$/, () => new Promise(resolve => {
+    finishRegistration = () => resolve({
+      ok: true,
+      json: () => Promise.resolve({ token: 'late-tok', expires_at: null }),
+    });
+  }));
+  const storage = createAsyncStorage(null);
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  const registration = client.register('test-app');
+  await client.logout();
+  finishRegistration();
+  const token = await registration;
+  assertEqual(token, null);
+  assertEqual(client._token, null);
+  assertEqual(await storage.getItem(tokenKey()), null);
+});
+
+await test('logout() prevents stale AsyncStorage restoration from restoring a token', async () => {
+  clearMocks();
+  const key = tokenKey();
+  const mem = { [key]: 'stored-tok' };
+  let finishRestore;
+  const storage = {
+    getItem: (k) => k === key
+      ? new Promise(resolve => { finishRestore = () => resolve('stored-tok'); })
+      : Promise.resolve(null),
+    setItem: (k, v) => { mem[k] = v; return Promise.resolve(); },
+    removeItem: (k) => { delete mem[k]; return Promise.resolve(); },
+  };
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  const restore = client._restoreToken();
+  await client.logout();
+  finishRestore();
+  const token = await restore;
+  assertEqual(token, null);
+  assertEqual(client._token, null);
+  assertEqual(mem[key], undefined);
 });
 
 // 3. ByokRelayClient — key management
@@ -226,7 +290,7 @@ await test('storeKey() sends POST /keys/:provider with Relay-Token header', asyn
 await test('listKeys() returns key metadata array', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   registerMock(/\/keys$/, () => Promise.resolve({
     ok: true,
     json: () => Promise.resolve([{ provider: 'openai', stored: true }]),
@@ -240,7 +304,7 @@ await test('listKeys() returns key metadata array', async () => {
 await test('deleteKey() sends DELETE /keys/:provider', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   let method = null;
   registerMock(/\/keys\/anthropic$/, (_url, opts) => {
     method = opts.method;
@@ -254,7 +318,7 @@ await test('deleteKey() sends DELETE /keys/:provider', async () => {
 await test('rotateKey() sends POST /keys/:provider/rotate', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   let captured = null;
   registerMock(/\/keys\/openai\/rotate$/, (_url, opts) => {
     captured = JSON.parse(opts.body);
@@ -272,7 +336,7 @@ console.log('\nByokRelayClient — chat (non-streaming)');
 await test('chat() sends request to relay and returns completion', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   registerMock(/\/relay\/openai\//, () => Promise.resolve({
     ok: true,
     json: () => Promise.resolve({
@@ -287,7 +351,7 @@ await test('chat() sends request to relay and returns completion', async () => {
 await test('chat() resolves provider from bare model name (claude-*)', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   let capturedUrl = null;
   registerMock(/\/relay\/anthropic\//, (url) => {
     capturedUrl = url;
@@ -309,7 +373,7 @@ console.log('\nByokRelayClient — streaming chat');
 await test('streamChat() yields text deltas from SSE stream', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
 
   const sseChunks = [
     'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
@@ -329,7 +393,7 @@ await test('streamChat() yields text deltas from SSE stream', async () => {
 await test('streamChat() handles Anthropic streaming format', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
 
   const sseChunks = [
     'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n',
@@ -349,7 +413,7 @@ await test('streamChat() handles Anthropic streaming format', async () => {
 await test('streamChat() skips [DONE] and unparseable chunks', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
 
   const sseChunks = [
     'data: {broken json}\n\n',
@@ -369,7 +433,7 @@ await test('streamChat() skips [DONE] and unparseable chunks', async () => {
 await test('streamChat() cancels and releases the reader on early termination', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   let cancelled = false;
   let released = false;
   const encoder = new TextEncoder();
@@ -456,7 +520,7 @@ await test('health() rejects non-OK responses', async () => {
 await test('stats() requests /stats with Relay-Token', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   let capturedHeaders = null;
   registerMock(/\/stats$/, (_url, opts) => {
     capturedHeaders = opts.headers;
@@ -482,7 +546,7 @@ await test('getModels() returns available models list', async () => {
 await test('deleteAccount() clears token after DELETE /users', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
-  await storage.setItem('byok_relay_token', 'tok');
+  await storage.setItem(tokenKey(), 'tok');
   registerMock(/\/users$/, (_url, opts) => {
     if (opts.method === 'DELETE') {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
@@ -493,7 +557,7 @@ await test('deleteAccount() clears token after DELETE /users', async () => {
   client._token = 'tok';
   await client.deleteAccount();
   assertEqual(client._token, null);
-  assertEqual(await storage.getItem('byok_relay_token'), null);
+  assertEqual(await storage.getItem(tokenKey()), null);
 });
 
 // 7. Expo SecureStore adapter pattern
@@ -520,7 +584,7 @@ await test('custom SecureStore-style adapter works with ByokRelayClient', async 
   });
   const token = await client.register('secure-app');
   assertEqual(token, 'secure-tok');
-  assertEqual(secureStore['byok_relay_token'], 'secure-tok');
+  assertEqual(secureStore[tokenKey()], 'secure-tok');
 });
 
 // ─── Summary ─────────────────────────────────────────────────────────────────

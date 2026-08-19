@@ -496,6 +496,7 @@ import { useStreamingChat, useByokRelay } from '@byok-relay/expo';
 function ApiKeySettings() {
   const { token, register, storeKey } = useByokRelay({ relayUrl: 'https://relay.byokrelay.com' });
   // render your settings form and call storeKey after register()
+  return null;
 }
 
 function ChatScreen() {
@@ -504,10 +505,11 @@ function ChatScreen() {
     model: 'openai/gpt-4o',
   });
   // render messages, streamingContent, and a send button
+  return null;
 }
 ```
 
-With Expo SecureStore for platform secure storage of the relay token (`byok_relay_token`):
+With Expo SecureStore for platform secure storage of the relay-scoped token (`byok_relay_token:<encoded relay URL>`):
 ```tsx
 import * as SecureStore from 'expo-secure-store';
 import { ByokRelayClient } from '@byok-relay/expo';

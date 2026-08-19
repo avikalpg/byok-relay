@@ -30,6 +30,11 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
+const TOKEN_STORAGE_PREFIX = 'byok_relay_token';
+
+function _tokenStorageKeyForRelay(relayUrl) {
+  return `${TOKEN_STORAGE_PREFIX}:${encodeURIComponent(relayUrl)}`;
+}
 
 /** Map of provider → chat path used when building relay URLs. */
 const PROVIDER_PATHS = {
@@ -294,15 +299,42 @@ class ByokRelayClient {
     this._relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
     this._appId    = opts.appId || 'expo-app';
     this._storage  = opts.storage || createAsyncStorage();
+    this._tokenStorageKey = _tokenStorageKeyForRelay(this._relayUrl);
     this._token    = null; // in-memory cache; AsyncStorage is the persistent store
     this._tokenPromise = null;
+    this._authGeneration = 0;
     this._fetch    = _resolveFetch(opts.fetch);
   }
 
   // ── Token management ──
 
+  _nextAuthGeneration() {
+    this._authGeneration += 1;
+    return this._authGeneration;
+  }
+
+  _isActiveAuthGeneration(generation) {
+    return this._authGeneration === generation;
+  }
+
+  async _removeTokenIfCurrent(token) {
+    const stored = await this._storage.getItem(this._tokenStorageKey);
+    if (stored === token) await this._storage.removeItem(this._tokenStorageKey);
+  }
+
+  async _restoreToken() {
+    if (this._token) return this._token;
+    const generation = this._authGeneration;
+    const stored = await this._storage.getItem(this._tokenStorageKey);
+    if (!stored) return null;
+    if (!this._isActiveAuthGeneration(generation)) return this._token;
+    this._token = stored;
+    return stored;
+  }
+
   /** Register a new user and persist the token. */
   async register(appId) {
+    const generation = this._nextAuthGeneration();
     const id = appId || this._appId;
     const res = await this._fetch(`${this._relayUrl}/users`, {
       method: 'POST',
@@ -311,8 +343,14 @@ class ByokRelayClient {
     });
     if (!res.ok) throw new Error(`Registration failed: ${res.status}`);
     const { token } = await res.json();
+    if (!this._isActiveAuthGeneration(generation)) return this._token;
     this._token = token;
-    await this._storage.setItem('byok_relay_token', token);
+    await this._storage.setItem(this._tokenStorageKey, token);
+    if (!this._isActiveAuthGeneration(generation)) {
+      if (this._token === token) this._token = null;
+      await this._removeTokenIfCurrent(token);
+      return this._token;
+    }
     return token;
   }
 
@@ -320,23 +358,27 @@ class ByokRelayClient {
   async ensureToken(appId) {
     if (this._token) return this._token;
     if (this._tokenPromise) return this._tokenPromise;
-    this._tokenPromise = (async () => {
-      const stored = await this._storage.getItem('byok_relay_token');
-      if (stored) { this._token = stored; return stored; }
+    let tokenPromise;
+    tokenPromise = (async () => {
+      const restored = await this._restoreToken();
+      if (restored) return restored;
+      if (!this._tokenPromise || this._tokenPromise !== tokenPromise) return this._token;
       return this.register(appId);
     })();
+    this._tokenPromise = tokenPromise;
     try {
-      return await this._tokenPromise;
+      return await tokenPromise;
     } finally {
-      this._tokenPromise = null;
+      if (this._tokenPromise === tokenPromise) this._tokenPromise = null;
     }
   }
 
   /** Remove the token from memory and storage. */
   async logout() {
+    this._nextAuthGeneration();
     this._token = null;
     this._tokenPromise = null;
-    await this._storage.removeItem('byok_relay_token');
+    await this._storage.removeItem(this._tokenStorageKey);
   }
 
   // ── Key management ──
@@ -497,9 +539,10 @@ class ByokRelayClient {
       headers: _buildHeaders(token),
     });
     if (!res.ok) throw new Error(`deleteAccount failed: ${res.status}`);
+    this._nextAuthGeneration();
     this._token = null;
     this._tokenPromise = null;
-    await this._storage.removeItem('byok_relay_token');
+    await this._storage.removeItem(this._tokenStorageKey);
     return res.json();
   }
 }
@@ -553,11 +596,8 @@ function useByokRelay(opts = {}) {
     (async () => {
       setLoading(true);
       try {
-        const stored = await client._storage.getItem('byok_relay_token');
-        if (!cancelled && stored) {
-          client._token = stored;
-          setToken(stored);
-        }
+        const stored = await client._restoreToken();
+        if (!cancelled && stored && client._token === stored) setToken(stored);
       } catch (e) {
         if (!cancelled) setError(e.message);
       } finally {
@@ -573,7 +613,7 @@ function useByokRelay(opts = {}) {
     setError(null);
     try {
       const t = await client.register(appId || opts.appId);
-      setToken(t);
+      setToken(client._token || t);
     } catch (e) {
       setError(e.message);
     } finally {
