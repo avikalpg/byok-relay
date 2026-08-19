@@ -85,6 +85,20 @@ function _filterHeaders (headers) {
   return out;
 }
 
+async function _resolveTrustedAppId (opts, context) {
+  if (typeof opts.getTrustedAppId !== 'function') return '';
+  const appId = await opts.getTrustedAppId(context);
+  return appId == null ? '' : String(appId);
+}
+
+async function _assertAllowedApp (opts, context, fail) {
+  if (!opts.allowedApps || opts.allowedApps.length === 0) return;
+  const appId = await _resolveTrustedAppId(opts, context);
+  if (!appId || !opts.allowedApps.includes(appId)) {
+    throw fail(403, 'App not allowed');
+  }
+}
+
 /* ========================================================================== */
 /* Qwik store shim                                                             */
 /* ========================================================================== */
@@ -385,7 +399,8 @@ class ByokRelayClient {
  *
  * @param {object} [opts]
  * @param {string} [opts.relayUrl]        Override relay URL (default: process.env.RELAY_URL)
- * @param {string[]} [opts.allowedApps]   Optional app_id allowlist
+ * @param {string[]} [opts.allowedApps]   Optional trusted app_id allowlist
+ * @param {Function} [opts.getTrustedAppId] Server-side resolver for the authenticated app_id
  */
 function createRelayLoader (opts = {}) {
   const relayUrl = (opts.relayUrl || process.env.RELAY_URL || DEFAULT_RELAY_URL).replace(/\/$/, '');
@@ -394,10 +409,7 @@ function createRelayLoader (opts = {}) {
     const { request, params, error } = requestEvent;
     const subPath = params['path'] || '';
 
-    const appId = request.headers.get('x-app-id') || '';
-    if (opts.allowedApps && opts.allowedApps.length > 0 && (!appId || !opts.allowedApps.includes(appId))) {
-      throw error(403, 'App not allowed');
-    }
+    await _assertAllowedApp(opts, { request, params, requestEvent }, error);
 
     const upstreamUrl = `${relayUrl}/${subPath}`.replace(/\/+/g, '/').replace(':/', '://');
     const headers     = _filterHeaders(request.headers);
@@ -443,7 +455,8 @@ function createRelayLoader (opts = {}) {
  *
  * @param {object} [opts]
  * @param {string}   [opts.relayUrl]      Override relay URL
- * @param {string[]} [opts.allowedApps]   Optional app_id allowlist
+ * @param {string[]} [opts.allowedApps]   Optional trusted app_id allowlist
+ * @param {Function} [opts.getTrustedAppId] Server-side resolver for the authenticated app_id
  */
 function createRelayAction (opts = {}) {
   const relayUrl = (opts.relayUrl || process.env.RELAY_URL || DEFAULT_RELAY_URL).replace(/\/$/, '');
@@ -454,10 +467,7 @@ function createRelayAction (opts = {}) {
     const token    = data.token || request.headers.get('authorization')?.replace(/^Bearer /i, '') || '';
     const bodyData = data.body;
 
-    const appId = request.headers.get('x-app-id') || '';
-    if (opts.allowedApps && opts.allowedApps.length > 0 && (!appId || !opts.allowedApps.includes(appId))) {
-      throw error(403, 'App not allowed');
-    }
+    await _assertAllowedApp(opts, { request, data, requestEvent }, error);
 
     const upstreamUrl = `${relayUrl}/${subPath}`.replace(/\/+/g, '/').replace(':/', '://');
     const headers     = {
