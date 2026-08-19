@@ -317,18 +317,99 @@ await testAsync('createRelayAction returns { success: false } on upstream error'
   assertEqual(result.status, 502);
 });
 
-await testAsync('createRelayLoader respects allowedApps', async function() {
+
+await testAsync('createRelayAction rejects client-supplied appId without trusted resolver', async function() {
+  const action = createRelayAction({
+    relayUrl    : 'http://relay.test',
+    allowedApps : ['allowed-app'],
+  });
+  let errorThrown = false;
+  const mockEvent = {
+    request : {
+      method  : 'POST',
+      headers : {
+        get     : function(k) { return k === 'x-app-id' ? 'allowed-app' : null; },
+        entries : function() { return [['x-app-id', 'allowed-app']][Symbol.iterator](); },
+      },
+    },
+    error : function(code, msg) {
+      errorThrown = true;
+      const e = new Error(msg);
+      e.status = code;
+      throw e;
+    },
+  };
+  try {
+    await action({ path: 'relay', token: 'tok_xyz', appId: 'allowed-app', body: {} }, mockEvent);
+  } catch (e) {
+    assertEqual(e.status, 403);
+  }
+  assertTrue(errorThrown, 'Should reject client-controlled appId and raw headers without a trusted resolver');
+  assertEqual(_fetchCalls.length, 0);
+});
+
+await testAsync('createRelayAction accepts appId from trusted resolver', async function() {
+  const action = createRelayAction({
+    relayUrl         : 'http://relay.test',
+    allowedApps      : ['allowed-app'],
+    getTrustedAppId  : async function({ data }) { return data.serverAppId; },
+  });
+  _pushResponse({ ok: true });
+  const mockEvent = {
+    request : {
+      method  : 'POST',
+      headers : {
+        get     : function() { return null; },
+        entries : function() { return [][Symbol.iterator](); },
+      },
+    },
+    error : function(code, msg) { const e = new Error(msg); e.status = code; throw e; },
+  };
+  const result = await action({ path: 'relay', token: 'tok_xyz', serverAppId: 'allowed-app', body: {} }, mockEvent);
+  assertTrue(result.success);
+  assertEqual(_fetchCalls.length, 1);
+});
+
+await testAsync('createRelayLoader uses trusted resolver for allowedApps', async function() {
   const loader = createRelayLoader({
-    relayUrl     : 'http://relay.test',
-    allowedApps  : ['allowed-app'],
+    relayUrl         : 'http://relay.test',
+    allowedApps      : ['allowed-app'],
+    getTrustedAppId  : function({ requestEvent }) { return requestEvent.locals.appId; },
+  });
+  _pushResponse({ ok: true });
+  const mockEvent = {
+    locals  : { appId: 'allowed-app' },
+    request : {
+      method  : 'GET',
+      headers : {
+        get     : function(k) { return k === 'x-app-id' ? 'blocked-app' : null; },
+        entries : function() { return [['x-app-id', 'blocked-app']][Symbol.iterator](); },
+      },
+    },
+    params  : { path: 'health' },
+    error   : function(code) {
+      const e = new Error('blocked');
+      e.status = code;
+      throw e;
+    },
+  };
+  await loader(mockEvent);
+  assertEqual(_fetchCalls.length, 1);
+});
+
+await testAsync('createRelayLoader rejects disallowed trusted appId', async function() {
+  const loader = createRelayLoader({
+    relayUrl         : 'http://relay.test',
+    allowedApps      : ['allowed-app'],
+    getTrustedAppId  : function() { return 'blocked-app'; },
   });
   let errorThrown = false;
   const mockEvent = {
     request : {
       method  : 'GET',
       headers : {
-        get     : function(k) { return k === 'x-app-id' ? 'blocked-app' : null; },
-        entries : function() { return [][Symbol.iterator](); },
+        get     : function(k) { return k === 'x-app-id' ? 'allowed-app' : null; },
+        entries : function() { return [['x-app-id', 'allowed-app']][Symbol.iterator](); },
       },
     },
     params  : { path: 'health' },
@@ -340,7 +421,8 @@ await testAsync('createRelayLoader respects allowedApps', async function() {
     },
   };
   try { await loader(mockEvent); } catch (_) {}
-  assertTrue(errorThrown, 'Should throw for disallowed app');
+  assertTrue(errorThrown, 'Should throw for disallowed trusted app');
+  assertEqual(_fetchCalls.length, 0);
 });
 
 /* ─── Reactive stores ────────────────────────────────────────────────────── */

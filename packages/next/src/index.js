@@ -541,6 +541,7 @@ function useStreamingChat ({
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState(null);
   const abortRef = React.useRef(null);
+  const invocationRef = React.useRef(0);
 
   const base = relayUrl.replace(/\/$/, '');
 
@@ -549,6 +550,10 @@ function useStreamingChat ({
   }, []);
 
   const sendMessage = React.useCallback(async (content) => {
+    const invocationId = invocationRef.current + 1;
+    invocationRef.current = invocationId;
+    const isCurrentInvocation = () => invocationRef.current === invocationId;
+
     stopStreaming();
     const userMsg = { role: 'user', content };
     const history = [...messages, userMsg];
@@ -562,6 +567,7 @@ function useStreamingChat ({
 
     const ac = new AbortController();
     abortRef.current = ac;
+    let accumulated = '';
 
     try {
       const resp = await fetch(`${base}/relay`, {
@@ -581,7 +587,6 @@ function useStreamingChat ({
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
-      let accumulated = '';
       let sseBuffer = '';
 
       const processSseLine = (line) => {
@@ -595,7 +600,7 @@ function useStreamingChat ({
             parsed.delta?.text || '';
           if (delta) {
             accumulated += delta;
-            setStreamingContent(accumulated);
+            if (isCurrentInvocation()) setStreamingContent(accumulated);
           }
         } catch (_) {}
         return false;
@@ -630,32 +635,41 @@ function useStreamingChat ({
         ...history,
         { role: 'assistant', content: accumulated },
       ];
-      setMessages(finalMessages);
-      setStreamingContent('');
+      if (isCurrentInvocation()) {
+        setMessages(finalMessages);
+        setStreamingContent('');
+      }
       return accumulated;
     } catch (e) {
       if (e.name !== 'AbortError') {
-        setMessages(messages); // revert
-        setError(e.message);
+        if (isCurrentInvocation()) {
+          setMessages(messages); // revert
+          setError(e.message);
+        }
         throw e;
       }
-      // Committed partial content on abort
-      if (streamingContent) {
-        setMessages([...history, { role: 'assistant', content: streamingContent }]);
-      } else {
-        setMessages(messages);
+      if (isCurrentInvocation()) {
+        // Commit partial content accumulated in this invocation before abort.
+        if (accumulated) {
+          setMessages([...history, { role: 'assistant', content: accumulated }]);
+        } else {
+          setMessages(messages);
+        }
+        setStreamingContent('');
       }
-      setStreamingContent('');
     } finally {
-      setLoading(false);
+      if (isCurrentInvocation()) setLoading(false);
       if (abortRef.current === ac) abortRef.current = null;
     }
-  }, [base, token, model, messages, systemPrompt, extraParams, streamingContent, stopStreaming]);
+  }, [base, token, model, messages, systemPrompt, extraParams, stopStreaming]);
 
   const clearMessages = React.useCallback(() => {
+    invocationRef.current += 1;
     stopStreaming();
     setMessages([]);
     setStreamingContent('');
+    setError(null);
+    setLoading(false);
   }, [stopStreaming]);
 
   return { messages, streamingContent, sendMessage, stopStreaming, clearMessages, loading, error };

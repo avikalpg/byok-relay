@@ -120,8 +120,9 @@ Returns a Qwik City `routeLoader$`-compatible async function for GET/HEAD proxyi
 
 ```ts
 createRelayLoader({
-  relayUrl    ?: string,    // default: process.env.RELAY_URL
-  allowedApps ?: string[],  // optional app_id allowlist (403 if not in list)
+  relayUrl        ?: string,  // default: process.env.RELAY_URL
+  allowedApps     ?: string[],
+  getTrustedAppId ?: (ctx) => string | Promise<string>, // server-side authenticated app id
 })
 ```
 
@@ -131,7 +132,7 @@ Pass the result directly into `routeLoader$`:
 export const useRelayData = routeLoader$(createRelayLoader());
 ```
 
-The loader reads `params['path']` to map `[...path]` to the upstream relay sub-path. Strips hop-by-hop headers. 30 s timeout.
+The loader reads `params['path']` to map `[...path]` to the upstream relay sub-path. Strips hop-by-hop headers. 30 s timeout. If you set `allowedApps`, provide `getTrustedAppId` from server-side auth/session state; raw inbound headers and form fields are not treated as authentication.
 
 #### `createRelayAction(opts?)`
 
@@ -139,12 +140,13 @@ Returns a Qwik City `routeAction$`-compatible async function for POST/PUT/PATCH/
 
 ```ts
 createRelayAction({
-  relayUrl    ?: string,
-  allowedApps ?: string[],
+  relayUrl        ?: string,
+  allowedApps     ?: string[],
+  getTrustedAppId ?: (ctx) => string | Promise<string>, // server-side authenticated app id
 })
 ```
 
-The action receives `{ path, token, body, appId? }` from the Zod-validated form data:
+The action receives `{ path, token, body }` from the Zod-validated form data. If you set `allowedApps`, provide `getTrustedAppId` from server-side auth/session state; do not trust an app id supplied by the browser:
 
 ```tsx
 export const useRelayAction = routeAction$(

@@ -256,7 +256,7 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
     return body;
   }
 
-  async function relay(body, stream) {
+  async function relay(body, stream, signal) {
     const token = await getToken();
     const url = `${relayUrl}/relay/${relayProvider}/chat/completions`;
     const res = await fetch(url, {
@@ -266,6 +266,7 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ ...body, stream }),
+      signal,
     });
     if (!res.ok) {
       const errText = await res.text();
@@ -285,7 +286,7 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
     // -----------------------------------------------------------------------
     async doGenerate(options) {
       const body = await buildBody(options);
-      const res = await relay(body, false);
+      const res = await relay(body, false, options.abortSignal);
       const data = await res.json();
 
       const choice = data.choices?.[0] ?? {};
@@ -320,7 +321,7 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
     // -----------------------------------------------------------------------
     async doStream(options) {
       const body = await buildBody(options);
-      const res = await relay(body, true);
+      const res = await relay(body, true, options.abortSignal);
 
       const rawResponse = { headers: Object.fromEntries(res.headers.entries()) };
 
@@ -331,6 +332,8 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
           const decoder = new TextDecoder();
           let buf = '';
           let usage = { promptTokens: 0, completionTokens: 0 };
+          const toolCallIds = new Map();
+          const toolCallNames = new Map();
 
           function processLine(line) {
             const trimmed = line.trim();
@@ -355,11 +358,15 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
 
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {
+                const index = tc.index ?? 0;
+                const toolCallId = tc.id ?? toolCallIds.get(index) ?? `tool_${index}`;
+                toolCallIds.set(index, toolCallId);
+                if (tc.function?.name) toolCallNames.set(index, tc.function.name);
                 if (tc.function?.name) {
                   controller.enqueue({
                     type: 'tool-call-delta',
                     toolCallType: 'function',
-                    toolCallId: tc.id ?? `tool_${tc.index ?? 0}`,
+                    toolCallId,
                     toolName: tc.function.name,
                     argsTextDelta: tc.function.arguments ?? '',
                   });
@@ -367,8 +374,8 @@ function createLanguageModel({ relayUrl, getToken, modelId, settings = {} }) {
                   controller.enqueue({
                     type: 'tool-call-delta',
                     toolCallType: 'function',
-                    toolCallId: tc.id ?? `tool_${tc.index ?? 0}`,
-                    toolName: '',
+                    toolCallId,
+                    toolName: toolCallNames.get(index) ?? '',
                     argsTextDelta: tc.function.arguments,
                   });
                 }
