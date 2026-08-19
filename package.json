@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test test/e2e/relay.test.js",
+    "test": "node --test test/e2e/relay.test.js test/e2e/deploy-config.test.js",
     "token-migration-status": "node scripts/token-migration-status.js"
   },
   "keywords": [
