@@ -692,10 +692,20 @@ await test('useStreamingChat() ignores stale stopped stream finalizers after rep
   await withMockReact(async ({ render, state }) => {
     const hook = render(useStreamingChat, { relayUrl: 'https://relay.test', storage });
     const oldSend = hook.sendMessage('old');
-    await Promise.race([
-      firstChunkSeen,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('old stream did not start')), 1000)),
-    ]);
+    let timeout;
+    try {
+      await Promise.race([
+        firstChunkSeen,
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('old stream did not start')),
+            1000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
     for (let i = 0; i < 10 && state[1] !== 'old partial'; i += 1) {
       await new Promise(resolve => setImmediate(resolve));
     }
