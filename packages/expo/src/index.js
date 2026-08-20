@@ -97,11 +97,11 @@ function _resolveFetch(fetchImpl) {
   try {
     // eslint-disable-next-line global-require
     const expoFetch = require('expo/fetch');
-    if (expoFetch && typeof expoFetch.fetch === 'function') return expoFetch.fetch;
+    if (expoFetch && typeof expoFetch.fetch === 'function') return expoFetch.fetch.bind(globalThis);
   } catch (_) {
     // Fall back to the environment fetch below.
   }
-  if (typeof fetch === 'function') return fetch;
+  if (typeof fetch === 'function') return fetch.bind(globalThis);
   throw new Error(
     '@byok-relay/expo requires a fetch implementation. ' +
     'Use Expo with expo/fetch or pass { fetch } when constructing ByokRelayClient.'
@@ -199,6 +199,28 @@ function _buildHealthUrl(relayUrl, deep = false, provider) {
   if (provider) params.set('provider', provider);
   const query = params.toString();
   return `${base}/health${query ? `?${query}` : ''}`;
+}
+
+const OPTIMISTIC_MESSAGE_ID = Symbol('byokRelayOptimisticMessageId');
+
+function _withoutOptimisticMessageIds(messages) {
+  return messages.map((message) => {
+    if (!message || typeof message !== 'object') return message;
+    const clean = {};
+    for (const key of Object.keys(message)) clean[key] = message[key];
+    return clean;
+  });
+}
+
+function _replaceOptimisticMessage(prev, optimisticId) {
+  return prev.map((message) => {
+    if (!message || message[OPTIMISTIC_MESSAGE_ID] !== optimisticId) return message;
+    return _withoutOptimisticMessageIds([message])[0];
+  });
+}
+
+function _removeOptimisticMessage(prev, optimisticId) {
+  return prev.filter(message => !message || message[OPTIMISTIC_MESSAGE_ID] !== optimisticId);
 }
 
 // ─── SSE parser ──────────────────────────────────────────────────────────────
@@ -317,6 +339,9 @@ class ByokRelayClient {
     return this._authGeneration === generation;
   }
 
+  /** Current in-memory token, or null. */
+  get token() { return this._token; }
+
   async _removeTokenIfCurrent(token) {
     const stored = await this._storage.getItem(this._tokenStorageKey);
     if (stored === token) await this._storage.removeItem(this._tokenStorageKey);
@@ -330,6 +355,16 @@ class ByokRelayClient {
     if (!this._isActiveAuthGeneration(generation)) return this._token;
     this._token = stored;
     return stored;
+  }
+
+  /** Restore a persisted token without registering a new one. */
+  async restoreToken() { return this._restoreToken(); }
+
+  async _clearAuthState() {
+    this._nextAuthGeneration();
+    this._token = null;
+    this._tokenPromise = null;
+    await this._storage.removeItem(this._tokenStorageKey);
   }
 
   /** Register a new user and persist the token. */
@@ -375,10 +410,7 @@ class ByokRelayClient {
 
   /** Remove the token from memory and storage. */
   async logout() {
-    this._nextAuthGeneration();
-    this._token = null;
-    this._tokenPromise = null;
-    await this._storage.removeItem(this._tokenStorageKey);
+    await this._clearAuthState();
   }
 
   // ── Key management ──
@@ -539,10 +571,7 @@ class ByokRelayClient {
       headers: _buildHeaders(token),
     });
     if (!res.ok) throw new Error(`deleteAccount failed: ${res.status}`);
-    this._nextAuthGeneration();
-    this._token = null;
-    this._tokenPromise = null;
-    await this._storage.removeItem(this._tokenStorageKey);
+    await this._clearAuthState();
     return res.json();
   }
 }
@@ -596,8 +625,8 @@ function useByokRelay(opts = {}) {
     (async () => {
       setLoading(true);
       try {
-        const stored = await client._restoreToken();
-        if (!cancelled && stored && client._token === stored) setToken(stored);
+        const stored = await client.restoreToken();
+        if (!cancelled && stored && client.token === stored) setToken(stored);
       } catch (e) {
         if (!cancelled) setError(e.message);
       } finally {
@@ -613,7 +642,7 @@ function useByokRelay(opts = {}) {
     setError(null);
     try {
       const t = await client.register(appId || opts.appId);
-      setToken(client._token || t);
+      setToken(client.token || t);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -695,33 +724,48 @@ function useChat(opts = {}) {
   const [messages, setMessages] = useState([]);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState(null);
+  const messagesRef = useRef([]);
 
   const sendMessage = useCallback(async (content) => {
     setError(null);
-    const userMsg = { role: 'user', content };
-    const nextMessages = [...messages, userMsg];
+    const optimisticId = Symbol('pendingMessage');
+    const userMsg = { role: 'user', content, [OPTIMISTIC_MESSAGE_ID]: optimisticId };
+    const nextMessages = [...messagesRef.current, userMsg];
+    messagesRef.current = nextMessages;
     setMessages(nextMessages);
     setLoading(true);
 
+    const providerMessages = _withoutOptimisticMessageIds(nextMessages);
     const fullMessages = opts.systemPrompt
-      ? [{ role: 'system', content: opts.systemPrompt }, ...nextMessages]
-      : nextMessages;
+      ? [{ role: 'system', content: opts.systemPrompt }, ...providerMessages]
+      : providerMessages;
 
     try {
       const data = await client.chat(opts.model || 'openai/gpt-4o', fullMessages, opts.extraParams || {});
       const reply = data.choices?.[0]?.message?.content
         || data.content?.[0]?.text
         || '';
-      setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+      setMessages(prev => {
+        const next = [..._replaceOptimisticMessage(prev, optimisticId), { role: 'assistant', content: reply }];
+        messagesRef.current = next;
+        return next;
+      });
     } catch (e) {
-      setMessages(prev => prev.slice(0, -1)); // roll back optimistic user message
+      setMessages(prev => {
+        const next = _removeOptimisticMessage(prev, optimisticId);
+        messagesRef.current = next;
+        return next;
+      });
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, [client, messages, opts.model, opts.systemPrompt, opts.extraParams]);
+  }, [client, opts.model, opts.systemPrompt, opts.extraParams]);
 
-  const clearMessages = useCallback(() => setMessages([]), []);
+  const clearMessages = useCallback(() => {
+    messagesRef.current = [];
+    setMessages([]);
+  }, []);
 
   return { messages, loading, error, sendMessage, clearMessages };
 }
@@ -767,9 +811,14 @@ function useStreamingChat(opts = {}) {
   const [loading,          setLoading]          = useState(false);
   const [error,            setError]            = useState(null);
   const abortRef = useRef(null);
+  const messagesRef = useRef([]);
+  const rollbackOnAbortRef = useRef(new Set());
 
-  const stopStreaming = useCallback(() => {
+  const stopStreaming = useCallback((rollbackOptimistic = false) => {
     if (abortRef.current) {
+      if (rollbackOptimistic && abortRef.current[OPTIMISTIC_MESSAGE_ID]) {
+        rollbackOnAbortRef.current.add(abortRef.current[OPTIMISTIC_MESSAGE_ID]);
+      }
       abortRef.current.abort();
       abortRef.current = null;
     }
@@ -777,20 +826,24 @@ function useStreamingChat(opts = {}) {
 
   const sendMessage = useCallback(async (content) => {
     // Stop any in-progress stream
-    stopStreaming();
+    stopStreaming(true);
     setError(null);
     setStreamingContent('');
 
-    const userMsg = { role: 'user', content };
-    const nextMessages = [...messages, userMsg];
+    const optimisticId = Symbol('pendingMessage');
+    const userMsg = { role: 'user', content, [OPTIMISTIC_MESSAGE_ID]: optimisticId };
+    const nextMessages = [...messagesRef.current, userMsg];
+    messagesRef.current = nextMessages;
     setMessages(nextMessages);
     setLoading(true);
 
+    const providerMessages = _withoutOptimisticMessageIds(nextMessages);
     const fullMessages = opts.systemPrompt
-      ? [{ role: 'system', content: opts.systemPrompt }, ...nextMessages]
-      : nextMessages;
+      ? [{ role: 'system', content: opts.systemPrompt }, ...providerMessages]
+      : providerMessages;
 
     const controller = new AbortController();
+    controller[OPTIMISTIC_MESSAGE_ID] = optimisticId;
     abortRef.current = controller;
 
     let accumulated = '';
@@ -808,23 +861,39 @@ function useStreamingChat(opts = {}) {
     } catch (e) {
       aborted = e.name === 'AbortError' || controller.signal.aborted;
       if (!aborted) {
-        setMessages(prev => prev.slice(0, -1));
+        setMessages(prev => {
+          const next = _removeOptimisticMessage(prev, optimisticId);
+          messagesRef.current = next;
+          return next;
+        });
         setError(e.message);
       }
     } finally {
       aborted = aborted || controller.signal.aborted;
       if (accumulated) {
         const suffix = aborted ? ' [stopped]' : '';
-        setMessages(prev => [...prev, { role: 'assistant', content: accumulated + suffix }]);
+        setMessages(prev => {
+          const next = [..._replaceOptimisticMessage(prev, optimisticId), { role: 'assistant', content: accumulated + suffix }];
+          messagesRef.current = next;
+          return next;
+        });
+      } else if (aborted && rollbackOnAbortRef.current.has(optimisticId)) {
+        setMessages(prev => {
+          const next = _removeOptimisticMessage(prev, optimisticId);
+          messagesRef.current = next;
+          return next;
+        });
       }
+      rollbackOnAbortRef.current.delete(optimisticId);
       setStreamingContent('');
-      abortRef.current = null;
+      if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
     }
-  }, [client, messages, opts.model, opts.systemPrompt, opts.extraParams, stopStreaming]);
+  }, [client, opts.model, opts.systemPrompt, opts.extraParams, stopStreaming]);
 
   const clearMessages = useCallback(() => {
     stopStreaming();
+    messagesRef.current = [];
     setMessages([]);
     setStreamingContent('');
   }, [stopStreaming]);
@@ -840,6 +909,10 @@ function useStreamingChat(opts = {}) {
  * @param {number}  [opts.intervalMs] Poll interval in ms (default: 30 000)
  * @param {Function} [opts.fetch]     Fetch implementation override
  *
+ * relayUrl, intervalMs, and fetch are fixed at mount; later option changes do
+ * not restart polling or change refetch/check, matching the other hooks. Fetch
+ * resolution is deferred until the first health request.
+ *
  * @returns {{
  *   status: 'ok'|'error'|'unknown',
  *   data: object|null,
@@ -851,9 +924,15 @@ function useStreamingChat(opts = {}) {
 function useRelayHealth(opts = {}) {
   const { useState, useEffect, useCallback, useRef } = _resolveHooks();
 
-  const relayUrl  = opts.relayUrl  || DEFAULT_RELAY_URL;
-  const interval  = opts.intervalMs !== undefined ? opts.intervalMs : 30_000;
-  const fetchImpl = _resolveFetch(opts.fetch);
+  const relayUrlRef = useRef(opts.relayUrl || DEFAULT_RELAY_URL);
+  const intervalRef = useRef(opts.intervalMs !== undefined ? opts.intervalMs : 30_000);
+  const fetchOptRef = useRef(opts.fetch);
+  const fetchRef = useRef(null);
+
+  const getFetch = useCallback(() => {
+    if (!fetchRef.current) fetchRef.current = _resolveFetch(fetchOptRef.current);
+    return fetchRef.current;
+  }, []);
 
   const [status,  setStatus]  = useState('unknown');
   const [data,    setData]    = useState(null);
@@ -863,7 +942,7 @@ function useRelayHealth(opts = {}) {
   const refetch = useCallback(async () => {
     setLoading(true);
     try {
-      const res  = await fetchImpl(_buildHealthUrl(relayUrl));
+      const res  = await getFetch()(_buildHealthUrl(relayUrlRef.current));
       if (!res.ok) throw new Error(`health failed: ${res.status}`);
       const json = await res.json();
       setStatus(json.status === 'ok' ? 'ok' : 'error');
@@ -873,19 +952,19 @@ function useRelayHealth(opts = {}) {
     } finally {
       setLoading(false);
     }
-  }, [relayUrl, fetchImpl]);
+  }, [getFetch]);
 
   const check = useCallback(async (deep = false, provider) => {
-    const url = _buildHealthUrl(relayUrl, deep, provider);
-    const res  = await fetchImpl(url);
+    const url = _buildHealthUrl(relayUrlRef.current, deep, provider);
+    const res  = await getFetch()(url);
     if (!res.ok) throw new Error(`health failed: ${res.status}`);
     return res.json();
-  }, [relayUrl, fetchImpl]);
+  }, [getFetch]);
 
   useEffect(() => {
     refetch();
-    if (interval > 0) {
-      timerRef.current = setInterval(refetch, interval);
+    if (intervalRef.current > 0) {
+      timerRef.current = setInterval(refetch, intervalRef.current);
     }
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);

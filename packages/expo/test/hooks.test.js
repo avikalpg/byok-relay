@@ -15,6 +15,9 @@
 const {
   ByokRelayClient,
   createAsyncStorage,
+  useChat,
+  useRelayHealth,
+  useStreamingChat,
 } = require('../src/index.js');
 
 // ─── Test harness ─────────────────────────────────────────────────────────────
@@ -64,6 +67,47 @@ function registerMock(pattern, handler) {
 function clearMocks() { mockHandlers = []; }
 
 global.fetch = mockFetch;
+
+async function withMockReact(run, options = {}) {
+  const Module = require('module');
+  const originalLoad = Module._load;
+  const state = [];
+  const refs = [];
+  let stateCursor = 0;
+  let refCursor = 0;
+  const react = {
+    useState(initial) {
+      const idx = stateCursor++;
+      if (!(idx in state)) state[idx] = initial;
+      return [state[idx], (next) => {
+        state[idx] = typeof next === 'function' ? next(state[idx]) : next;
+      }];
+    },
+    useEffect(fn) { return options.runEffects === false ? undefined : fn(); },
+    useCallback(fn) { return fn; },
+    useRef(initial) {
+      const idx = refCursor++;
+      if (!refs[idx]) refs[idx] = { current: initial };
+      return refs[idx];
+    },
+  };
+  Module._load = function mockReactLoad(request, parent, isMain) {
+    if (request === 'react') return react;
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    return await run({
+      render(hook, opts) {
+        stateCursor = 0;
+        refCursor = 0;
+        return hook(opts);
+      },
+      state,
+    });
+  } finally {
+    Module._load = originalLoad;
+  }
+}
 
 // ─── SSE stream mock ──────────────────────────────────────────────────────────
 
@@ -185,6 +229,16 @@ await test('ensureToken() restores token from AsyncStorage', async () => {
   assertEqual(token, 'stored-tok');
 });
 
+await test('restoreToken() and token getter expose restored token publicly', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem(tokenKey(), 'stored-tok');
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  const token = await client.restoreToken();
+  assertEqual(token, 'stored-tok');
+  assertEqual(client.token, 'stored-tok');
+});
+
 await test('ensureToken() registers when no token exists', async () => {
   clearMocks();
   registerMock(/\/users$/, () => Promise.resolve({
@@ -244,6 +298,54 @@ await test('logout() prevents stale registration from restoring a token', async 
   assertEqual(token, null);
   assertEqual(client._token, null);
   assertEqual(await storage.getItem(tokenKey()), null);
+});
+
+await test('register() removes a token persisted after logout', async () => {
+  clearMocks();
+  registerMock(/\/users$/, () => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({ token: 'late-tok', expires_at: null }),
+  }));
+  const key = tokenKey();
+  const mem = {};
+  let client;
+  const storage = {
+    getItem: (k) => Promise.resolve(k in mem ? mem[k] : null),
+    setItem: async (k, v) => { mem[k] = v; await client.logout(); },
+    removeItem: (k) => { delete mem[k]; return Promise.resolve(); },
+  };
+  client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  const token = await client.register('test-app');
+  assertEqual(token, null);
+  assertEqual(client._token, null);
+  assertEqual(mem[key], undefined);
+});
+
+await test('default global fetch is bound, supplied fetch is not rebound', async () => {
+  clearMocks();
+  const originalFetch = global.fetch;
+  let defaultFetchThis = null;
+  global.fetch = function boundCheckFetch() {
+    defaultFetchThis = this;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+  };
+  const defaultClient = new ByokRelayClient({ relayUrl: 'https://relay.test', storage: createAsyncStorage(null) });
+  await defaultClient.health();
+  assertEqual(defaultFetchThis, globalThis, 'default fetch should be bound to globalThis');
+
+  let suppliedFetchThis = null;
+  const suppliedFetch = function suppliedFetch() {
+    suppliedFetchThis = this;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+  };
+  const suppliedClient = new ByokRelayClient({
+    relayUrl: 'https://relay.test',
+    storage: createAsyncStorage(null),
+    fetch: suppliedFetch,
+  });
+  await suppliedClient.health();
+  assertEqual(suppliedFetchThis, suppliedClient, 'supplied fetch should be stored untouched');
+  global.fetch = originalFetch;
 });
 
 await test('logout() prevents stale AsyncStorage restoration from restoring a token', async () => {
@@ -367,6 +469,44 @@ await test('chat() resolves provider from bare model name (claude-*)', async () 
   assert(capturedUrl && capturedUrl.includes('/relay/anthropic/'), 'Should route to anthropic');
 });
 
+await test('useChat() rolls back only the failed optimistic message and hides markers from provider messages', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem(tokenKey(), 'tok');
+  const seenBodies = [];
+  let failReject;
+  let okResolve;
+  registerMock(/\/relay\/openai\//, (_url, opts) => {
+    seenBodies.push(opts.body);
+    const body = JSON.parse(opts.body);
+    const content = body.messages[body.messages.length - 1].content;
+    if (content === 'fail') {
+      return new Promise((_resolve, reject) => { failReject = reject; });
+    }
+    return new Promise(resolve => { okResolve = resolve; });
+  });
+
+  await withMockReact(async ({ render, state }) => {
+    const hook = render(useChat, { relayUrl: 'https://relay.test', storage });
+    const failSend = hook.sendMessage('fail');
+    await Promise.resolve();
+    const okSend = hook.sendMessage('ok');
+    await Promise.resolve();
+    okResolve({ ok: true, json: () => Promise.resolve({ choices: [{ message: { content: 'ok reply' } }] }) });
+    await okSend;
+    failReject(new Error('boom'));
+    await failSend.catch(() => {});
+
+    assertEqual(state[0].length, 2);
+    assertEqual(state[0][0].role, 'user');
+    assertEqual(state[0][0].content, 'ok');
+    assertEqual(state[0][1].role, 'assistant');
+    assertEqual(state[0][1].content, 'ok reply');
+    assertEqual(Object.getOwnPropertySymbols(state[0][0]).length, 0, 'resolved user message should not expose marker');
+    assert(seenBodies.every(body => !body.includes('byokRelayOptimisticMessageId') && !body.includes('pendingMessage')), 'provider messages should not expose optimistic markers');
+  });
+});
+
 // 5. ByokRelayClient — streaming chat
 console.log('\nByokRelayClient — streaming chat');
 
@@ -462,6 +602,47 @@ await test('streamChat() cancels and releases the reader on early termination', 
   assert(released, 'Reader lock should be released when stream consumption stops early');
 });
 
+await test('useStreamingChat() rolls back only the failed optimistic message and hides markers from provider messages', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem(tokenKey(), 'tok');
+  const seenBodies = [];
+  let failReject;
+  let okResolve;
+  registerMock(/\/relay\/openai\//, (_url, opts) => {
+    seenBodies.push(opts.body);
+    const body = JSON.parse(opts.body);
+    const content = body.messages[body.messages.length - 1].content;
+    if (content === 'fail') {
+      return new Promise((_resolve, reject) => {
+        failReject = reject;
+        if (opts.signal.aborted) reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    }
+    return new Promise(resolve => { okResolve = resolve; });
+  });
+
+  await withMockReact(async ({ render, state }) => {
+    const hook = render(useStreamingChat, { relayUrl: 'https://relay.test', storage });
+    const failSend = hook.sendMessage('fail');
+    await Promise.resolve();
+    const okSend = hook.sendMessage('ok');
+    await Promise.resolve();
+    okResolve(makeSSEStream(['data: {"choices":[{"delta":{"content":"ok reply"}}]}\n\n']));
+    await okSend;
+    await failSend.catch(() => {});
+
+    assertEqual(state[0].length, 2);
+    assertEqual(state[0][0].role, 'user');
+    assertEqual(state[0][0].content, 'ok');
+    assertEqual(state[0][1].role, 'assistant');
+    assertEqual(state[0][1].content, 'ok reply');
+    assertEqual(Object.getOwnPropertySymbols(state[0][0]).length, 0, 'resolved user message should not expose marker');
+    assert(seenBodies.every(body => !body.includes('byokRelayOptimisticMessageId') && !body.includes('pendingMessage')), 'provider messages should not expose optimistic markers');
+  });
+});
+
 // 6. ByokRelayClient — health & stats
 console.log('\nByokRelayClient — health & stats');
 
@@ -515,6 +696,34 @@ await test('health() rejects non-OK responses', async () => {
     threw = e.message.includes('503');
   }
   assert(threw, 'health() should reject non-OK responses');
+});
+
+await test('useRelayHealth() defers fetch resolution and keeps mount options fixed', async () => {
+  const originalFetch = global.fetch;
+  delete global.fetch;
+  await withMockReact(async ({ render }) => {
+    assert(render(useRelayHealth, {}), 'render should not resolve fetch or throw');
+  }, { runEffects: false });
+  global.fetch = originalFetch;
+
+  let firstUrl = null;
+  let secondCalled = false;
+  const firstFetch = (url) => {
+    firstUrl = url;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+  };
+  const secondFetch = () => {
+    secondCalled = true;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+  };
+
+  await withMockReact(async ({ render }) => {
+    render(useRelayHealth, { relayUrl: 'https://relay-one.test', intervalMs: 0, fetch: firstFetch });
+    const hook = render(useRelayHealth, { relayUrl: 'https://relay-two.test', intervalMs: 10, fetch: secondFetch });
+    await hook.check(true, 'openai');
+    assertEqual(firstUrl, 'https://relay-one.test/health?deep=1&provider=openai');
+    assertEqual(secondCalled, false, 'updated fetch option should not replace mount fetch');
+  }, { runEffects: false });
 });
 
 await test('stats() requests /stats with Relay-Token', async () => {

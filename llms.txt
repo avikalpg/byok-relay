@@ -487,7 +487,7 @@ npm: https://www.npmjs.com/package/@byok-relay/nuxt
 For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming requires a ReadableStream-capable implementation such as expo/fetch or an injected/polyfilled fetch.
 
 ```bash
-npx expo install @byok-relay/expo @react-native-async-storage/async-storage
+npx expo install @byok-relay/expo @react-native-async-storage/async-storage expo-secure-store
 ```
 
 ```tsx
