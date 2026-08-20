@@ -814,11 +814,18 @@ function useStreamingChat(opts = {}) {
   const abortRef = useRef(null);
   const messagesRef = useRef([]);
   const rollbackOnAbortRef = useRef(new Set());
+  const streamGenerationRef = useRef(0);
 
   const abortActiveStream = useCallback((rollbackOptimistic = false) => {
     if (abortRef.current) {
       if (rollbackOptimistic && abortRef.current[OPTIMISTIC_MESSAGE_ID]) {
-        rollbackOnAbortRef.current.add(abortRef.current[OPTIMISTIC_MESSAGE_ID]);
+        const optimisticId = abortRef.current[OPTIMISTIC_MESSAGE_ID];
+        rollbackOnAbortRef.current.add(optimisticId);
+        setMessages(prev => {
+          const next = _removeOptimisticMessage(prev, optimisticId);
+          messagesRef.current = next;
+          return next;
+        });
       }
       abortRef.current.abort();
       abortRef.current = null;
@@ -830,6 +837,8 @@ function useStreamingChat(opts = {}) {
   }, [abortActiveStream]);
 
   const sendMessage = useCallback(async (content) => {
+    const streamGeneration = streamGenerationRef.current + 1;
+    streamGenerationRef.current = streamGeneration;
     // Stop any in-progress stream
     abortActiveStream(true);
     setError(null);
@@ -859,13 +868,13 @@ function useStreamingChat(opts = {}) {
         fullMessages,
         { signal: controller.signal, extra: opts.extraParams || {} }
       )) {
-        if (controller.signal.aborted) break;
+        if (controller.signal.aborted || streamGeneration !== streamGenerationRef.current) break;
         accumulated += chunk;
         setStreamingContent(accumulated);
       }
     } catch (e) {
       aborted = e.name === 'AbortError' || controller.signal.aborted;
-      if (!aborted) {
+      if (!aborted && streamGeneration === streamGenerationRef.current) {
         setMessages(prev => {
           const next = _removeOptimisticMessage(prev, optimisticId);
           messagesRef.current = next;
@@ -875,32 +884,36 @@ function useStreamingChat(opts = {}) {
       }
     } finally {
       aborted = aborted || controller.signal.aborted;
-      if (accumulated) {
-        const suffix = aborted ? ' [stopped]' : '';
-        setMessages(prev => {
-          const next = [..._replaceOptimisticMessage(prev, optimisticId), { role: 'assistant', content: accumulated + suffix }];
-          messagesRef.current = next;
-          return next;
-        });
-      } else if (aborted && rollbackOnAbortRef.current.has(optimisticId)) {
-        setMessages(prev => {
-          const next = _removeOptimisticMessage(prev, optimisticId);
-          messagesRef.current = next;
-          return next;
-        });
+      if (streamGeneration === streamGenerationRef.current) {
+        if (accumulated) {
+          const suffix = aborted ? ' [stopped]' : '';
+          setMessages(prev => {
+            const next = [..._replaceOptimisticMessage(prev, optimisticId), { role: 'assistant', content: accumulated + suffix }];
+            messagesRef.current = next;
+            return next;
+          });
+        } else if (aborted && rollbackOnAbortRef.current.has(optimisticId)) {
+          setMessages(prev => {
+            const next = _removeOptimisticMessage(prev, optimisticId);
+            messagesRef.current = next;
+            return next;
+          });
+        }
+        setStreamingContent('');
+        if (abortRef.current === controller) abortRef.current = null;
+        setLoading(false);
       }
       rollbackOnAbortRef.current.delete(optimisticId);
-      setStreamingContent('');
-      if (abortRef.current === controller) abortRef.current = null;
-      setLoading(false);
     }
   }, [client, opts.model, opts.systemPrompt, opts.extraParams, abortActiveStream]);
 
   const clearMessages = useCallback(() => {
+    streamGenerationRef.current += 1;
     abortActiveStream(false);
     messagesRef.current = [];
     setMessages([]);
     setStreamingContent('');
+    setLoading(false);
   }, [abortActiveStream]);
 
   return { messages, streamingContent, loading, error, sendMessage, stopStreaming, clearMessages };

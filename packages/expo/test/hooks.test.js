@@ -646,6 +646,75 @@ await test('useStreamingChat() rolls back only the failed optimistic message and
   });
 });
 
+await test('useStreamingChat() ignores stale stopped stream finalizers after replacement', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem(tokenKey(), 'tok');
+  const encoder = new TextEncoder();
+  let resolveFirstChunk;
+  const firstChunkSeen = new Promise(resolve => { resolveFirstChunk = resolve; });
+
+  registerMock(/\/relay\/openai\//, (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    const content = body.messages[body.messages.length - 1].content;
+    if (content === 'old') {
+      return Promise.resolve({
+        ok: true,
+        headers: { get: () => 'text/event-stream' },
+        body: {
+          getReader() {
+            let readCount = 0;
+            return {
+              read() {
+                readCount += 1;
+                if (readCount === 1) {
+                  resolveFirstChunk();
+                  return Promise.resolve({
+                    done: false,
+                    value: encoder.encode('data: {"choices":[{"delta":{"content":"old partial"}}]}\n\n'),
+                  });
+                }
+                return new Promise((_resolve, reject) => {
+                  if (opts.signal.aborted) reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                  opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+                });
+              },
+              cancel: () => Promise.resolve(),
+              releaseLock: () => {},
+            };
+          },
+        },
+      });
+    }
+    return Promise.resolve(makeSSEStream(['data: {"choices":[{"delta":{"content":"new reply"}}]}\n\n']));
+  });
+
+  await withMockReact(async ({ render, state }) => {
+    const hook = render(useStreamingChat, { relayUrl: 'https://relay.test', storage });
+    const oldSend = hook.sendMessage('old');
+    await Promise.race([
+      firstChunkSeen,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('old stream did not start')), 1000)),
+    ]);
+    for (let i = 0; i < 10 && state[1] !== 'old partial'; i += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assertEqual(state[1], 'old partial');
+
+    const newSend = hook.sendMessage('new');
+    await newSend;
+    await oldSend.catch(() => {});
+
+    assertEqual(state[0].length, 2);
+    assertEqual(state[0][0].role, 'user');
+    assertEqual(state[0][0].content, 'new');
+    assertEqual(state[0][1].role, 'assistant');
+    assertEqual(state[0][1].content, 'new reply');
+    assertEqual(state[1], '');
+    assertEqual(state[2], false);
+  });
+});
+
 await test('useStreamingChat() public stopStreaming ignores React Native press events', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
@@ -660,7 +729,20 @@ await test('useStreamingChat() public stopStreaming ignores React Native press e
     const send = hook.sendMessage('hello');
     await Promise.resolve();
     hook.stopStreaming({ nativeEvent: {} });
-    await send;
+    let timeout;
+    try {
+      await Promise.race([
+        send,
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('stopStreaming did not abort the stream')),
+            1000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
 
     assertEqual(state[0].length, 1);
     assertEqual(state[0][0].role, 'user');

@@ -49,7 +49,7 @@ npx react-native link @react-native-async-storage/async-storage   # RN <0.60
 
 > **AsyncStorage is optional** — if not installed, tokens are kept in memory (lost on app restart, not recommended for production).
 >
-> **Streaming fetch:** Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically. For older Expo SDKs or bare React Native, pass a compatible fetch override:
+> **Streaming fetch:** Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically. Use `expo/fetch` there:
 >
 > ```tsx
 > import { fetch as expoFetch } from 'expo/fetch';
@@ -57,6 +57,8 @@ npx react-native link @react-native-async-storage/async-storage   # RN <0.60
 >
 > const chat = useStreamingChat({ relayUrl: 'https://relay.byokrelay.com', model: 'openai/gpt-4o', fetch: expoFetch });
 > ```
+>
+> Older Expo SDKs and bare React Native apps must pass their own ReadableStream-capable `fetch` implementation or polyfill instead of `expo/fetch`.
 
 ## Quick start — Expo
 
