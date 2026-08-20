@@ -324,28 +324,31 @@ await test('register() removes a token persisted after logout', async () => {
 await test('default global fetch is bound, supplied fetch is not rebound', async () => {
   clearMocks();
   const originalFetch = global.fetch;
-  let defaultFetchThis = null;
-  global.fetch = function boundCheckFetch() {
-    defaultFetchThis = this;
-    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
-  };
-  const defaultClient = new ByokRelayClient({ relayUrl: 'https://relay.test', storage: createAsyncStorage(null) });
-  await defaultClient.health();
-  assertEqual(defaultFetchThis, globalThis, 'default fetch should be bound to globalThis');
+  try {
+    let defaultFetchThis = null;
+    global.fetch = function boundCheckFetch() {
+      defaultFetchThis = this;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+    };
+    const defaultClient = new ByokRelayClient({ relayUrl: 'https://relay.test', storage: createAsyncStorage(null) });
+    await defaultClient.health();
+    assertEqual(defaultFetchThis, globalThis, 'default fetch should be bound to globalThis');
 
-  let suppliedFetchThis = null;
-  const suppliedFetch = function suppliedFetch() {
-    suppliedFetchThis = this;
-    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
-  };
-  const suppliedClient = new ByokRelayClient({
-    relayUrl: 'https://relay.test',
-    storage: createAsyncStorage(null),
-    fetch: suppliedFetch,
-  });
-  await suppliedClient.health();
-  assertEqual(suppliedFetchThis, suppliedClient, 'supplied fetch should be stored untouched');
-  global.fetch = originalFetch;
+    let suppliedFetchThis = null;
+    const suppliedFetch = function suppliedFetch() {
+      suppliedFetchThis = this;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+    };
+    const suppliedClient = new ByokRelayClient({
+      relayUrl: 'https://relay.test',
+      storage: createAsyncStorage(null),
+      fetch: suppliedFetch,
+    });
+    await suppliedClient.health();
+    assertEqual(suppliedFetchThis, suppliedClient, 'supplied fetch should be stored untouched');
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 await test('logout() prevents stale AsyncStorage restoration from restoring a token', async () => {
@@ -643,6 +646,28 @@ await test('useStreamingChat() rolls back only the failed optimistic message and
   });
 });
 
+await test('useStreamingChat() public stopStreaming ignores React Native press events', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem(tokenKey(), 'tok');
+  registerMock(/\/relay\/openai\//, (_url, opts) => new Promise((_resolve, reject) => {
+    if (opts.signal.aborted) reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  }));
+
+  await withMockReact(async ({ render, state }) => {
+    const hook = render(useStreamingChat, { relayUrl: 'https://relay.test', storage });
+    const send = hook.sendMessage('hello');
+    await Promise.resolve();
+    hook.stopStreaming({ nativeEvent: {} });
+    await send;
+
+    assertEqual(state[0].length, 1);
+    assertEqual(state[0][0].role, 'user');
+    assertEqual(state[0][0].content, 'hello');
+  });
+});
+
 // 6. ByokRelayClient — health & stats
 console.log('\nByokRelayClient — health & stats');
 
@@ -700,11 +725,14 @@ await test('health() rejects non-OK responses', async () => {
 
 await test('useRelayHealth() defers fetch resolution and keeps mount options fixed', async () => {
   const originalFetch = global.fetch;
-  delete global.fetch;
-  await withMockReact(async ({ render }) => {
-    assert(render(useRelayHealth, {}), 'render should not resolve fetch or throw');
-  }, { runEffects: false });
-  global.fetch = originalFetch;
+  try {
+    delete global.fetch;
+    await withMockReact(async ({ render }) => {
+      assert(render(useRelayHealth, {}), 'render should not resolve fetch or throw');
+    }, { runEffects: false });
+  } finally {
+    global.fetch = originalFetch;
+  }
 
   let firstUrl = null;
   let secondCalled = false;

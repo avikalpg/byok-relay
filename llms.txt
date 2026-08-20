@@ -484,10 +484,18 @@ npm: https://www.npmjs.com/package/@byok-relay/nuxt
 
 ## React Native / Expo Integration (`@byok-relay/expo`)
 
-For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming requires a ReadableStream-capable implementation such as expo/fetch or an injected/polyfilled fetch.
+For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming requires a ReadableStream-capable implementation. Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically, so the install command below is sufficient for current Expo projects. Older Expo SDKs or bare React Native apps should pass an explicit compatible `fetch` override.
 
 ```bash
 npx expo install @byok-relay/expo @react-native-async-storage/async-storage expo-secure-store
+```
+
+```tsx
+import { fetch as expoFetch } from 'expo/fetch';
+import { ByokRelayClient, useStreamingChat } from '@byok-relay/expo';
+
+const client = new ByokRelayClient({ relayUrl: 'https://relay.byokrelay.com', fetch: expoFetch });
+const chat = useStreamingChat({ relayUrl: 'https://relay.byokrelay.com', model: 'openai/gpt-4o', fetch: expoFetch });
 ```
 
 ```tsx

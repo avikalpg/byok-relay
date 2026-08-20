@@ -32,7 +32,7 @@ export function ChatScreen() {
 Mobile apps face the same BYOK problem as frontend apps — you can't ship API keys in your bundle. `@byok-relay/expo` is `@byok-relay/react` adapted for React Native:
 
 - **AsyncStorage persistence** — relay token survives app restarts (`@react-native-async-storage/async-storage`)
-- **fetch-based SSE streaming** — uses a ReadableStream-capable fetch (`expo/fetch` in Expo, or an injected/polyfilled fetch in bare React Native); no `EventSource` polyfill needed
+- **fetch-based SSE streaming** — Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically; older Expo SDKs or bare React Native apps should pass an explicit ReadableStream-capable `fetch` override; no `EventSource` polyfill needed
 - **Hermes-safe** — no `window`, no `localStorage`, no browser globals assumed
 - **Expo SecureStore** — drop-in adapter for credential-grade key storage
 
@@ -48,6 +48,15 @@ npx react-native link @react-native-async-storage/async-storage   # RN <0.60
 ```
 
 > **AsyncStorage is optional** — if not installed, tokens are kept in memory (lost on app restart, not recommended for production).
+>
+> **Streaming fetch:** Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically. For older Expo SDKs or bare React Native, pass a compatible fetch override:
+>
+> ```tsx
+> import { fetch as expoFetch } from 'expo/fetch';
+> import { useStreamingChat } from '@byok-relay/expo';
+>
+> const chat = useStreamingChat({ relayUrl: 'https://relay.byokrelay.com', model: 'openai/gpt-4o', fetch: expoFetch });
+> ```
 
 ## Quick start — Expo
 
@@ -212,7 +221,7 @@ const {
 
 ### `useStreamingChat(opts)`
 
-Streaming chat using `fetch` + `ReadableStream`. Expo projects should use `expo/fetch`; bare React Native projects must provide a streaming-capable fetch implementation or polyfill.
+Streaming chat using `fetch` + `ReadableStream`. Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically; older Expo SDKs and bare React Native projects must provide a streaming-capable fetch implementation or polyfill.
 
 ```tsx
 type UseStreamingChatOptions = {

@@ -8,8 +8,8 @@
  *   - Storage: AsyncStorage (via @react-native-async-storage/async-storage)
  *     instead of localStorage. All storage operations are async.
  *   - SSE streaming: uses a fetch implementation with ReadableStream support.
- *     Expo apps should rely on `expo/fetch`; bare React Native apps should pass
- *     a compatible `fetch` implementation or polyfill.
+ *     Expo SDK 52+ provides `expo/fetch`; older Expo SDKs and bare React Native
+ *     apps should pass a compatible `fetch` implementation or polyfill.
  *   - No `window` global assumptions — safe in Hermes, Fabric, and New Arch.
  *
  * Usage:
@@ -89,8 +89,9 @@ function _tryAsyncStorage() {
 /**
  * Resolve the fetch implementation used by ByokRelayClient.
  *
- * Expo's `expo/fetch` supports streaming response bodies. React Native's global
- * fetch may not, so callers can also pass `opts.fetch` to the client/hooks.
+ * Expo SDK 52+ provides `expo/fetch` with streaming response bodies. Older Expo
+ * SDKs and bare React Native globals may not, so callers can pass `opts.fetch`
+ * to the client/hooks.
  */
 function _resolveFetch(fetchImpl) {
   if (fetchImpl) return fetchImpl;
@@ -814,7 +815,7 @@ function useStreamingChat(opts = {}) {
   const messagesRef = useRef([]);
   const rollbackOnAbortRef = useRef(new Set());
 
-  const stopStreaming = useCallback((rollbackOptimistic = false) => {
+  const abortActiveStream = useCallback((rollbackOptimistic = false) => {
     if (abortRef.current) {
       if (rollbackOptimistic && abortRef.current[OPTIMISTIC_MESSAGE_ID]) {
         rollbackOnAbortRef.current.add(abortRef.current[OPTIMISTIC_MESSAGE_ID]);
@@ -824,9 +825,13 @@ function useStreamingChat(opts = {}) {
     }
   }, []);
 
+  const stopStreaming = useCallback(() => {
+    abortActiveStream(false);
+  }, [abortActiveStream]);
+
   const sendMessage = useCallback(async (content) => {
     // Stop any in-progress stream
-    stopStreaming(true);
+    abortActiveStream(true);
     setError(null);
     setStreamingContent('');
 
@@ -889,14 +894,14 @@ function useStreamingChat(opts = {}) {
       if (abortRef.current === controller) abortRef.current = null;
       setLoading(false);
     }
-  }, [client, opts.model, opts.systemPrompt, opts.extraParams, stopStreaming]);
+  }, [client, opts.model, opts.systemPrompt, opts.extraParams, abortActiveStream]);
 
   const clearMessages = useCallback(() => {
-    stopStreaming();
+    abortActiveStream(false);
     messagesRef.current = [];
     setMessages([]);
     setStreamingContent('');
-  }, [stopStreaming]);
+  }, [abortActiveStream]);
 
   return { messages, streamingContent, loading, error, sendMessage, stopStreaming, clearMessages };
 }
