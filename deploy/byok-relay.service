@@ -5,8 +5,10 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
+UMask=0077
 WorkingDirectory=/home/ubuntu/byok-relay
 ExecStart=/usr/bin/node src/index.js
+ExecStartPost=/home/ubuntu/byok-relay/deploy/chmod-db.sh
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
