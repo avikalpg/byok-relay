@@ -482,6 +482,76 @@ const { messages, streamingContent, sendMessage, stopStreaming } = useStreamingC
 
 npm: https://www.npmjs.com/package/@byok-relay/nuxt
 
+## React Native / Expo Integration (`@byok-relay/expo`)
+
+For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming requires a ReadableStream-capable implementation. Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically, so current Expo projects only need `@byok-relay/expo` plus AsyncStorage once the package is published. Install `expo-secure-store` only when using the optional SecureStore adapter. Older Expo SDKs or bare React Native apps must pass their own ReadableStream-capable `fetch` implementation or polyfill.
+
+```bash
+# After @byok-relay/expo is published:
+npx expo install @react-native-async-storage/async-storage
+npm install @byok-relay/expo
+
+# Bare React Native:
+npm install @byok-relay/expo @react-native-async-storage/async-storage
+
+# Before publication, pack it from this source checkout and install the tarball in your app:
+npm --workspace @byok-relay/expo pack
+npm install /path/to/byok-relay/byok-relay-expo-1.0.0.tgz
+```
+
+```tsx
+// Expo SDK 52+
+import { fetch as expoFetch } from 'expo/fetch';
+import { ByokRelayClient, useStreamingChat } from '@byok-relay/expo';
+
+const client = new ByokRelayClient({ relayUrl: 'https://relay.byokrelay.com', fetch: expoFetch });
+
+function ChatScreen() {
+  const chat = useStreamingChat({ relayUrl: 'https://relay.byokrelay.com', model: 'openai/gpt-4o', fetch: expoFetch });
+  return null;
+}
+```
+
+Older Expo SDKs and bare React Native apps must pass a custom `fetch` implementation or polyfill with ReadableStream response bodies.
+
+```tsx
+import { useStreamingChat, useByokRelay } from '@byok-relay/expo';
+
+function ApiKeySettings() {
+  const { token, register, storeKey } = useByokRelay({ relayUrl: 'https://relay.byokrelay.com' });
+  // register() obtains the relay token; storeKey() sends { key } with x-relay-token.
+  return null;
+}
+
+function ChatScreen() {
+  const { messages, streamingContent, sendMessage } = useStreamingChat({
+    relayUrl: 'https://relay.byokrelay.com',
+    model: 'openai/gpt-4o',
+  });
+  // render messages, streamingContent, and a send button
+  return null;
+}
+```
+
+With Expo SecureStore for platform secure storage of the relay-scoped token (`byok_relay_token:<encoded relay URL>`):
+```tsx
+import * as SecureStore from 'expo-secure-store';
+import { ByokRelayClient } from '@byok-relay/expo';
+
+const client = new ByokRelayClient({
+  relayUrl: 'https://relay.byokrelay.com',
+  storage: {
+    getItem:    (k) => SecureStore.getItemAsync(k),
+    setItem:    (k, v) => SecureStore.setItemAsync(k, v),
+    removeItem: (k) => SecureStore.deleteItemAsync(k),
+  },
+});
+```
+
+Exported: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`.
+
+npm: pending publication for @byok-relay/expo
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
