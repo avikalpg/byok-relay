@@ -376,20 +376,23 @@ await test('logout() prevents stale AsyncStorage restoration from restoring a to
 // 3. ByokRelayClient — key management
 console.log('\nByokRelayClient — key management');
 
-await test('storeKey() sends POST /keys/:provider with Relay-Token header', async () => {
+await test('storeKey() sends the relay API header and payload contract', async () => {
   clearMocks();
   registerMock(/\/users$/, () => Promise.resolve({
     ok: true,
     json: () => Promise.resolve({ token: 'tok', expires_at: null }),
   }));
-  let capturedHeaders = null;
+  let captured = null;
   registerMock(/\/keys\/openai$/, (_url, opts) => {
-    capturedHeaders = opts.headers;
+    captured = { headers: opts.headers, body: JSON.parse(opts.body) };
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
   });
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage: createAsyncStorage(null) });
   await client.storeKey('openai', 'sk-test-key');
-  assert(capturedHeaders['Relay-Token'] === 'tok', 'Relay-Token header should be set');
+  assertEqual(captured.headers['x-relay-token'], 'tok');
+  assertEqual(captured.headers['Relay-Token'], undefined);
+  assertEqual(captured.body.key, 'sk-test-key');
+  assertEqual(captured.body.api_key, undefined);
 });
 
 await test('listKeys() returns key metadata array', async () => {
@@ -432,7 +435,8 @@ await test('rotateKey() sends POST /keys/:provider/rotate', async () => {
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
   const result = await client.rotateKey('openai', 'sk-new-key');
   assert(result.rotated === true, 'rotateKey should return { rotated: true }');
-  assertEqual(captured.api_key, 'sk-new-key');
+  assertEqual(captured.key, 'sk-new-key');
+  assertEqual(captured.api_key, undefined);
 });
 
 // 4. ByokRelayClient — chat (non-streaming)
@@ -846,7 +850,7 @@ await test('useRelayHealth() defers fetch resolution and keeps mount options fix
   }, { runEffects: false });
 });
 
-await test('stats() requests /stats with Relay-Token', async () => {
+await test('stats() requests /stats with x-relay-token', async () => {
   clearMocks();
   const storage = createAsyncStorage(null);
   await storage.setItem(tokenKey(), 'tok');
@@ -858,7 +862,8 @@ await test('stats() requests /stats with Relay-Token', async () => {
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
   const data = await client.stats();
   assertEqual(data.requests, 42);
-  assert(capturedHeaders['Relay-Token'] === 'tok', 'Relay-Token header should be set');
+  assertEqual(capturedHeaders['x-relay-token'], 'tok');
+  assertEqual(capturedHeaders['Relay-Token'], undefined);
 });
 
 await test('getModels() returns available models list', async () => {

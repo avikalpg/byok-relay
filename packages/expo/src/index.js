@@ -185,11 +185,11 @@ function _buildRelayUrl(relayUrl, provider) {
 
 /**
  * Build request headers for the relay.
- * Relay-Token header carries the user's session token.
+ * x-relay-token carries the user's session token.
  */
 function _buildHeaders(token, contentType) {
   const h = { 'Content-Type': contentType || 'application/json' };
-  if (token) h['Relay-Token'] = token;
+  if (token) h['x-relay-token'] = token;
   return h;
 }
 
@@ -422,7 +422,7 @@ class ByokRelayClient {
     const res = await this._fetch(`${this._relayUrl}/keys/${provider}`, {
       method: 'POST',
       headers: _buildHeaders(token),
-      body: JSON.stringify({ api_key: apiKey }),
+      body: JSON.stringify({ key: apiKey }),
     });
     if (!res.ok) throw new Error(`storeKey failed: ${res.status}`);
     return res.json();
@@ -455,7 +455,7 @@ class ByokRelayClient {
     const res = await this._fetch(`${this._relayUrl}/keys/${provider}/rotate`, {
       method: 'POST',
       headers: _buildHeaders(token),
-      body: JSON.stringify({ api_key: newApiKey }),
+      body: JSON.stringify({ key: newApiKey }),
     });
     if (!res.ok) throw new Error(`rotateKey failed: ${res.status}`);
     return res.json();
@@ -547,10 +547,9 @@ class ByokRelayClient {
   }
 
   /** Get relay usage statistics for the current user. */
-  async stats(appId) {
+  async stats() {
     const token = await this.ensureToken();
-    const path = appId ? `/stats/${appId}` : '/stats';
-    const res = await this._fetch(`${this._relayUrl}${path}`, {
+    const res = await this._fetch(`${this._relayUrl}/stats`, {
       headers: _buildHeaders(token),
     });
     if (!res.ok) throw new Error(`stats failed: ${res.status}`);

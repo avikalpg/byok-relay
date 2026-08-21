@@ -315,7 +315,7 @@ for await (const chunk of client.streamChat('openai/gpt-4o', messages, { signal,
 
 // Health & meta
 await client.health(false, 'openai')    // → /health?provider=openai response
-await client.stats('my-expo-app')       // → /stats/:appId response
+await client.stats()                    // → authenticated user's /stats response
 await client.getModels()                // → /models response
 await client.deleteAccount()            // GDPR erasure; clears token
 ```
