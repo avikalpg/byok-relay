@@ -3,7 +3,9 @@
 React Native / Expo hooks and client for [byok-relay](https://byokrelay.com) — BYOK AI in mobile apps with no server code.
 
 ```bash
-npx expo install @byok-relay/expo @react-native-async-storage/async-storage
+# After @byok-relay/expo is published:
+npx expo install @react-native-async-storage/async-storage
+npm install @byok-relay/expo
 ```
 
 ```tsx
@@ -39,12 +41,17 @@ Mobile apps face the same BYOK problem as frontend apps — you can't ship API k
 ## Installation
 
 ```bash
-# Expo managed workflow (recommended)
-npx expo install @byok-relay/expo @react-native-async-storage/async-storage
+# Expo managed workflow (after @byok-relay/expo is published)
+npx expo install @react-native-async-storage/async-storage
+npm install @byok-relay/expo
 
 # Bare React Native
 npm install @byok-relay/expo @react-native-async-storage/async-storage
 npx react-native link @react-native-async-storage/async-storage   # RN <0.60
+
+# Before publication, pack it from this source checkout and install the tarball in your app
+npm --workspace @byok-relay/expo pack
+npm install /path/to/byok-relay/byok-relay-expo-1.0.0.tgz
 ```
 
 > **AsyncStorage is optional** — if not installed, tokens are kept in memory (lost on app restart, not recommended for production).

@@ -199,8 +199,13 @@ function _normalizeSystemContent(content) {
 }
 
 function _buildChatBody(provider, model, messages, extra = {}, stream = false) {
+  const requestExtra = { ...(extra || {}) };
+  delete requestExtra.model;
+  delete requestExtra.messages;
+  delete requestExtra.stream;
+
   if (provider !== 'anthropic') {
-    return { model, messages, ...(stream ? { stream: true } : {}), ...extra };
+    return { ...requestExtra, model, messages, ...(stream ? { stream: true } : {}) };
   }
 
   const {
@@ -208,7 +213,7 @@ function _buildChatBody(provider, model, messages, extra = {}, stream = false) {
     maxTokens,
     system: extraSystem,
     ...anthropicExtra
-  } = extra || {};
+  } = requestExtra;
 
   const systemMessages = [];
   const providerMessages = [];
@@ -227,12 +232,12 @@ function _buildChatBody(provider, model, messages, extra = {}, stream = false) {
   systemParts.push(...systemMessages);
 
   return {
+    ...anthropicExtra,
     model,
     max_tokens: maxTokensSnake ?? maxTokens ?? 1024,
-    ...(stream ? { stream: true } : {}),
     messages: providerMessages,
     ...(systemParts.length ? { system: systemParts.join('\n\n') } : {}),
-    ...anthropicExtra,
+    ...(stream ? { stream: true } : {}),
   };
 }
 

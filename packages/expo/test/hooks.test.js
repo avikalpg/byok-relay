@@ -513,13 +513,20 @@ await test('chat() normalizes Anthropic system messages and max_tokens', async (
       { role: 'system', content: 'Be concise.' },
       { role: 'user', content: 'hi' },
     ],
-    { temperature: 0.2 }
+    {
+      temperature: 0.2,
+      model: 'claude-ignored',
+      messages: [{ role: 'user', content: 'ignored' }],
+      stream: true,
+    }
   );
   assertEqual(capturedBody.model, 'claude-opus-4-5');
   assertEqual(capturedBody.max_tokens, 1024);
   assertEqual(capturedBody.system, 'Be concise.');
   assertEqual(capturedBody.messages.length, 1);
   assertEqual(capturedBody.messages[0].role, 'user');
+  assertEqual(capturedBody.messages[0].content, 'hi');
+  assertEqual(capturedBody.stream, undefined);
   assertEqual(capturedBody.temperature, 0.2);
 });
 
@@ -574,14 +581,34 @@ await test('streamChat() yields text deltas from SSE stream', async () => {
     'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
     'data: [DONE]\n\n',
   ];
-  registerMock(/\/relay\/openai\//, () => Promise.resolve(makeSSEStream(sseChunks)));
+  let capturedBody = null;
+  registerMock(/\/relay\/openai\//, (_url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return Promise.resolve(makeSSEStream(sseChunks));
+  });
 
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
   const chunks = [];
-  for await (const chunk of client.streamChat('openai/gpt-4o', [{ role: 'user', content: 'hi' }])) {
+  for await (const chunk of client.streamChat(
+    'openai/gpt-4o',
+    [{ role: 'user', content: 'hi' }],
+    {
+      extra: {
+        temperature: 0.1,
+        model: 'gpt-ignored',
+        messages: [{ role: 'user', content: 'ignored' }],
+        stream: false,
+      },
+    }
+  )) {
     chunks.push(chunk);
   }
   assertEqual(chunks.join(''), 'Hello world');
+  assertEqual(capturedBody.model, 'gpt-4o');
+  assertEqual(capturedBody.messages.length, 1);
+  assertEqual(capturedBody.messages[0].content, 'hi');
+  assertEqual(capturedBody.stream, true);
+  assertEqual(capturedBody.temperature, 0.1);
 });
 
 await test('streamChat() handles Anthropic streaming format', async () => {

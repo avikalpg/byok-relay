@@ -1631,7 +1631,16 @@ Also includes `defineByokRelayModule` (auto-registers `/relay` route via `nuxt.c
 Hooks and `ByokRelayClient` for **React Native** and **Expo** mobile apps. Uses **AsyncStorage** instead of `localStorage` for persistent token storage, and fetch-based SSE streaming via `expo/fetch` or another ReadableStream-capable fetch — no `EventSource` polyfill required.
 
 ```bash
-npx expo install @byok-relay/expo @react-native-async-storage/async-storage
+# After @byok-relay/expo is published:
+npx expo install @react-native-async-storage/async-storage
+npm install @byok-relay/expo
+
+# Bare React Native:
+npm install @byok-relay/expo @react-native-async-storage/async-storage
+
+# Before publication, pack it from this source checkout and install the tarball in your app:
+npm --workspace @byok-relay/expo pack
+npm install /path/to/byok-relay/byok-relay-expo-1.0.0.tgz
 ```
 
 ```tsx
