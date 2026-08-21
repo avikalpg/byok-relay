@@ -98,7 +98,7 @@ Returns an Express `(req, res, next)` middleware.
 |---|---|---|---|
 | `relayUrl` | string | `process.env.RELAY_URL` → managed relay | Upstream relay base URL |
 | `pathPrefix` | string | `'/relay'` | Path prefix to intercept |
-| `allowedAppIds` | string[] | — | If set, requests with unlisted `x-app-id` header get 403 |
+| `allowedAppIds` | string[] | — | If set, every request must include an allowed `x-app-id` header or `app_id` query value; missing or unlisted IDs get 403 |
 | `timeoutMs` | number | `30000` | Upstream fetch timeout |
 
 ### `createRelayRouter(opts?)`
@@ -116,6 +116,7 @@ const client = new ByokRelayClient({
   relayUrl: string,    // default: process.env.RELAY_URL → managed relay
   appId:    string,    // default: 'default'
   storage:  object,    // custom { getItem, setItem, removeItem } adapter
+  storageKey: string,  // optional token-storage key; defaults to relay URL + app ID namespace
 });
 ```
 
