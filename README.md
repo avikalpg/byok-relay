@@ -1667,7 +1667,7 @@ function ChatScreen() {
 }
 ```
 
-Also supports **Expo SecureStore** as a custom storage adapter for credential-grade encrypted storage. Exports: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`. [Full docs →](packages/expo/README.md)
+Also supports **Expo SecureStore** as a custom storage adapter for credential-grade encrypted storage. `storeKey()` sends the relay contract payload `{ key }` with the `x-relay-token` header, and chat/streaming requests reuse that relay token. Exports: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`. [Full docs →](packages/expo/README.md)
 
 ## For AI coding agents
 

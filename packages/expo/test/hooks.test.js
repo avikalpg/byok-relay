@@ -473,7 +473,54 @@ await test('chat() resolves provider from bare model name (claude-*)', async () 
   });
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
   await client.chat('claude-opus-4-5', [{ role: 'user', content: 'hi' }]);
-  assert(capturedUrl && capturedUrl.includes('/relay/anthropic/'), 'Should route to anthropic');
+  assert(capturedUrl && capturedUrl.includes('/relay/anthropic/messages'), 'Should route to anthropic messages');
+});
+
+await test('chat() inserts the Google model into the provider path', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem(tokenKey(), 'tok');
+  let capturedUrl = null;
+  registerMock(/\/relay\/google\/models\/gemini-2\.5-flash:generateContent$/, (url) => {
+    capturedUrl = url;
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ candidates: [] }),
+    });
+  });
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  await client.chat('google/gemini-2.5-flash', [{ role: 'user', content: 'hi' }]);
+  assert(capturedUrl && capturedUrl.includes('/relay/google/models/gemini-2.5-flash:generateContent'), 'Should route to the concrete Google model path');
+  assert(!capturedUrl.includes('{model}'), 'Google route must not retain the {model} placeholder');
+});
+
+await test('chat() normalizes Anthropic system messages and max_tokens', async () => {
+  clearMocks();
+  const storage = createAsyncStorage(null);
+  await storage.setItem(tokenKey(), 'tok');
+  let capturedBody = null;
+  registerMock(/\/relay\/anthropic\/messages$/, (_url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ content: [{ text: 'Anthropic here' }] }),
+    });
+  });
+  const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
+  await client.chat(
+    'anthropic/claude-opus-4-5',
+    [
+      { role: 'system', content: 'Be concise.' },
+      { role: 'user', content: 'hi' },
+    ],
+    { temperature: 0.2 }
+  );
+  assertEqual(capturedBody.model, 'claude-opus-4-5');
+  assertEqual(capturedBody.max_tokens, 1024);
+  assertEqual(capturedBody.system, 'Be concise.');
+  assertEqual(capturedBody.messages.length, 1);
+  assertEqual(capturedBody.messages[0].role, 'user');
+  assertEqual(capturedBody.temperature, 0.2);
 });
 
 await test('useChat() rolls back only the failed optimistic message and hides markers from provider messages', async () => {
@@ -547,14 +594,29 @@ await test('streamChat() handles Anthropic streaming format', async () => {
     'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":" there"}}\n\n',
     'data: [DONE]\n\n',
   ];
-  registerMock(/\/relay\/anthropic\//, () => Promise.resolve(makeSSEStream(sseChunks)));
+  let capturedBody = null;
+  registerMock(/\/relay\/anthropic\/messages$/, (_url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return Promise.resolve(makeSSEStream(sseChunks));
+  });
 
   const client = new ByokRelayClient({ relayUrl: 'https://relay.test', storage });
   const chunks = [];
-  for await (const chunk of client.streamChat('anthropic/claude-opus-4-5', [{ role: 'user', content: 'hi' }])) {
+  for await (const chunk of client.streamChat(
+    'anthropic/claude-opus-4-5',
+    [
+      { role: 'system', content: 'Be helpful.' },
+      { role: 'user', content: 'hi' },
+    ]
+  )) {
     chunks.push(chunk);
   }
   assertEqual(chunks.join(''), 'Hi there');
+  assertEqual(capturedBody.stream, true);
+  assertEqual(capturedBody.max_tokens, 1024);
+  assertEqual(capturedBody.system, 'Be helpful.');
+  assertEqual(capturedBody.messages.length, 1);
+  assertEqual(capturedBody.messages[0].role, 'user');
 });
 
 await test('streamChat() skips [DONE] and unparseable chunks', async () => {

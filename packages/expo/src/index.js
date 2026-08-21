@@ -177,10 +177,63 @@ function _parseModelId(modelId) {
  * Build the full relay URL for a chat request.
  * Uses unified routing when POST /relay is available (v1.1+).
  */
-function _buildRelayUrl(relayUrl, provider) {
+function _buildRelayUrl(relayUrl, provider, model) {
   const base = relayUrl.replace(/\/$/, '');
-  const path = PROVIDER_PATHS[provider] || 'chat/completions';
+  const pathTemplate = PROVIDER_PATHS[provider] || 'chat/completions';
+  const path = pathTemplate.replace('{model}', encodeURIComponent(model || ''));
   return `${base}/relay/${provider}/${path}`;
+}
+
+function _normalizeSystemContent(content) {
+  if (Array.isArray(content)) {
+    return content
+      .map(part => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object') return part.text || part.content || '';
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  return content == null ? '' : String(content);
+}
+
+function _buildChatBody(provider, model, messages, extra = {}, stream = false) {
+  if (provider !== 'anthropic') {
+    return { model, messages, ...(stream ? { stream: true } : {}), ...extra };
+  }
+
+  const {
+    max_tokens: maxTokensSnake,
+    maxTokens,
+    system: extraSystem,
+    ...anthropicExtra
+  } = extra || {};
+
+  const systemMessages = [];
+  const providerMessages = [];
+  for (const message of messages || []) {
+    if (message && message.role === 'system') {
+      const content = _normalizeSystemContent(message.content);
+      if (content) systemMessages.push(content);
+    } else {
+      providerMessages.push(message);
+    }
+  }
+
+  const systemParts = [];
+  const normalizedExtraSystem = _normalizeSystemContent(extraSystem);
+  if (normalizedExtraSystem) systemParts.push(normalizedExtraSystem);
+  systemParts.push(...systemMessages);
+
+  return {
+    model,
+    max_tokens: maxTokensSnake ?? maxTokens ?? 1024,
+    ...(stream ? { stream: true } : {}),
+    messages: providerMessages,
+    ...(systemParts.length ? { system: systemParts.join('\n\n') } : {}),
+    ...anthropicExtra,
+  };
 }
 
 /**
@@ -486,8 +539,8 @@ class ByokRelayClient {
   async chat(modelId, messages, extra = {}) {
     const { provider, model } = _parseModelId(modelId);
     const token = await this.ensureToken();
-    const url = _buildRelayUrl(this._relayUrl, provider);
-    const body = { model, messages, ...extra };
+    const url = _buildRelayUrl(this._relayUrl, provider, model);
+    const body = _buildChatBody(provider, model, messages, extra);
     const res = await this._fetch(url, {
       method: 'POST',
       headers: _buildHeaders(token),
@@ -516,8 +569,8 @@ class ByokRelayClient {
   async *streamChat(modelId, messages, opts = {}) {
     const { provider, model } = _parseModelId(modelId);
     const token = await this.ensureToken();
-    const url = _buildRelayUrl(this._relayUrl, provider);
-    const body = { model, messages, stream: true, ...(opts.extra || {}) };
+    const url = _buildRelayUrl(this._relayUrl, provider, model);
+    const body = _buildChatBody(provider, model, messages, opts.extra || {}, true);
     const res = await this._fetch(url, {
       method: 'POST',
       headers: _buildHeaders(token),

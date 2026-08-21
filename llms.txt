@@ -496,7 +496,11 @@ import { fetch as expoFetch } from 'expo/fetch';
 import { ByokRelayClient, useStreamingChat } from '@byok-relay/expo';
 
 const client = new ByokRelayClient({ relayUrl: 'https://relay.byokrelay.com', fetch: expoFetch });
-const chat = useStreamingChat({ relayUrl: 'https://relay.byokrelay.com', model: 'openai/gpt-4o', fetch: expoFetch });
+
+function ChatScreen() {
+  const chat = useStreamingChat({ relayUrl: 'https://relay.byokrelay.com', model: 'openai/gpt-4o', fetch: expoFetch });
+  return null;
+}
 ```
 
 Older Expo SDKs and bare React Native apps must pass a custom `fetch` implementation or polyfill with ReadableStream response bodies.
@@ -506,7 +510,7 @@ import { useStreamingChat, useByokRelay } from '@byok-relay/expo';
 
 function ApiKeySettings() {
   const { token, register, storeKey } = useByokRelay({ relayUrl: 'https://relay.byokrelay.com' });
-  // render your settings form and call storeKey after register()
+  // register() obtains the relay token; storeKey() sends { key } with x-relay-token.
   return null;
 }
 
