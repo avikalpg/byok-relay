@@ -35,11 +35,15 @@
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const DEFAULT_PATH_PREFIX = '/relay';
 
-/** Headers that must not be forwarded upstream (hop-by-hop). */
+/** Headers that must not be forwarded upstream or downstream. */
 const HOP_BY_HOP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-  'te', 'trailers', 'transfer-encoding', 'upgrade',
+  'te', 'trailers', 'transfer-encoding', 'upgrade', 'content-length',
 ]);
+
+// fetch transparently decompresses upstream responses, so these wire-level
+// headers may no longer describe the body delivered to Fastify.
+const RESPONSE_HEADERS_TO_STRIP = new Set([...HOP_BY_HOP, 'content-encoding']);
 
 /* ========================================================================== */
 /* Utility                                                                     */
@@ -124,9 +128,10 @@ async function _proxy ({ relayUrl, subPath, rawUrl, method, headers, body, timeo
 
     clearTimeout(timer);
 
-    // Forward response headers (skip hop-by-hop)
+    // fetch can decompress upstream responses, so omit headers that may no
+    // longer match the body Fastify forwards.
     for (const [k, v] of upstreamRes.headers.entries()) {
-      if (!HOP_BY_HOP.has(k.toLowerCase())) reply.header(k, v);
+      if (!RESPONSE_HEADERS_TO_STRIP.has(k.toLowerCase())) reply.header(k, v);
     }
 
     reply.code(upstreamRes.status);
@@ -175,19 +180,27 @@ async function byokRelayPlugin (fastify, opts) {
   const relayUrl    = _resolveRelayUrl(opts.relayUrl);
   const pathPrefix  = (opts.pathPrefix || DEFAULT_PATH_PREFIX).replace(/\/$/, '');
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
-  const timeoutMs   = opts.timeoutMs || 30_000;
+  const timeoutMs   = opts.timeoutMs ?? 30_000;
 
   // Decorate the fastify instance with a server-side ByokRelayClient
   if (!fastify.byokRelayClient) {
     fastify.decorate('byokRelayClient', new ByokRelayClient({ relayUrl }));
   }
 
-  // Add a content-type parser for the relay prefix so raw bodies pass through
-  // We catch all content types and store the raw buffer.
+  // Preserve raw request bodies for the relay. Fastify's default JSON and text
+  // parsers would otherwise parse or reject these before the proxy sees them.
+  const rawBodyParserOptions = { parseAs: 'buffer', bodyLimit: 52_428_800 /* 50 MB */ };
+  const rawBodyParser = (req, body, done) => done(null, body);
+  for (const contentType of ['application/json', 'text/plain']) {
+    fastify.removeContentTypeParser(contentType);
+    fastify.addContentTypeParser(contentType, rawBodyParserOptions, rawBodyParser);
+  }
+
+  // Catch all remaining content types and store the raw buffer.
   fastify.addContentTypeParser(
     /^.*$/,
-    { parseAs: 'buffer', bodyLimit: 52_428_800 /* 50 MB */ },
-    (req, body, done) => done(null, body)
+    rawBodyParserOptions,
+    rawBodyParser
   );
 
   // Catch-all route: `${pathPrefix}/*`
@@ -246,7 +259,7 @@ byokRelayPlugin.fastify = '4.x - 5.x';
 function createRelayRouteHandler (opts = {}) {
   const relayUrl    = _resolveRelayUrl(opts.relayUrl);
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
-  const timeoutMs   = opts.timeoutMs || 30_000;
+  const timeoutMs   = opts.timeoutMs ?? 30_000;
 
   return async function relayRouteHandler (request, reply) {
     const appId = request.headers['x-app-id'] || (request.query && request.query.app_id);
