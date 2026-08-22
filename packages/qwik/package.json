@@ -1,0 +1,46 @@
+{
+  "name": "@byok-relay/qwik",
+  "version": "1.0.0",
+  "description": "Qwik City server loaders, actions, and reactive stores for byok-relay BYOK AI",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/stores.test.js"
+  },
+  "keywords": [
+    "qwik",
+    "qwik-city",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "byok-relay",
+    "relay",
+    "frontend"
+  ],
+  "peerDependencies": {
+    "@builder.io/qwik": ">=1.0.0",
+    "@builder.io/qwik-city": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@builder.io/qwik": { "optional": true },
+    "@builder.io/qwik-city": { "optional": true }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/qwik"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  }
+}
