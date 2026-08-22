@@ -1,13 +1,13 @@
 /**
- * Smoke tests for @byok-relay/express
- *
- * These tests run without a live relay or Express peer dep.
- * They verify the module exports and the ByokRelayClient API surface.
+ * Behavioral tests for @byok-relay/express.
+ * These run without a live relay and stub only the upstream fetch boundary.
  */
 
 'use strict';
 
 const assert = require('assert');
+const { EventEmitter } = require('events');
+const { Readable } = require('stream');
 
 const {
   createByokRelayMiddleware,
@@ -19,254 +19,348 @@ let passed = 0;
 let failed = 0;
 
 function test (name, fn) {
-  try {
-    fn();
-    console.log(`  ✅  ${name}`);
-    passed++;
-  } catch (err) {
-    console.error(`  ❌  ${name}`);
-    console.error(`      ${err.message}`);
-    failed++;
-  }
+  return Promise.resolve()
+    .then(fn)
+    .then(() => {
+      console.log(`  ✅  ${name}`);
+      passed++;
+    })
+    .catch((err) => {
+      console.error(`  ❌  ${name}`);
+      console.error(`      ${err.stack || err.message}`);
+      failed++;
+    });
 }
 
-async function testAsync (name, fn) {
-  try {
-    await fn();
-    console.log(`  ✅  ${name}`);
-    passed++;
-  } catch (err) {
-    console.error(`  ❌  ${name}`);
-    console.error(`      ${err.message}`);
-    failed++;
+async function withFetch (stub, fn) {
+  const original = global.fetch;
+  global.fetch = stub;
+  try { return await fn(); } finally { global.fetch = original; }
+}
+
+class FakeResponse extends EventEmitter {
+  constructor (opts = {}) {
+    super();
+    this.headers = {};
+    this.chunks = [];
+    this.headersSent = false;
+    this.writableEnded = false;
+    this.writeResult = opts.writeResult ?? true;
+    this.onWrite = opts.onWrite;
   }
+
+  status (code) { this.statusCode = code; return this; }
+  setHeader (name, value) { this.headers[name.toLowerCase()] = value; }
+  write (chunk) {
+    this.headersSent = true;
+    this.chunks.push(Buffer.from(chunk));
+    if (this.onWrite) this.onWrite();
+    return this.writeResult;
+  }
+  end () { this.headersSent = true; this.writableEnded = true; }
+  json (body) { this.body = body; this.end(); return this; }
+}
+
+function request (opts = {}) {
+  const req = opts.rawBody === undefined ? {} : Readable.from([opts.rawBody]);
+  Object.assign(req, {
+    path: opts.path || '/relay',
+    url: opts.url || opts.path || '/relay',
+    method: opts.method || 'GET',
+    headers: opts.headers || {},
+    query: opts.query || {},
+    originalUrl: opts.url || opts.path || '/relay',
+    baseUrl: '',
+  });
+  return req;
 }
 
 async function main () {
+  console.log('\n@byok-relay/express — behavioral tests\n');
 
-console.log('\n@byok-relay/express — smoke tests\n');
+  await test('exports the Express middleware, Router factory, and client', () => {
+    assert.strictEqual(typeof createByokRelayMiddleware, 'function');
+    assert.strictEqual(typeof createRelayRouter, 'function');
+    assert.strictEqual(typeof ByokRelayClient, 'function');
+  });
 
-/* ------------------------------------------------------------------ */
-/* Exports                                                              */
-/* ------------------------------------------------------------------ */
+  await test('only intercepts an exact prefix or a prefix path boundary', async () => {
+    const middleware = createByokRelayMiddleware({ pathPrefix: '/relay' });
+    for (const path of ['/relay-admin', '/relayfoo', '/other']) {
+      let nextCalled = false;
+      await middleware(request({ path }), new FakeResponse(), () => { nextCalled = true; });
+      assert.ok(nextCalled, `${path} should pass through`);
+    }
+  });
 
-test('exports createByokRelayMiddleware function', () => {
-  assert.strictEqual(typeof createByokRelayMiddleware, 'function');
-});
+  await test('rejects missing and disallowed app IDs when a middleware allowlist is enabled', async () => {
+    const middleware = createByokRelayMiddleware({
+      relayUrl: 'https://upstream.test',
+      allowedAppIds: ['allowed'],
+    });
+    for (const headers of [{}, { 'x-app-id': 'blocked' }]) {
+      const res = new FakeResponse();
+      await middleware(request({ path: '/relay/chat', headers }), res, () => {});
+      assert.strictEqual(res.statusCode, 403);
+      assert.deepStrictEqual(res.body, { error: 'app_id not allowed' });
+    }
+  });
 
-test('exports createRelayRouter function', () => {
-  assert.strictEqual(typeof createRelayRouter, 'function');
-});
+  await test('proxies an unparsed request stream and keeps its valid content length', async () => {
+    let upstreamInit;
+    let forwardedBody;
+    await withFetch(async (_url, init) => {
+      upstreamInit = init;
+      const chunks = [];
+      for await (const chunk of init.body) chunks.push(Buffer.from(chunk));
+      forwardedBody = Buffer.concat(chunks).toString();
+      return new Response('ok', { status: 200 });
+    }, async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
+      const res = new FakeResponse();
+      await middleware(request({
+        path: '/relay/chat', method: 'POST', rawBody: 'raw body',
+        headers: { host: 'app.test', 'content-length': '8', 'content-type': 'text/plain' },
+      }), res, () => {});
+      assert.strictEqual(Buffer.concat(res.chunks).toString(), 'ok');
+    });
+    assert.strictEqual(upstreamInit.body.constructor.name, 'Readable');
+    assert.strictEqual(forwardedBody, 'raw body');
+    assert.strictEqual(upstreamInit.duplex, 'half');
+    assert.strictEqual(upstreamInit.headers.host, undefined);
+    assert.strictEqual(upstreamInit.headers['content-length'], '8');
+  });
 
-test('exports ByokRelayClient class', () => {
-  assert.strictEqual(typeof ByokRelayClient, 'function');
-});
+  await test('re-serializes parsed bodies without stale request or response transport headers', async () => {
+    let upstreamInit;
+    let res;
+    await withFetch(async (_url, init) => {
+      upstreamInit = init;
+      return new Response(null, {
+        status: 204,
+        headers: { 'content-encoding': 'gzip', 'content-length': '999', 'x-request-id': 'request-id' },
+      });
+    }, async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
+      const req = request({
+        path: '/relay/chat', method: 'POST',
+        headers: { host: 'app.test', 'content-length': '999', 'content-type': 'application/json' },
+      });
+      req.body = { prompt: 'hello' };
+      res = new FakeResponse();
+      await middleware(req, res, () => {});
+      assert.ok(res.writableEnded, '204 responses should end without a body reader');
+    });
+    assert.strictEqual(upstreamInit.body, JSON.stringify({ prompt: 'hello' }));
+    assert.strictEqual(upstreamInit.headers.host, undefined);
+    assert.strictEqual(upstreamInit.headers['content-length'], undefined);
+    assert.strictEqual(res.headers['content-encoding'], undefined);
+    assert.strictEqual(res.headers['content-length'], undefined);
+    assert.strictEqual(res.headers['x-request-id'], 'request-id');
+  });
 
-/* ------------------------------------------------------------------ */
-/* createByokRelayMiddleware                                            */
-/* ------------------------------------------------------------------ */
+  await test('handles a HEAD response with no upstream body', async () => {
+    let upstreamInit;
+    await withFetch(async (_url, init) => {
+      upstreamInit = init;
+      return new Response(null, { status: 200 });
+    }, async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
+      const res = new FakeResponse();
+      await middleware(request({ path: '/relay/models', method: 'HEAD' }), res, () => {});
+      assert.ok(res.writableEnded);
+    });
+    assert.strictEqual(upstreamInit.body, undefined);
+  });
 
-test('createByokRelayMiddleware() returns a function', () => {
-  const mw = createByokRelayMiddleware();
-  assert.strictEqual(typeof mw, 'function');
-});
+  await test('waits for downstream drain before continuing a streamed response', async () => {
+    await withFetch(async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: new ReadableStream({
+        start (controller) {
+          controller.enqueue(Buffer.from('first'));
+          controller.enqueue(Buffer.from('second'));
+          controller.close();
+        },
+      }),
+    }), async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
+      const res = new FakeResponse({
+        writeResult: false,
+        onWrite: () => setTimeout(() => res.emit('drain'), 0),
+      });
+      await middleware(request({ path: '/relay/chat' }), res, () => {});
+      assert.strictEqual(Buffer.concat(res.chunks).toString(), 'firstsecond');
+      assert.ok(res.writableEnded);
+    });
+  });
 
-test('createByokRelayMiddleware({ pathPrefix, relayUrl }) returns a function', () => {
-  const mw = createByokRelayMiddleware({ pathPrefix: '/api/relay', relayUrl: 'http://localhost:3000' });
-  assert.strictEqual(typeof mw, 'function');
-});
+  await test('returns a 504 when the upstream request times out', async () => {
+    await withFetch((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }), async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test', timeoutMs: 5 });
+      const res = new FakeResponse();
+      await middleware(request({ path: '/relay/chat' }), res, () => {});
+      assert.strictEqual(res.statusCode, 504);
+      assert.deepStrictEqual(res.body, { error: 'Upstream relay timed out' });
+    });
+  });
 
-test('middleware has arity 3 (req, res, next)', () => {
-  const mw = createByokRelayMiddleware();
-  assert.strictEqual(mw.length, 3);
-});
+  await test('does not report a timeout when a downstream disconnect aborts a pending read', async () => {
+    let cancelRead;
+    let cancelled = false;
+    const res = new FakeResponse();
+    await withFetch(async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: () => new Promise((_resolve, reject) => { cancelRead = reject; }),
+          cancel: async () => { cancelled = true; },
+        }),
+      },
+    }), async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
+      const pending = middleware(request({ path: '/relay/chat' }), res, () => {});
+      await new Promise((resolve) => setImmediate(resolve));
+      res.emit('close');
+      cancelRead(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      await pending;
+    });
+    assert.ok(cancelled, 'reader.cancel() should run after a downstream close');
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body, undefined);
+    assert.strictEqual(res.writableEnded, false);
+  });
 
-await testAsync('middleware calls next() for non-matching paths', async () => {
-  const mw = createByokRelayMiddleware({ pathPrefix: '/relay' });
-  let nextCalled = false;
-  const req = { path: '/health', headers: {}, url: '/health', method: 'GET', query: {} };
-  const res = {};
-  await mw(req, res, () => { nextCalled = true; });
-  assert.ok(nextCalled, 'next() should be called for non-relay paths');
-});
+  await test('cancels the upstream reader when the downstream client disconnects', async () => {
+    let cancelled = false;
+    let read = false;
+    await withFetch(async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (read) return { done: true };
+            read = true;
+            return { done: false, value: Buffer.from('chunk') };
+          },
+          cancel: async () => { cancelled = true; },
+        }),
+      },
+    }), async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
+      const res = new FakeResponse({ onWrite: () => res.emit('close') });
+      await middleware(request({ path: '/relay/chat' }), res, () => {});
+    });
+    assert.ok(cancelled, 'reader.cancel() should run after a downstream close');
+  });
 
-await testAsync('middleware calls next() for root path when prefix not matched', async () => {
-  const mw = createByokRelayMiddleware({ pathPrefix: '/api/ai' });
-  let nextCalled = false;
-  const req = { path: '/', headers: {}, url: '/', method: 'GET', query: {} };
-  await mw(req, {}, () => { nextCalled = true; });
-  assert.ok(nextCalled);
-});
+  await test('createRelayRouter returns callable middleware and enforces its allowlist', async () => {
+    const router = createRelayRouter({ relayUrl: 'https://upstream.test', allowedAppIds: ['allowed'] });
+    assert.strictEqual(typeof router, 'function');
+    const res = new FakeResponse();
+    await router(request({ path: '/chat', url: '/chat' }), res, () => {});
+    assert.strictEqual(res.statusCode, 403);
+    assert.deepStrictEqual(res.body, { error: 'app_id not allowed' });
+  });
 
-test('createByokRelayMiddleware({ allowedAppIds }) accepts array', () => {
-  const mw = createByokRelayMiddleware({ allowedAppIds: ['app1', 'app2'] });
-  assert.strictEqual(typeof mw, 'function');
-});
+  await test('namespaces tokens by relay and app ID, with an explicit storage key override', () => {
+    const values = new Map();
+    const storage = {
+      getItem: (key) => values.get(key) || null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key),
+    };
+    const first = new ByokRelayClient({ relayUrl: 'https://one.test', appId: 'one', storage });
+    const second = new ByokRelayClient({ relayUrl: 'https://one.test', appId: 'two', storage });
+    values.set(first._storageKey, 'token-one');
+    values.set(second._storageKey, 'token-two');
+    assert.strictEqual(new ByokRelayClient({ relayUrl: 'https://one.test', appId: 'one', storage })._token, 'token-one');
+    assert.strictEqual(new ByokRelayClient({ relayUrl: 'https://one.test', appId: 'two', storage })._token, 'token-two');
+    const custom = new ByokRelayClient({ storage, storageKey: 'session-token' });
+    assert.strictEqual(custom._storageKey, 'session-token');
+  });
 
-test('createByokRelayMiddleware({ timeoutMs: 5000 }) respects custom timeout', () => {
-  const mw = createByokRelayMiddleware({ timeoutMs: 5000 });
-  assert.strictEqual(typeof mw, 'function');
-});
+  await test('shares concurrent token registration and sends client requests with its token', async () => {
+    let registrations = 0;
+    let keyRequest;
+    const storage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+    await withFetch(async (url, init = {}) => {
+      if (url.endsWith('/users')) {
+        registrations++;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        return new Response(JSON.stringify({ token: 'token-123' }), { status: 200 });
+      }
+      keyRequest = { url, init };
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }, async () => {
+      const client = new ByokRelayClient({ relayUrl: 'https://upstream.test', appId: 'app', storage });
+      const tokens = await Promise.all([client.ensureToken(), client.ensureToken()]);
+      assert.deepStrictEqual(tokens, ['token-123', 'token-123']);
+      await client.storeKey('openai', 'sk-test');
+    });
+    assert.strictEqual(registrations, 1);
+    assert.strictEqual(keyRequest.url, 'https://upstream.test/keys/openai');
+    assert.strictEqual(keyRequest.init.headers.Authorization, 'Bearer token-123');
+    assert.strictEqual(keyRequest.init.headers['x-app-id'], 'app');
+  });
 
-/* ------------------------------------------------------------------ */
-/* createRelayRouter                                                    */
-/* ------------------------------------------------------------------ */
+  await test('keeps the configured app ID immutable across registration and relay requests', async () => {
+    let request;
+    const storage = { getItem: () => 'token-123', setItem: () => {}, removeItem: () => {} };
+    await withFetch(async (url, init = {}) => {
+      request = { url, init };
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }, async () => {
+      const client = new ByokRelayClient({ relayUrl: 'https://upstream.test', appId: 'configured', storage });
+      await assert.rejects(() => client.register({ appId: 'other' }), /must match the client appId/);
+      await client.relayRequest('/models', { headers: { 'x-app-id': 'other' } });
+    });
+    assert.strictEqual(request.url, 'https://upstream.test/models');
+    assert.strictEqual(request.init.headers['x-app-id'], 'configured');
+  });
 
-test('createRelayRouter() returns an object', () => {
-  const router = createRelayRouter();
-  assert.ok(router !== null && typeof router === 'object');
-});
+  await test('constructs a client without process being available in a browser bundle', () => {
+    const original = global.process;
+    try {
+      global.process = undefined;
+      const client = new ByokRelayClient({ relayUrl: undefined });
+      assert.strictEqual(client._relayUrl, 'https://relay.byokrelay.com');
+    } finally {
+      global.process = original;
+    }
+  });
 
-test('createRelayRouter({ relayUrl }) accepts relayUrl option', () => {
-  const router = createRelayRouter({ relayUrl: 'http://localhost:3000' });
-  assert.ok(router !== null);
-});
+  await test('cancels and releases an SSE reader when iteration ends early', async () => {
+    let cancelled = false;
+    let released = false;
+    const body = {
+      getReader: () => ({
+        read: async () => ({
+          done: false,
+          value: Buffer.from('data: {"choices":[{"delta":{"content":"hi"}}]}\n'),
+        }),
+        cancel: async () => { cancelled = true; },
+        releaseLock: () => { released = true; },
+      }),
+    };
+    const client = new ByokRelayClient({ storage: { getItem: () => 'token', setItem: () => {}, removeItem: () => {} } });
+    await withFetch(async () => ({ ok: true, body }), async () => {
+      for await (const chunk of client.streamChat({ model: 'openai/gpt-4o', messages: [] })) {
+        assert.strictEqual(chunk, 'hi');
+        break;
+      }
+    });
+    assert.ok(cancelled);
+    assert.ok(released);
+  });
 
-test('createRelayRouter({ allowedAppIds }) accepts allowlist', () => {
-  const router = createRelayRouter({ allowedAppIds: ['app1'] });
-  assert.ok(router !== null);
-});
+  console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);
+  if (failed > 0) process.exitCode = 1;
+}
 
-test('createRelayRouter({ timeoutMs: 10000 }) accepts timeout', () => {
-  const router = createRelayRouter({ timeoutMs: 10_000 });
-  assert.ok(router !== null);
-});
-
-/* ------------------------------------------------------------------ */
-/* ByokRelayClient — constructor                                        */
-/* ------------------------------------------------------------------ */
-
-test('ByokRelayClient constructor with no args', () => {
-  const client = new ByokRelayClient();
-  assert.ok(client instanceof ByokRelayClient);
-});
-
-test('ByokRelayClient constructor with relayUrl', () => {
-  const client = new ByokRelayClient({ relayUrl: 'http://localhost:3000' });
-  assert.strictEqual(client._relayUrl, 'http://localhost:3000');
-});
-
-test('ByokRelayClient constructor with appId', () => {
-  const client = new ByokRelayClient({ appId: 'my-express-app' });
-  assert.strictEqual(client._appId, 'my-express-app');
-});
-
-test('ByokRelayClient constructor with custom storage adapter', () => {
-  const store = new Map();
-  const adapter = {
-    getItem    : (k) => store.get(k) || null,
-    setItem    : (k, v) => store.set(k, v),
-    removeItem : (k) => store.delete(k),
-  };
-  const client = new ByokRelayClient({ storage: adapter });
-  assert.strictEqual(client._storage, adapter);
-});
-
-test('ByokRelayClient defaults appId to "default"', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(client._appId, 'default');
-});
-
-/* ------------------------------------------------------------------ */
-/* ByokRelayClient — storage                                           */
-/* ------------------------------------------------------------------ */
-
-test('ByokRelayClient.logout() clears token', () => {
-  const store = new Map();
-  store.set('byok_relay_token', 'tok_abc');
-  const adapter = {
-    getItem    : (k) => store.get(k) || null,
-    setItem    : (k, v) => store.set(k, v),
-    removeItem : (k) => store.delete(k),
-  };
-  const client = new ByokRelayClient({ storage: adapter });
-  assert.strictEqual(client._token, 'tok_abc');
-  client.logout();
-  assert.strictEqual(client._token, null);
-  assert.strictEqual(store.has('byok_relay_token'), false);
-});
-
-/* ------------------------------------------------------------------ */
-/* ByokRelayClient — method API surface                                */
-/* ------------------------------------------------------------------ */
-
-test('ByokRelayClient exposes register method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.register, 'function');
-});
-
-test('ByokRelayClient exposes ensureToken method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.ensureToken, 'function');
-});
-
-test('ByokRelayClient exposes logout method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.logout, 'function');
-});
-
-test('ByokRelayClient exposes storeKey method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.storeKey, 'function');
-});
-
-test('ByokRelayClient exposes listKeys method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.listKeys, 'function');
-});
-
-test('ByokRelayClient exposes deleteKey method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.deleteKey, 'function');
-});
-
-test('ByokRelayClient exposes rotateKey method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.rotateKey, 'function');
-});
-
-test('ByokRelayClient exposes relayRequest method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.relayRequest, 'function');
-});
-
-test('ByokRelayClient exposes chat method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.chat, 'function');
-});
-
-test('ByokRelayClient exposes streamChat async generator', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.streamChat, 'function');
-});
-
-test('ByokRelayClient exposes health method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.health, 'function');
-});
-
-test('ByokRelayClient exposes stats method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.stats, 'function');
-});
-
-test('ByokRelayClient exposes getModels method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.getModels, 'function');
-});
-
-test('ByokRelayClient exposes deleteAccount method', () => {
-  const client = new ByokRelayClient();
-  assert.strictEqual(typeof client.deleteAccount, 'function');
-});
-
-/* ------------------------------------------------------------------ */
-/* Summary                                                             */
-/* ------------------------------------------------------------------ */
-
-console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);
-if (failed > 0) process.exit(1);
-
-} // main
-
-main().catch((err) => { console.error(err); process.exit(1); });
+main().catch((err) => { console.error(err); process.exitCode = 1; });

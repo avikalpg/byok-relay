@@ -29,11 +29,11 @@ app.listen(3000);
 
 Client (browser):
 ```js
-import { ByokRelayClient } from '@byok-relay/express';
+const { ByokRelayClient } = require('@byok-relay/express');
 // or any framework-specific package — they all share the same client API
 
-const client = new ByokRelayClient({ relayUrl: '/relay' });
-const { token } = await client.register({ appId: 'my-app' });
+const client = new ByokRelayClient({ relayUrl: '/relay', appId: 'my-app' });
+const { token } = await client.register();
 await client.storeKey('openai', userApiKey);
 
 const reply = await client.chat({
@@ -67,11 +67,20 @@ app.listen(3000);
 The middleware and router both support SSE streaming out of the box. No special configuration needed — the `ReadableStream` is piped directly to the Express response:
 
 ```js
-// Express route — stream chat completions to the browser
+// Express route — stream chat completions to the browser.
+// Configure session middleware (for example, express-session) before this route
+// because the storage adapter below uses req.session.
+app.use(express.json());
+
 app.post('/chat', async (req, res) => {
-  const client = new ByokRelayClient({ relayUrl: process.env.RELAY_URL });
-  // token comes from req body / session
-  client._token = req.body.token;
+  const client = new ByokRelayClient({
+    relayUrl: process.env.RELAY_URL,
+    storage: {
+      getItem: () => req.session.relayToken || null,
+      setItem: (_key, token) => { req.session.relayToken = token; },
+      removeItem: () => { delete req.session.relayToken; },
+    },
+  });
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -80,7 +89,7 @@ app.post('/chat', async (req, res) => {
     model:    'openai/gpt-4o',
     messages: req.body.messages,
   })) {
-    res.write(`data: ${chunk}\n\n`);
+    res.write(chunk.split(/\r?\n/).map((line) => `data: ${line}`).join('\n') + '\n\n');
   }
   res.end();
 });
@@ -98,7 +107,7 @@ Returns an Express `(req, res, next)` middleware.
 |---|---|---|---|
 | `relayUrl` | string | `process.env.RELAY_URL` → managed relay | Upstream relay base URL |
 | `pathPrefix` | string | `'/relay'` | Path prefix to intercept |
-| `allowedAppIds` | string[] | — | If set, requests with unlisted `x-app-id` header get 403 |
+| `allowedAppIds` | string[] | — | If set, every request must include an allowed `x-app-id` header or `app_id` query value; missing or unlisted IDs get 403. `ByokRelayClient({ appId })` sends the header automatically. |
 | `timeoutMs` | number | `30000` | Upstream fetch timeout |
 
 ### `createRelayRouter(opts?)`
@@ -114,14 +123,15 @@ Plain-JS class. Works in Express route handlers, middleware, and (when bundled) 
 ```js
 const client = new ByokRelayClient({
   relayUrl: string,    // default: process.env.RELAY_URL → managed relay
-  appId:    string,    // default: 'default'
+  appId:    string,    // default: 'default'; sent as x-app-id on client requests
   storage:  object,    // custom { getItem, setItem, removeItem } adapter
+  storageKey: string,  // optional token-storage key; defaults to relay URL + app ID namespace
 });
 ```
 
 | Method | Description |
 |---|---|
-| `register({ appId? })` | Create a relay user; stores token |
+| `register()` | Create a relay user for the client’s configured `appId`; stores token |
 | `ensureToken()` | Register if not yet registered; return token |
 | `logout()` | Clear stored token |
 | `storeKey(provider, apiKey)` | Encrypt and store an API key |
@@ -138,9 +148,18 @@ const client = new ByokRelayClient({
 
 ## Custom storage adapter (cookie / session)
 
-In Express apps you may want to persist the relay token in the session rather than localStorage:
+In Express apps you may want to persist the relay token in the session rather than localStorage. Configure JSON parsing and session middleware (such as [`express-session`](https://www.npmjs.com/package/express-session)) before routes that use this adapter.
 
 ```js
+const session = require('express-session');
+
+app.use(express.json());
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+}));
+
 // Per-request client with session storage
 function relayClientFromSession (req) {
   return new ByokRelayClient({

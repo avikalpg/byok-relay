@@ -50,6 +50,7 @@ function createMinimalFastifyLike () {
   // against a real HTTP server that calls our handler.
   const routes = [];
   const contentParsers = [];
+  const removedContentParsers = [];
 
   function buildReply (res) {
     const reply = {
@@ -128,9 +129,14 @@ function createMinimalFastifyLike () {
     decorate (key, value) {
       if (!this._decorations[key]) this._decorations[key] = value;
     },
-    addContentTypeParser (_pattern, _opts, _fn) {
-      // Stored for reference; our shim handles raw bodies natively
-      contentParsers.push({ _pattern, _fn });
+    addContentTypeParser (pattern, opts, fn) {
+      // Stored for reference; our shim handles raw bodies natively.
+      contentParsers.push({ pattern, opts, fn });
+    },
+    removeContentTypeParser (contentType) {
+      // The real Fastify instance starts with built-in JSON/text parsers. The
+      // shim stores raw buffers already, so record the requested removals.
+      removedContentParsers.push(contentType);
     },
     all (prefix, optsOrHandler, maybeHandler) {
       const handler = typeof optsOrHandler === 'function' ? optsOrHandler : maybeHandler;
@@ -149,6 +155,8 @@ function createMinimalFastifyLike () {
     },
   };
 
+  fastify._contentParsers = contentParsers;
+  fastify._removedContentParsers = removedContentParsers;
   return fastify;
 }
 
@@ -401,6 +409,15 @@ async function runTests () {
     assert.ok(fastify._decorations.byokRelayClient instanceof ByokRelayClient);
   });
 
+  await test('byokRelayPlugin replaces JSON and text parsers with 50 MB raw-body parsers', async () => {
+    const fastify = createMinimalFastifyLike();
+    await byokRelayPlugin(fastify, { relayUrl: upstreamUrl });
+    assert.deepStrictEqual(fastify._removedContentParsers, ['application/json', 'text/plain']);
+    const exactParsers = fastify._contentParsers.filter(({ pattern }) => typeof pattern === 'string');
+    assert.deepStrictEqual(exactParsers.map(({ pattern }) => pattern), ['application/json', 'text/plain']);
+    assert.ok(exactParsers.every(({ opts }) => opts.parseAs === 'buffer' && opts.bodyLimit === 52_428_800));
+  });
+
   await test('byokRelayPlugin respects allowedAppIds — blocks unknown app', async () => {
     const fastify = createMinimalFastifyLike();
     await byokRelayPlugin(fastify, {
@@ -476,6 +493,73 @@ async function runTests () {
     });
     assert.strictEqual(res.status, 403);
     await fastify.close();
+  });
+
+  await test('createRelayRouteHandler removes stale request and response encoding headers', async () => {
+    const originalFetch = global.fetch;
+    const handler = createRelayRouteHandler({ relayUrl: 'http://relay.test' });
+    let forwardedHeaders;
+    global.fetch = async (_url, init) => {
+      forwardedHeaders = init.headers;
+      return new Response('ok', {
+        headers: {
+          'content-encoding': 'gzip',
+          'content-length': '999',
+          'x-upstream': 'kept',
+        },
+      });
+    };
+    const reply = {
+      headers: {},
+      status: null,
+      header (key, value) { this.headers[key] = value; return this; },
+      code (status) { this.status = status; return this; },
+      send () { return this; },
+    };
+    try {
+      await handler({
+        headers: { 'content-length': '1', 'x-client': 'kept' },
+        raw: { url: '/relay/chat' },
+        method: 'POST',
+        params: { '*': 'chat' },
+        body: { message: 'hello' },
+      }, reply);
+      assert.strictEqual(forwardedHeaders['content-length'], undefined);
+      assert.strictEqual(forwardedHeaders['x-client'], 'kept');
+      assert.strictEqual(reply.headers['content-encoding'], undefined);
+      assert.strictEqual(reply.headers['content-length'], undefined);
+      assert.strictEqual(reply.headers['x-upstream'], 'kept');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await test('timeoutMs: 0 is preserved instead of using the default timeout', async () => {
+    const originalFetch = global.fetch;
+    const handler = createRelayRouteHandler({ relayUrl: 'http://relay.test', timeoutMs: 0 });
+    const reply = {
+      status: null,
+      code (status) { this.status = status; return this; },
+      send () { return this; },
+    };
+    global.fetch = async (_url, init) => new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        reject(error);
+      });
+    });
+    try {
+      await handler({
+        headers: {},
+        raw: { url: '/relay/chat' },
+        method: 'GET',
+        params: { '*': 'chat' },
+      }, reply);
+      assert.strictEqual(reply.status, 504);
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   await test('createRelayRouteHandler forwards streaming response', async () => {
