@@ -175,6 +175,36 @@ Machine-readable API spec (for agents/tools/code-gen):
 
 Apache 2.0 — free to self-host or build on top of.
 
+## Express Integration (`@byok-relay/express`)
+
+Express middleware and Router factory for Node.js servers running Express 4+ or 5+.
+`RELAY_URL` stays in `process.env` — the browser only calls your own Express server.
+
+```bash
+npm install @byok-relay/express
+```
+
+```js
+const express = require('express');
+const { createByokRelayMiddleware } = require('@byok-relay/express');
+
+const app = express();
+app.use(createByokRelayMiddleware({ relayUrl: process.env.RELAY_URL }));
+app.listen(3000);
+```
+
+Or mount as an explicit Router:
+
+```js
+const { createRelayRouter } = require('@byok-relay/express');
+app.use('/relay', createRelayRouter({ relayUrl: process.env.RELAY_URL }));
+```
+
+The proxy streams unparsed request bodies unchanged; parsed bodies are serialized before forwarding. With `allowedAppIds`, every relayed request needs an allowed `x-app-id` header or `app_id` query parameter; `ByokRelayClient({ appId })` sends the header automatically.
+
+Also exports `ByokRelayClient` for server-side usage in route handlers with a custom session-storage adapter. Its default token key is scoped to the relay URL and app ID; pass `storageKey` to override it.
+npm: https://www.npmjs.com/package/@byok-relay/express
+
 ## SolidJS Signals (`@byok-relay/solid`)
 
 For SolidJS or SolidStart apps, install the signals package:
@@ -551,6 +581,7 @@ const client = new ByokRelayClient({
 Exported: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`.
 
 npm: pending publication for @byok-relay/expo
+
 
 ## Links
 
