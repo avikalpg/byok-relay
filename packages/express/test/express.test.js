@@ -309,6 +309,21 @@ async function main () {
     assert.strictEqual(keyRequest.init.headers['x-app-id'], 'app');
   });
 
+  await test('keeps the configured app ID immutable across registration and relay requests', async () => {
+    let request;
+    const storage = { getItem: () => 'token-123', setItem: () => {}, removeItem: () => {} };
+    await withFetch(async (url, init = {}) => {
+      request = { url, init };
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }, async () => {
+      const client = new ByokRelayClient({ relayUrl: 'https://upstream.test', appId: 'configured', storage });
+      await assert.rejects(() => client.register({ appId: 'other' }), /must match the client appId/);
+      await client.relayRequest('/models', { headers: { 'x-app-id': 'other' } });
+    });
+    assert.strictEqual(request.url, 'https://upstream.test/models');
+    assert.strictEqual(request.init.headers['x-app-id'], 'configured');
+  });
+
   await test('constructs a client without process being available in a browser bundle', () => {
     const original = global.process;
     try {

@@ -334,8 +334,8 @@ function createRelayRouter (opts = {}) {
  * Works in Express route handlers, middleware, scripts, and (when bundled) browsers.
  *
  * @example
- * const client = new ByokRelayClient({ relayUrl: process.env.RELAY_URL });
- * const { token } = await client.register({ appId: 'my-app' });
+ * const client = new ByokRelayClient({ relayUrl: process.env.RELAY_URL, appId: 'my-app' });
+ * const { token } = await client.register();
  * await client.storeKey('openai', process.env.OPENAI_API_KEY);
  * const reply = await client.chat({ model: 'openai/gpt-4o', messages: [{ role: 'user', content: 'Hi' }] });
  */
@@ -356,17 +356,19 @@ class ByokRelayClient {
   }
 
   _headers (headers = {}) {
-    return Object.assign({ 'x-app-id': this._appId }, headers);
+    return Object.assign({}, headers, { 'x-app-id': this._appId });
   }
 
   /* ---- Token management -------------------------------------------------- */
 
   async register (opts = {}) {
-    const appId = opts.appId || this._appId;
+    if (opts.appId && opts.appId !== this._appId) {
+      throw new Error('register appId must match the client appId');
+    }
     const res = await fetch(`${this._relayUrl}/users`, {
       method:  'POST',
       headers: this._headers({ 'Content-Type': 'application/json' }),
-      body:    JSON.stringify({ app_id: appId }),
+      body:    JSON.stringify({ app_id: this._appId }),
     });
     if (!res.ok) throw new Error(`Register failed: ${res.status}`);
     const data = await res.json();

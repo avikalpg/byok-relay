@@ -67,7 +67,9 @@ app.listen(3000);
 The middleware and router both support SSE streaming out of the box. No special configuration needed — the `ReadableStream` is piped directly to the Express response:
 
 ```js
-// Express route — stream chat completions to the browser
+// Express route — stream chat completions to the browser.
+// Configure session middleware (for example, express-session) before this route
+// because the storage adapter below uses req.session.
 app.use(express.json());
 
 app.post('/chat', async (req, res) => {
@@ -129,7 +131,7 @@ const client = new ByokRelayClient({
 
 | Method | Description |
 |---|---|
-| `register({ appId? })` | Create a relay user; stores token |
+| `register()` | Create a relay user for the client’s configured `appId`; stores token |
 | `ensureToken()` | Register if not yet registered; return token |
 | `logout()` | Clear stored token |
 | `storeKey(provider, apiKey)` | Encrypt and store an API key |
@@ -146,9 +148,18 @@ const client = new ByokRelayClient({
 
 ## Custom storage adapter (cookie / session)
 
-In Express apps you may want to persist the relay token in the session rather than localStorage:
+In Express apps you may want to persist the relay token in the session rather than localStorage. Configure JSON parsing and session middleware (such as [`express-session`](https://www.npmjs.com/package/express-session)) before routes that use this adapter.
 
 ```js
+const session = require('express-session');
+
+app.use(express.json());
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+}));
+
 // Per-request client with session storage
 function relayClientFromSession (req) {
   return new ByokRelayClient({
