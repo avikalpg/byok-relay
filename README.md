@@ -1719,7 +1719,7 @@ const { createRelayRouter } = require('@byok-relay/express');
 app.use('/relay', createRelayRouter({ relayUrl: process.env.RELAY_URL }));
 ```
 
-The proxy streams unparsed request bodies unchanged; if you use `express.json()` or another parser, it serializes the parsed body before forwarding. When `allowedAppIds` is set, every relayed request must supply an allowed `x-app-id` header or `app_id` query parameter.
+The proxy streams unparsed request bodies unchanged; if you use `express.json()` or another parser, it serializes the parsed body before forwarding. When `allowedAppIds` is set, every relayed request must supply an allowed `x-app-id` header or `app_id` query parameter; `ByokRelayClient({ appId })` sends the header automatically.
 
 Also includes `ByokRelayClient` for server-side usage in route handlers — accepts a custom session-storage adapter to persist the relay token in `req.session` instead of `localStorage`. Its default token key is scoped to the relay URL and app ID; use `storageKey` to override it. [Full docs →](packages/express/README.md)
 

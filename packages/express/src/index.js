@@ -41,6 +41,10 @@ const HOP_BY_HOP = new Set([
   'te', 'trailers', 'transfer-encoding', 'upgrade',
 ]);
 
+// Node's fetch transparently decodes response bodies, so these transport
+// headers can no longer describe the bytes sent to the downstream client.
+const STALE_RESPONSE_HEADERS = new Set(['content-encoding', 'content-length']);
+
 /* ========================================================================== */
 /* Utility                                                                     */
 /* ========================================================================== */
@@ -140,7 +144,10 @@ async function _relayResponse (fetchOpts, res, controller, timer) {
 
     res.status(upstreamRes.status);
     for (const [k, v] of upstreamRes.headers.entries()) {
-      if (!HOP_BY_HOP.has(k.toLowerCase())) res.setHeader(k, v);
+      const name = k.toLowerCase();
+      if (!HOP_BY_HOP.has(name) && !STALE_RESPONSE_HEADERS.has(name)) {
+        res.setHeader(k, v);
+      }
     }
 
     if (!upstreamRes.body) {
@@ -156,6 +163,9 @@ async function _relayResponse (fetchOpts, res, controller, timer) {
     }
     if (!downstreamClosed) res.end();
   } catch (err) {
+    // The downstream client has already disconnected. Do not turn that abort
+    // into a timeout response or attempt to write a second response.
+    if (downstreamClosed) return;
     if (!res.headersSent) {
       if (err.name === 'AbortError') {
         return res.status(504).json({ error: 'Upstream relay timed out' });
@@ -212,14 +222,15 @@ function createByokRelayMiddleware (opts = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+    const sentBody = ['GET', 'HEAD'].includes(req.method) ? undefined : body;
     return _relayResponse({
       upstream,
       init: {
         method:  req.method,
         headers,
-        body:    ['GET', 'HEAD'].includes(req.method) ? undefined : body,
+        body:    sentBody,
         signal:  controller.signal,
-        ...(body === req ? { duplex: 'half' } : {}),
+        ...(sentBody === req ? { duplex: 'half' } : {}),
       },
     }, res, controller, timer);
   };
@@ -260,9 +271,10 @@ function createRelayRouter (opts = {}) {
       const r = (req, res, next) => r.handle(req, res, next);
       r.handlers = [];
       r.all = (_path, handler) => { r.handlers.push(handler); return r; };
-      r.handle = (req, res, next) => {
-        for (const h of r.handlers) h(req, res, next);
-      };
+      r.handle = (req, res, next) => r.handlers.reduce(
+        (chain, handler) => chain.then(() => handler(req, res, next)),
+        Promise.resolve(),
+      );
       _router = r;
     }
     _router.all(/.*/, _handler);
@@ -287,14 +299,15 @@ function createRelayRouter (opts = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+    const sentBody = ['GET', 'HEAD'].includes(req.method) ? undefined : body;
     return _relayResponse({
       upstream,
       init: {
         method:  req.method,
         headers,
-        body:    ['GET', 'HEAD'].includes(req.method) ? undefined : body,
+        body:    sentBody,
         signal:  controller.signal,
-        ...(body === req ? { duplex: 'half' } : {}),
+        ...(sentBody === req ? { duplex: 'half' } : {}),
       },
     }, res, controller, timer);
   }
@@ -342,13 +355,17 @@ class ByokRelayClient {
     this._token    = this._storage.getItem(this._storageKey) || null;
   }
 
+  _headers (headers = {}) {
+    return Object.assign({ 'x-app-id': this._appId }, headers);
+  }
+
   /* ---- Token management -------------------------------------------------- */
 
   async register (opts = {}) {
     const appId = opts.appId || this._appId;
     const res = await fetch(`${this._relayUrl}/users`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this._headers({ 'Content-Type': 'application/json' }),
       body:    JSON.stringify({ app_id: appId }),
     });
     if (!res.ok) throw new Error(`Register failed: ${res.status}`);
@@ -378,7 +395,7 @@ class ByokRelayClient {
     const token = await this.ensureToken();
     const res = await fetch(`${this._relayUrl}/keys/${provider}`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
       body:    JSON.stringify({ api_key: apiKey }),
     });
     if (!res.ok) throw new Error(`storeKey failed: ${res.status}`);
@@ -388,7 +405,7 @@ class ByokRelayClient {
   async listKeys () {
     const token = await this.ensureToken();
     const res = await fetch(`${this._relayUrl}/keys`, {
-      headers: { 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Authorization': `Bearer ${token}` }),
     });
     if (!res.ok) throw new Error(`listKeys failed: ${res.status}`);
     return res.json();
@@ -398,7 +415,7 @@ class ByokRelayClient {
     const token = await this.ensureToken();
     const res = await fetch(`${this._relayUrl}/keys/${provider}`, {
       method:  'DELETE',
-      headers: { 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Authorization': `Bearer ${token}` }),
     });
     if (!res.ok) throw new Error(`deleteKey failed: ${res.status}`);
     return res.json();
@@ -408,7 +425,7 @@ class ByokRelayClient {
     const token = await this.ensureToken();
     const res = await fetch(`${this._relayUrl}/keys/${provider}/rotate`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
       body:    JSON.stringify({ api_key: newApiKey }),
     });
     if (!res.ok) throw new Error(`rotateKey failed: ${res.status}`);
@@ -420,7 +437,7 @@ class ByokRelayClient {
   async relayRequest (path, init = {}) {
     const token = await this.ensureToken();
     const url = `${this._relayUrl}${path.startsWith('/') ? '' : '/'}${path}`;
-    const headers = Object.assign({ 'Authorization': `Bearer ${token}` }, init.headers || {});
+    const headers = this._headers(Object.assign({ 'Authorization': `Bearer ${token}` }, init.headers || {}));
     const res = await fetch(url, Object.assign({}, init, { headers }));
     return res;
   }
@@ -433,7 +450,7 @@ class ByokRelayClient {
       : messages, ...extra };
     const res = await fetch(`${this._relayUrl}/relay`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
       body:    JSON.stringify(body),
     });
     if (!res.ok) {
@@ -458,7 +475,7 @@ class ByokRelayClient {
     };
     const res = await fetch(`${this._relayUrl}/relay`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
       body:    JSON.stringify(body),
       signal,
     });
@@ -501,7 +518,7 @@ class ByokRelayClient {
 
   async health (deep = false) {
     const url = `${this._relayUrl}/health${deep ? '?deep=1' : ''}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: this._headers() });
     return res.json();
   }
 
@@ -509,14 +526,14 @@ class ByokRelayClient {
     const token = await this.ensureToken();
     const path  = appId ? `/stats/${appId}` : '/stats';
     const res   = await fetch(`${this._relayUrl}${path}`, {
-      headers: { 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Authorization': `Bearer ${token}` }),
     });
     if (!res.ok) throw new Error(`stats failed: ${res.status}`);
     return res.json();
   }
 
   async getModels () {
-    const res = await fetch(`${this._relayUrl}/models`);
+    const res = await fetch(`${this._relayUrl}/models`, { headers: this._headers() });
     if (!res.ok) throw new Error(`getModels failed: ${res.status}`);
     return res.json();
   }
@@ -525,7 +542,7 @@ class ByokRelayClient {
     const token = await this.ensureToken();
     const res = await fetch(`${this._relayUrl}/users`, {
       method:  'DELETE',
-      headers: { 'Authorization': `Bearer ${token}` },
+      headers: this._headers({ 'Authorization': `Bearer ${token}` }),
     });
     if (!res.ok) throw new Error(`deleteAccount failed: ${res.status}`);
     this.logout();

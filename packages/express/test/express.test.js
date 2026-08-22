@@ -131,11 +131,15 @@ async function main () {
     assert.strictEqual(upstreamInit.headers['content-length'], '8');
   });
 
-  await test('re-serializes parsed bodies without stale host or content-length headers', async () => {
+  await test('re-serializes parsed bodies without stale request or response transport headers', async () => {
     let upstreamInit;
+    let res;
     await withFetch(async (_url, init) => {
       upstreamInit = init;
-      return new Response(null, { status: 204 });
+      return new Response(null, {
+        status: 204,
+        headers: { 'content-encoding': 'gzip', 'content-length': '999', 'x-request-id': 'request-id' },
+      });
     }, async () => {
       const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
       const req = request({
@@ -143,13 +147,16 @@ async function main () {
         headers: { host: 'app.test', 'content-length': '999', 'content-type': 'application/json' },
       });
       req.body = { prompt: 'hello' };
-      const res = new FakeResponse();
+      res = new FakeResponse();
       await middleware(req, res, () => {});
       assert.ok(res.writableEnded, '204 responses should end without a body reader');
     });
     assert.strictEqual(upstreamInit.body, JSON.stringify({ prompt: 'hello' }));
     assert.strictEqual(upstreamInit.headers.host, undefined);
     assert.strictEqual(upstreamInit.headers['content-length'], undefined);
+    assert.strictEqual(res.headers['content-encoding'], undefined);
+    assert.strictEqual(res.headers['content-length'], undefined);
+    assert.strictEqual(res.headers['x-request-id'], 'request-id');
   });
 
   await test('handles a HEAD response with no upstream body', async () => {
@@ -199,6 +206,33 @@ async function main () {
       assert.strictEqual(res.statusCode, 504);
       assert.deepStrictEqual(res.body, { error: 'Upstream relay timed out' });
     });
+  });
+
+  await test('does not report a timeout when a downstream disconnect aborts a pending read', async () => {
+    let cancelRead;
+    let cancelled = false;
+    const res = new FakeResponse();
+    await withFetch(async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: () => new Promise((_resolve, reject) => { cancelRead = reject; }),
+          cancel: async () => { cancelled = true; },
+        }),
+      },
+    }), async () => {
+      const middleware = createByokRelayMiddleware({ relayUrl: 'https://upstream.test' });
+      const pending = middleware(request({ path: '/relay/chat' }), res, () => {});
+      await new Promise((resolve) => setImmediate(resolve));
+      res.emit('close');
+      cancelRead(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      await pending;
+    });
+    assert.ok(cancelled, 'reader.cancel() should run after a downstream close');
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body, undefined);
+    assert.strictEqual(res.writableEnded, false);
   });
 
   await test('cancels the upstream reader when the downstream client disconnects', async () => {
@@ -272,6 +306,7 @@ async function main () {
     assert.strictEqual(registrations, 1);
     assert.strictEqual(keyRequest.url, 'https://upstream.test/keys/openai');
     assert.strictEqual(keyRequest.init.headers.Authorization, 'Bearer token-123');
+    assert.strictEqual(keyRequest.init.headers['x-app-id'], 'app');
   });
 
   await test('constructs a client without process being available in a browser bundle', () => {
