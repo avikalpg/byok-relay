@@ -1724,6 +1724,33 @@ The proxy streams unparsed request bodies unchanged; if you use `express.json()`
 Also includes `ByokRelayClient` for server-side usage in route handlers — accepts a custom session-storage adapter to persist the relay token in `req.session` instead of `localStorage`. Its default token key is scoped to the relay URL and app ID; use `storageKey` to override it. [Full docs →](packages/express/README.md)
 
 
+## Fastify integration (`@byok-relay/fastify`)
+
+For **Node.js servers running Fastify 4+ or 5+**. `RELAY_URL` stays in `process.env` — the browser only calls your own Fastify server:
+
+```bash
+npm install @byok-relay/fastify
+```
+
+```js
+const Fastify = require('fastify');
+const { byokRelayPlugin } = require('@byok-relay/fastify');
+
+const fastify = Fastify({ logger: true });
+// Register before your routes — RELAY_URL is server-only, never in the browser bundle
+await fastify.register(byokRelayPlugin, { relayUrl: process.env.RELAY_URL });
+await fastify.listen({ port: 3000 });
+```
+
+Or use the standalone route handler factory:
+
+```js
+const { createRelayRouteHandler } = require('@byok-relay/fastify');
+fastify.all('/relay/*', createRelayRouteHandler({ relayUrl: process.env.RELAY_URL }));
+```
+
+The plugin decorates `fastify.byokRelayClient` for server-side usage in other routes. Includes `ByokRelayClient` with custom session-storage adapter support. [Full docs →](packages/fastify/README.md)
+
 ## How it works
 
 ```text

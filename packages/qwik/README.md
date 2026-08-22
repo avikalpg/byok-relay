@@ -252,8 +252,8 @@ const client = new ByokRelayClient({
 });
 ```
 
-**Browser:** defaults to `localStorage`.  
-**SSR / Node:** defaults to in-memory map.  
+**Browser:** defaults to `localStorage`.
+**SSR / Node:** defaults to in-memory map.
 **Custom:** pass `storage` for cookie-session or server-side persistence.
 
 | Method | Description |
