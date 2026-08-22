@@ -1,0 +1,46 @@
+{
+  "name": "@byok-relay/fastify",
+  "version": "1.0.0",
+  "description": "Fastify plugin and route factory for BYOK AI relay — proxy AI provider requests server-side while users bring their own API keys",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/fastify.test.js"
+  },
+  "keywords": [
+    "fastify",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "plugin",
+    "node",
+    "frontend",
+    "no-backend",
+    "self-hosted"
+  ],
+  "peerDependencies": {
+    "fastify": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "fastify": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/fastify"
+  },
+  "homepage": "https://byokrelay.com"
+}
