@@ -131,24 +131,31 @@ npm install @byok-relay/react
 ```
 
 ```jsx
+import { useState } from 'react';
 import { useChat, useStreamingChat, useByokRelay } from '@byok-relay/react';
 
-// Non-streaming chat
-const { messages, sendMessage, isLoading } = useChat({
-  appId: 'my-app',
-  provider: 'openai',   // or 'anthropic', 'groq', 'mistral', 'openrouter'
-  model: 'gpt-4o',
-  // relayUrl defaults to https://relay.byokrelay.com
-});
+// Choose one chat component. These Hooks are alternatives, not calls to combine.
+export function ChatExample() {
+  const { messages, sendMessage, isLoading } = useChat({
+    appId: 'my-app', provider: 'openai', model: 'gpt-4o',
+  });
+  return <button disabled={isLoading} onClick={() => sendMessage('Hello')}>{messages.length} messages</button>;
+}
 
-// Streaming chat (SSE)
-const { messages, sendMessage, streamingContent, isStreaming } = useStreamingChat({
-  appId: 'my-app', provider: 'anthropic', model: 'claude-3-5-sonnet-20241022'
-});
+export function StreamingChatExample() {
+  const { messages, sendMessage, streamingContent, isStreaming } = useStreamingChat({
+    appId: 'my-app', provider: 'anthropic', model: 'claude-3-5-sonnet-20241022',
+  });
+  return <button disabled={isStreaming} onClick={() => sendMessage('Hello')}>{messages.length}: {streamingContent}</button>;
+}
 
-// Key management UI
-const { storeKey, isRegistered } = useByokRelay({ appId: 'my-app' });
-await storeKey('openai', userApiKey);
+export function KeyManagement() {
+  const [apiKey, setApiKey] = useState('');
+  const { storeKey, isRegistered } = useByokRelay({ appId: 'my-app' });
+  return <><input value={apiKey} onChange={e => setApiKey(e.target.value)} />
+    <button onClick={() => storeKey('openai', apiKey)} disabled={!apiKey}>Store key</button>
+    <span>{isRegistered ? 'Registered' : 'Not registered'}</span></>;
+}
 ```
 
 Hooks: `useByokRelay` (token + key CRUD), `useChat`, `useStreamingChat`, `useRelayHealth`.
@@ -201,6 +208,21 @@ for await (const chunk of svc.streamChat({ model: 'anthropic/claude-opus-4-5', m
 ```
 
 npm: https://www.npmjs.com/package/@byok-relay/nest
+
+Use `ByokRelayModule.forRootAsync` when configuration is supplied by another
+provider. It accepts `useFactory` with `inject`, `useClass`, or `useExisting`:
+```js
+ByokRelayModule.forRootAsync({
+  imports: [ConfigModule],
+  useFactory: config => ({ relayUrl: config.get('RELAY_URL'), allowedAppIds: ['my-app'] }),
+  inject: [ConfigService],
+  global: true,
+});
+```
+`BYOK_RELAY_CONFIG` is the injectable configuration token. Its supported options
+are `relayUrl`, `appId`, `allowedAppIds`, `pathPrefix` (default `/relay`),
+`timeoutMs` (default 30000), and `global`. For a custom NestJS server or raw
+Node server, use `createRelayHandler({ relayUrl, allowedAppIds, pathPrefix, timeoutMs })`.
 
 ## License
 

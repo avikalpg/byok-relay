@@ -159,7 +159,7 @@ async function _proxyNode ({ relayUrl, subPath, req, res, timeoutMs }) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) { res.end(); break; }
-          res.write(value);
+          if (!res.write(value)) await new Promise(resolve => res.once('drain', resolve));
         }
       };
       await pump();
@@ -239,14 +239,16 @@ class ByokRelayMiddleware {
     const url = req.url || '';
 
     // Only intercept paths under our prefix; call next() for everything else
-    if (!url.startsWith(this._pathPrefix)) {
+    const pathMatchesPrefix = url === this._pathPrefix ||
+      url.startsWith(`${this._pathPrefix}/`) || url.startsWith(`${this._pathPrefix}?`);
+    if (!pathMatchesPrefix) {
       return next();
     }
 
     // Optional app_id allowlist
     const appId = (req.headers && req.headers['x-app-id']) ||
       (url.includes('app_id=') ? new URL(url, 'http://localhost').searchParams.get('app_id') : null);
-    if (this._allowedApps && appId && !this._allowedApps.has(appId)) {
+    if (this._allowedApps && (!appId || !this._allowedApps.has(appId))) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'app_id not allowed' }));
     }
@@ -277,8 +279,8 @@ try {
   ByokRelayMiddleware.prototype.use = originalUse; // preserve
 
   // Mark constructor parameter as optional injection token
-  Inject(BYOK_RELAY_CONFIG)(ByokRelayMiddleware.prototype, undefined, 0);
-  Optional()(ByokRelayMiddleware.prototype, undefined, 0);
+  Inject(BYOK_RELAY_CONFIG)(ByokRelayMiddleware, undefined, 0);
+  Optional()(ByokRelayMiddleware, undefined, 0);
 } catch (_) {
   // @nestjs/common not installed — ByokRelayMiddleware still works standalone
 }
@@ -335,7 +337,7 @@ class ByokRelayService {
 try {
   const { Injectable, Inject } = require('@nestjs/common');
   Injectable()(ByokRelayService);
-  Inject(BYOK_RELAY_CONFIG)(ByokRelayService.prototype, undefined, 0);
+  Inject(BYOK_RELAY_CONFIG)(ByokRelayService, undefined, 0);
 } catch (_) { /* NestJS not installed — works standalone */ }
 
 /* ========================================================================== */
@@ -467,13 +469,15 @@ function createRelayHandler (opts = {}) {
     const url = req.url || '';
 
     const appId = (req.headers && req.headers['x-app-id']) || null;
-    if (allowedApps && appId && !allowedApps.has(appId)) {
+    if (allowedApps && (!appId || !allowedApps.has(appId))) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'app_id not allowed' }));
     }
 
     // Strip the pathPrefix to derive the upstream sub-path
-    const subPath = url.startsWith(pathPrefix)
+    const pathMatchesPrefix = url === pathPrefix ||
+      url.startsWith(`${pathPrefix}/`) || url.startsWith(`${pathPrefix}?`);
+    const subPath = pathMatchesPrefix
       ? url.slice(pathPrefix.length) || '/'
       : url;
 

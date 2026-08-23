@@ -34,7 +34,7 @@ module.exports = { AppModule };
 
 ```js
 // app.module.js — also apply middleware in one step
-const { Module, NestModule, MiddlewareConsumer } = require('@nestjs/common');
+const { Module } = require('@nestjs/common');
 const { ByokRelayModule, ByokRelayMiddleware }   = require('@byok-relay/nest');
 
 class AppModule {
@@ -47,7 +47,6 @@ class AppModule {
 Module({
   imports: [ByokRelayModule.forRoot({ relayUrl: process.env.RELAY_URL })],
 })(AppModule);
-NestModule.call(AppModule.prototype);   // TypeScript interface — omit in TS projects
 module.exports = { AppModule };
 ```
 

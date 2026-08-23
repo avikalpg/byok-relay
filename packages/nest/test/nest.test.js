@@ -224,6 +224,17 @@ await test('calls next() for non-relay paths', async () => {
   assert.ok(nextCalled, 'next() should be called for non-relay path');
 });
 
+await test('calls next() for paths that only share the relay prefix', async () => {
+  const mw = new ByokRelayMiddleware({ relayUrl: 'http://localhost:9999', pathPrefix: '/relay' });
+
+  let nextCalled = false;
+  const req = { url: '/relayer/health', method: 'GET', headers: {} };
+  const res = { writeHead: () => {}, end: () => {} };
+  await mw.use(req, res, () => { nextCalled = true; });
+
+  assert.ok(nextCalled, 'next() should be called when the prefix is not a path segment');
+});
+
 await test('returns 403 for disallowed app_id', async () => {
   const mw = new ByokRelayMiddleware({
     relayUrl:      'http://localhost:9999',
@@ -246,6 +257,20 @@ await test('returns 403 for disallowed app_id', async () => {
   assert.strictEqual(statusCode, 403);
   const parsed = JSON.parse(responseBody);
   assert.ok(parsed.error);
+});
+
+await test('returns 403 for a missing app_id when an allowlist is configured', async () => {
+  const mw = new ByokRelayMiddleware({
+    relayUrl:      'http://localhost:9999',
+    pathPrefix:    '/relay',
+    allowedAppIds: ['allowed-app'],
+  });
+
+  let statusCode = null;
+  const req = { url: '/relay/users', method: 'POST', headers: {} };
+  const res = { writeHead: (code) => { statusCode = code; }, end: () => {} };
+  await mw.use(req, res, () => {});
+  assert.strictEqual(statusCode, 403);
 });
 
 await test('allows request when app_id is in allowlist', async () => {
@@ -412,6 +437,22 @@ await test('standalone handler returns 403 for disallowed app_id', async () => {
       method:  'POST',
       headers: { 'x-app-id': 'bad-app' },
     });
+    assert.strictEqual(r.status, 403);
+  } finally {
+    server.close();
+  }
+});
+
+await test('standalone handler returns 403 for a missing app_id when an allowlist is configured', async () => {
+  const handler = createRelayHandler({
+    relayUrl:      'http://localhost:9999',
+    pathPrefix:    '/relay',
+    allowedAppIds: ['ok-app'],
+  });
+  const { server, port } = await startServer(handler);
+
+  try {
+    const r = await httpRequest({ host: '127.0.0.1', port, path: '/relay/users', method: 'POST' });
     assert.strictEqual(r.status, 403);
   } finally {
     server.close();
@@ -671,10 +712,17 @@ await test('static configure sets _staticConfig', () => {
 });
 
 await test('middleware uses static config when no DI config provided', () => {
-  ByokRelayMiddleware.configure({ relayUrl: 'http://static-relay.example.com' });
-  const mw = new ByokRelayMiddleware(); // no DI config
-  assert.ok(mw._relayUrl.includes('static-relay') || mw._relayUrl.includes('relay.byokrelay'), 'should use static or env config');
-  ByokRelayMiddleware.configure(null);
+  const previousRelayUrl = process.env.RELAY_URL;
+  delete process.env.RELAY_URL;
+  try {
+    ByokRelayMiddleware.configure({ relayUrl: 'http://static-relay.example.com' });
+    const mw = new ByokRelayMiddleware(); // no DI config
+    assert.strictEqual(mw._relayUrl, 'http://static-relay.example.com');
+  } finally {
+    ByokRelayMiddleware.configure(null);
+    if (previousRelayUrl === undefined) delete process.env.RELAY_URL;
+    else process.env.RELAY_URL = previousRelayUrl;
+  }
 });
 
 /* ========================================================================== */
