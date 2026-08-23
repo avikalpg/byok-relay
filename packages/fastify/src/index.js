@@ -99,8 +99,26 @@ function _buildUpstreamUrl (relayUrl, subPath, rawUrl) {
 }
 
 /** Keep browser-persisted tokens isolated by relay endpoint and application. */
+const LEGACY_TOKEN_STORAGE_KEY = 'byok_relay_token';
+
 function _tokenStorageKey (relayUrl, appId) {
   return `byok_relay_token:${encodeURIComponent(relayUrl.replace(/\/$/, ''))}:${encodeURIComponent(appId)}`;
+}
+
+/**
+ * Move the pre-scoped token into the active relay/app scope exactly once.
+ * An existing scoped token always wins, so newer clients never overwrite it.
+ */
+function _loadStoredToken (storage, scopedKey) {
+  const scopedToken = storage.getItem(scopedKey);
+  if (scopedToken) return scopedToken;
+
+  const legacyToken = storage.getItem(LEGACY_TOKEN_STORAGE_KEY);
+  if (!legacyToken) return null;
+
+  storage.setItem(scopedKey, legacyToken);
+  storage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
+  return legacyToken;
 }
 
 /**
@@ -326,7 +344,7 @@ class ByokRelayClient {
     this._appId    = opts.appId || 'default';
     this._storage  = opts.storage || _defaultStorage();
     this._tokenStorageKey = _tokenStorageKey(this._relayUrl, this._appId);
-    this._token    = this._storage.getItem(this._tokenStorageKey) || null;
+    this._token    = _loadStoredToken(this._storage, this._tokenStorageKey);
   }
 
   /* ---- Token management -------------------------------------------------- */
@@ -344,6 +362,7 @@ class ByokRelayClient {
     this._tokenStorageKey = _tokenStorageKey(this._relayUrl, this._appId);
     this._token = data.token;
     this._storage.setItem(this._tokenStorageKey, this._token);
+    this._storage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
     return data;
   }
 
@@ -355,6 +374,7 @@ class ByokRelayClient {
   logout () {
     this._token = null;
     this._storage.removeItem(this._tokenStorageKey);
+    this._storage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
   }
 
   /* ---- Key management ---------------------------------------------------- */

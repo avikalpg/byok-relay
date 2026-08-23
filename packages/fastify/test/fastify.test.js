@@ -203,6 +203,43 @@ async function runTests () {
     assert.strictEqual(client._storage, adapter);
   });
 
+  await test('migrates a legacy token into the current scoped key', () => {
+    const store = new Map([['byok_relay_token', 'legacy-token']]);
+    const adapter = {
+      getItem    : (k) => store.get(k) || null,
+      setItem    : (k, v) => store.set(k, v),
+      removeItem : (k) => store.delete(k),
+    };
+    const client = new ByokRelayClient({
+      relayUrl: 'http://relay.test',
+      appId: 'migrated-app',
+      storage: adapter,
+    });
+    assert.strictEqual(client._token, 'legacy-token');
+    assert.strictEqual(store.get(client._tokenStorageKey), 'legacy-token');
+    assert.strictEqual(store.has('byok_relay_token'), false);
+  });
+
+  await test('register clears a remaining legacy token after persisting the scoped token', async () => {
+    const store = new Map();
+    const adapter = {
+      getItem    : (k) => store.get(k) || null,
+      setItem    : (k, v) => store.set(k, v),
+      removeItem : (k) => store.delete(k),
+    };
+    const client = new ByokRelayClient({ storage: adapter });
+    store.set('byok_relay_token', 'legacy-token');
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({ ok: true, json: async () => ({ token: 'fresh-token' }) });
+    try {
+      await client.register();
+      assert.strictEqual(store.get(client._tokenStorageKey), 'fresh-token');
+      assert.strictEqual(store.has('byok_relay_token'), false);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   await test('logout clears token', () => {
     const store = new Map();
     const adapter = {
@@ -213,9 +250,11 @@ async function runTests () {
     const client = new ByokRelayClient({ storage: adapter });
     client._token = 'test-tok';
     store.set(client._tokenStorageKey, 'test-tok');
+    store.set('byok_relay_token', 'legacy-token');
     client.logout();
     assert.strictEqual(client._token, null);
     assert.strictEqual(store.has(client._tokenStorageKey), false);
+    assert.strictEqual(store.has('byok_relay_token'), false);
   });
 
   // ---- ByokRelayClient integration (against mock relay) -------------------
