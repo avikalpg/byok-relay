@@ -372,6 +372,48 @@ await test('cancels upstream when response closes synchronously during backpress
   }
 });
 
+await test('cancels upstream when response closes during a pending read after a successful write', async () => {
+  const originalFetch = global.fetch;
+  let cancelled = false;
+  let readCount = 0;
+  global.fetch = async () => ({
+    status: 200,
+    headers: new Map(),
+    body: {
+      getReader: () => ({
+        read: () => {
+          readCount++;
+          if (readCount === 1) return Promise.resolve({ done: false, value: Buffer.from('chunk') });
+          return new Promise(() => {});
+        },
+        cancel: async () => { cancelled = true; },
+      }),
+    },
+  });
+
+  const req = { url: '/relay/stream', method: 'GET', headers: {} };
+  const res = new EventEmitter();
+  res.writeHead = () => {};
+  res.write = () => true;
+  res.end = () => {};
+  const mw = new ByokRelayMiddleware({ relayUrl: 'http://relay.example.com', pathPrefix: '/relay' });
+
+  try {
+    const proxy = mw.use(req, res, () => { throw new Error('next should not be called'); });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(readCount, 2, 'second read should be pending after the successful write');
+    res.emit('close');
+    const completed = await Promise.race([
+      proxy.then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.strictEqual(completed, true, 'proxy should stop after downstream close during a pending read');
+    assert.ok(cancelled, 'upstream reader should be cancelled after downstream close');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 await test('returns 504 on upstream timeout', async () => {
   // Create a server that never responds
   const slowServer = http.createServer(() => { /* never responds */ });

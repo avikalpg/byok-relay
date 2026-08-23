@@ -156,38 +156,53 @@ async function _proxyNode ({ relayUrl, subPath, req, res, timeoutMs }) {
     if (upstreamRes.body) {
       const reader  = upstreamRes.body.getReader();
       const pump = async () => {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) { res.end(); break; }
-          let removeBackpressureListeners;
-          const outcome = new Promise(resolve => {
-            const settle = (event) => {
-              res.removeListener('drain', onDrain);
-              res.removeListener('close', onClose);
-              res.removeListener('error', onError);
-              resolve(event);
-            };
-            const onDrain = () => settle('drain');
-            const onClose = () => settle('close');
-            const onError = () => settle('error');
-            res.once('drain', onDrain);
-            res.once('close', onClose);
-            res.once('error', onError);
-            removeBackpressureListeners = () => {
-              res.removeListener('drain', onDrain);
-              res.removeListener('close', onClose);
-              res.removeListener('error', onError);
-            };
-          });
-          if (!res.write(value)) {
-            const result = await outcome;
-            if (result !== 'drain') {
-              try { await reader.cancel(); } catch (_) {}
-              return;
+        let terminated = false;
+        let resolveTermination;
+        let pendingDrainListener;
+        const termination = new Promise(resolve => { resolveTermination = resolve; });
+        const terminate = () => {
+          if (terminated) return;
+          terminated = true;
+          try { Promise.resolve(reader.cancel()).catch(() => {}); } catch (_) {}
+          resolveTermination();
+        };
+        const onClose = () => terminate();
+        const onError = () => terminate();
+        res.once('close', onClose);
+        res.once('error', onError);
+
+        try {
+          while (!terminated) {
+            const readOutcome = await Promise.race([
+              reader.read().then(result => ({ type: 'read', result })),
+              termination.then(() => ({ type: 'terminated' })),
+            ]);
+            if (readOutcome.type === 'terminated' || terminated) return;
+            const { done, value } = readOutcome.result;
+            if (done) { res.end(); break; }
+
+            const drained = new Promise(resolve => {
+              pendingDrainListener = () => {
+                pendingDrainListener = undefined;
+                resolve();
+              };
+            });
+            res.once('drain', pendingDrainListener);
+            if (!res.write(value)) {
+              const writeOutcome = await Promise.race([
+                drained.then(() => 'drain'),
+                termination.then(() => 'terminated'),
+              ]);
+              if (writeOutcome === 'terminated') return;
+            } else {
+              res.removeListener('drain', pendingDrainListener);
+              pendingDrainListener = undefined;
             }
-          } else {
-            removeBackpressureListeners();
           }
+        } finally {
+          if (pendingDrainListener) res.removeListener('drain', pendingDrainListener);
+          res.removeListener('close', onClose);
+          res.removeListener('error', onError);
         }
       };
       await pump();
