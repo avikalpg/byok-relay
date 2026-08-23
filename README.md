@@ -2492,6 +2492,50 @@ Two patterns, one integration:
 
 byok-relay handles both patterns today.
 
+## NestJS integration (`@byok-relay/nest`)
+
+```bash
+npm install @byok-relay/nest
+```
+
+```js
+// app.module.js
+const { Module }                            = require('@nestjs/common');
+const { ByokRelayModule, ByokRelayMiddleware } = require('@byok-relay/nest');
+
+class AppModule {
+  configure(consumer) {
+    consumer.apply(ByokRelayMiddleware).forRoutes('/relay');
+  }
+}
+Module({
+  imports: [ByokRelayModule.forRoot({ relayUrl: process.env.RELAY_URL })],
+})(AppModule);
+module.exports = { AppModule };
+```
+
+Inject `ByokRelayService` in any provider:
+```js
+const svc = /* injected ByokRelayService */;
+await svc.storeKey('openai', userKey);
+const reply = await svc.chat({ model: 'openai/gpt-4o', messages });
+// Streaming:
+for await (const chunk of svc.streamChat({ model: 'anthropic/claude-opus-4-5', messages })) {
+  res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+}
+```
+
+Async config with `@nestjs/config`:
+```js
+ByokRelayModule.forRootAsync({
+  imports:    [ConfigModule],
+  useFactory: (config) => ({ relayUrl: config.get('RELAY_URL') }),
+  inject:     [ConfigService],
+})
+```
+
+Key differentiator vs `@byok-relay/express`: NestJS DI module system (`ByokRelayModule.forRoot`/`forRootAsync`); `ByokRelayService` injectable into any provider, guard, or interceptor; `ByokRelayMiddleware` integrates with NestJS `MiddlewareConsumer`; `createRelayHandler` for custom/hybrid NestJS applications.
+
 ## Trade-offs
 
 - **You hold the encrypted keys** — users trust your server. Mitigate with a cloud KMS-backed store for higher assurance.
