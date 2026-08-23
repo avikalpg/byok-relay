@@ -1,7 +1,7 @@
 {
-  "name": "@byok-relay/fastify",
+  "name": "@byok-relay/elysia",
   "version": "1.0.0",
-  "description": "Fastify plugin and route factory for BYOK AI relay — proxy AI provider requests server-side while users bring their own API keys",
+  "description": "Elysia plugin and route factory for BYOK AI relay — proxy AI provider requests server-side while users bring their own API keys",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js"
@@ -11,10 +11,11 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node test/fastify.test.js"
+    "test": "node test/elysia.test.js"
   },
   "keywords": [
-    "fastify",
+    "elysia",
+    "bun",
     "byok",
     "ai-gateway",
     "llm",
@@ -23,16 +24,17 @@
     "relay",
     "byok-relay",
     "plugin",
-    "node",
     "frontend",
     "no-backend",
-    "self-hosted"
+    "self-hosted",
+    "sse",
+    "streaming"
   ],
   "peerDependencies": {
-    "fastify": ">=4.0.0 <6.0.0"
+    "elysia": ">=1.0.0 <2.0.0"
   },
   "peerDependenciesMeta": {
-    "fastify": {
+    "elysia": {
       "optional": true
     }
   },
@@ -40,7 +42,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/avikalpg/byok-relay.git",
-    "directory": "packages/fastify"
+    "directory": "packages/elysia"
   },
   "homepage": "https://byokrelay.com"
 }

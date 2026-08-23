@@ -1,29 +1,29 @@
 /**
- * @byok-relay/fastify
- * Fastify plugin and route factory for BYOK AI relay.
- * Works on any Node.js server running Fastify 4+.
+ * @byok-relay/elysia
+ * Elysia plugin and route factory for BYOK AI relay.
+ * Works on Bun (native) and Node.js servers running Elysia 1.x.
  *
  * Three distinct concerns:
  *
- *   1. Fastify plugin (byokRelayPlugin)
- *      A standard Fastify plugin that registers a catch-all route under a
- *      configurable prefix and decorates the Fastify instance with a
- *      `byokRelayClient` helper. RELAY_URL comes from `process.env.RELAY_URL`
- *      so it never leaks into the browser bundle.
+ *   1. Elysia plugin (byokRelayPlugin)
+ *      A composable Elysia plugin built with `new Elysia()` that registers a
+ *      catch-all route under a configurable prefix. RELAY_URL comes from
+ *      `process.env.RELAY_URL` (or `Bun.env.RELAY_URL`) so it never leaks
+ *      into the browser bundle. Attach to your app with `.use(byokRelayPlugin(...))`.
  *
- *   2. Standalone route handler (createRelayRouteHandler)
- *      Returns a Fastify route handler function for manual registration via
- *      `fastify.all('/relay/*', createRelayRouteHandler(...))`. Useful when
- *      you want full control over the route definition.
+ *   2. Standalone route handler factory (createRelayRouteHandler)
+ *      Returns an Elysia context handler function for manual route registration:
+ *        app.all('/relay/*', createRelayRouteHandler({ ... }))
+ *      Useful when you want full control over route grouping or guards.
  *
  *   3. ByokRelayClient plain-JS class
- *      Framework-agnostic client for use in Fastify route handlers, hooks,
- *      and scripts. In-memory storage on Node.js; localStorage in browsers
- *      (when bundled); custom storage adapter supported.
+ *      Framework-agnostic client for use in Elysia lifecycle hooks, route
+ *      handlers, and Bun scripts. In-memory storage on Bun/Node; localStorage
+ *      when bundled for the browser; custom storage adapter supported.
  *
  * Runtime requirements:
- *   - Node.js 18+ (native fetch) OR Node <18 with a fetch polyfill
- *   - Fastify 4+ peer dep (optional — handler factory works without it)
+ *   - Bun 1.0+ (preferred) OR Node.js 18+ with Elysia ≥ 1.0
+ *   - native fetch (Bun built-in / Node 18+)
  */
 
 'use strict';
@@ -32,25 +32,21 @@
 /* Constants                                                                   */
 /* ========================================================================== */
 
-const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
+const DEFAULT_RELAY_URL  = 'https://relay.byokrelay.com';
 const DEFAULT_PATH_PREFIX = '/relay';
 
-/** Headers that must not be forwarded upstream or downstream. */
+/** Headers that must not be forwarded upstream (hop-by-hop). */
 const HOP_BY_HOP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-  'te', 'trailers', 'transfer-encoding', 'upgrade', 'content-length',
+  'te', 'trailers', 'transfer-encoding', 'upgrade',
 ]);
 const REQUEST_HEADERS_TO_STRIP = new Set([...HOP_BY_HOP, 'cookie', 'host']);
-
-// fetch transparently decompresses upstream responses, so these wire-level
-// headers may no longer describe the body delivered to Fastify.
-const RESPONSE_HEADERS_TO_STRIP = new Set([...HOP_BY_HOP, 'content-encoding']);
 
 /* ========================================================================== */
 /* Utility                                                                     */
 /* ========================================================================== */
 
-/** True only when running in a browser context (not Node.js). */
+/** True only in a browser context. */
 function _isClient () {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
 }
@@ -70,247 +66,254 @@ function _safeRemove (key) {
   try { window.localStorage.removeItem(key); } catch (_) {}
 }
 
-/** Strip hop-by-hop and origin-specific headers; return a plain object. */
+/** Strip hop-by-hop and origin-specific headers from a Headers / plain-object input. */
 function _filterHeaders (headers) {
   const out = {};
-  for (const [k, v] of Object.entries(headers)) {
+  const entries = typeof headers.entries === 'function'
+    ? [...headers.entries()]
+    : Object.entries(headers);
+  for (const [k, v] of entries) {
     if (!REQUEST_HEADERS_TO_STRIP.has(k.toLowerCase())) out[k] = v;
   }
   return out;
 }
 
-/** Resolve the upstream relay URL (env → option → managed default). */
+/** Resolve relay URL: explicit option → env var → managed default. */
 function _resolveRelayUrl (opt) {
-  return opt || process.env.RELAY_URL || DEFAULT_RELAY_URL;
+  // Support both Bun.env and process.env
+  const envUrl = (typeof Bun !== 'undefined' && Bun.env
+    ? Bun.env.RELAY_URL
+    : undefined) || (typeof process !== 'undefined' && process.env
+    ? process.env.RELAY_URL
+    : undefined);
+  return opt || envUrl || DEFAULT_RELAY_URL;
 }
 
-/* ========================================================================== */
-/* Core proxy handler (shared by plugin + standalone factory)                 */
-/* ========================================================================== */
-
 /**
- * Build the upstream URL from a Fastify request.
- * Fastify wildcard routes expose the path as `request.params['*']`.
- * The subPath derived here is relative to the relay base URL.
+ * Build the upstream URL for a given sub-path and raw URL.
+ * @param {string} relayUrl  – upstream relay base URL
+ * @param {string} subPath   – path portion after the prefix
+ * @param {string} rawUrl    – original request URL (for query-string forwarding)
  */
 function _buildUpstreamUrl (relayUrl, subPath, rawUrl) {
-  const qs = rawUrl && rawUrl.includes('?') ? '?' + rawUrl.split('?').slice(1).join('?') : '';
-  return `${relayUrl.replace(/\/$/, '')}/${subPath.replace(/^\//, '')}${qs}`;
+  const qs = rawUrl && rawUrl.includes('?')
+    ? '?' + rawUrl.split('?').slice(1).join('?')
+    : '';
+  return `${relayUrl.replace(/\/$/, '')}/${(subPath || '').replace(/^\//, '')}${qs}`;
 }
 
 /** Keep browser-persisted tokens isolated by relay endpoint and application. */
-const LEGACY_TOKEN_STORAGE_KEY = 'byok_relay_token';
-
 function _tokenStorageKey (relayUrl, appId) {
   return `byok_relay_token:${encodeURIComponent(relayUrl.replace(/\/$/, ''))}:${encodeURIComponent(appId)}`;
 }
 
-/**
- * Move the pre-scoped token into the active relay/app scope exactly once.
- * An existing scoped token always wins, so newer clients never overwrite it.
- */
-function _loadStoredToken (storage, scopedKey) {
-  const scopedToken = storage.getItem(scopedKey);
-  if (scopedToken) return scopedToken;
-
-  const legacyToken = storage.getItem(LEGACY_TOKEN_STORAGE_KEY);
-  if (!legacyToken) return null;
-
-  storage.setItem(scopedKey, legacyToken);
-  storage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
-  return legacyToken;
-}
+/* ========================================================================== */
+/* Core proxy helper                                                            */
+/* ========================================================================== */
 
 /**
- * Core proxy logic — shared between the Fastify plugin route handler and the
- * standalone route handler factory. Takes a normalised `subPath` + raw request
- * context and pipes the upstream response back to the client.
+ * Forward a request to the upstream relay and return a Fetch API `Response`.
+ * Elysia handlers can return a native `Response` directly — the framework
+ * pipes it to the client with all headers and status preserved.
  *
  * @param {object} opts
- * @param {string}  opts.relayUrl
- * @param {string}  opts.subPath   – path segment to forward (no leading slash required)
- * @param {string}  opts.rawUrl    – full request URL (for query-string forwarding)
- * @param {string}  opts.method
- * @param {object}  opts.headers
- * @param {Buffer|string|null} opts.body
- * @param {number}  opts.timeoutMs
- * @param {object}  opts.reply     – Fastify reply object
+ * @param {string}          opts.relayUrl
+ * @param {string}          opts.subPath
+ * @param {string}          opts.rawUrl
+ * @param {string}          opts.method
+ * @param {object|Headers}  opts.headers
+ * @param {Buffer|string|ReadableStream|null} opts.body
+ * @param {number}          opts.timeoutMs
+ * @returns {Promise<Response>}
  */
-async function _proxy ({ relayUrl, subPath, rawUrl, method, headers, body, timeoutMs, reply }) {
-  const upstream   = _buildUpstreamUrl(relayUrl, subPath, rawUrl);
-  const fwdHeaders = _filterHeaders(headers);
-  const controller = new AbortController();
-  const timer      = setTimeout(() => controller.abort(), timeoutMs);
+async function _proxy ({ relayUrl, subPath, rawUrl, method, headers, body, timeoutMs }) {
+  const upstream    = _buildUpstreamUrl(relayUrl, subPath, rawUrl);
+  const fwdHeaders  = _filterHeaders(headers);
+  const controller  = new AbortController();
+  const timer       = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const upstreamRes = await fetch(upstream, {
       method,
       headers:  fwdHeaders,
-      body:     ['GET', 'HEAD'].includes(method) ? undefined : body,
+      body:     ['GET', 'HEAD'].includes(method.toUpperCase()) ? undefined : body,
       signal:   controller.signal,
+      // Bun natively supports duplex streaming
+      ...(typeof Bun !== 'undefined' ? {} : {}),
     });
-
     clearTimeout(timer);
 
-    // fetch can decompress upstream responses, so omit headers that may no
-    // longer match the body Fastify forwards.
-    for (const [k, v] of upstreamRes.headers.entries()) {
-      if (!RESPONSE_HEADERS_TO_STRIP.has(k.toLowerCase())) reply.header(k, v);
-    }
+    // Build forwarded headers (strip hop-by-hop from upstream response)
+    const resHeaders = {};
+    upstreamRes.headers.forEach((v, k) => {
+      if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v;
+    });
 
-    reply.code(upstreamRes.status);
-
-    // Pipe the response body — Fastify accepts a ReadableStream or Buffer
-    if (upstreamRes.body) {
-      reply.send(upstreamRes.body);
-    } else {
-      reply.send('');
-    }
+    // Return a native Response — Elysia will pipe it straight to the client.
+    // This preserves SSE streaming and binary payloads.
+    return new Response(upstreamRes.body, {
+      status:  upstreamRes.status,
+      headers: resHeaders,
+    });
   } catch (err) {
     clearTimeout(timer);
     if (err.name === 'AbortError') {
-      return reply.code(504).send({ error: 'Upstream relay timed out' });
+      return new Response(JSON.stringify({ error: 'Upstream relay timed out' }), {
+        status:  504,
+        headers: { 'content-type': 'application/json' },
+      });
     }
-    return reply.code(502).send({ error: 'Failed to reach upstream relay' });
+    return new Response(JSON.stringify({ error: 'Failed to reach upstream relay' }), {
+      status:  502,
+      headers: { 'content-type': 'application/json' },
+    });
   }
 }
 
 /* ========================================================================== */
-/* byokRelayPlugin — Fastify plugin                                            */
+/* byokRelayPlugin — composable Elysia plugin                                  */
 /* ========================================================================== */
 
 /**
- * Fastify plugin for BYOK relay.
+ * Create a composable Elysia plugin for the BYOK relay.
  *
- * Register with:
- *   const { byokRelayPlugin } = require('@byok-relay/fastify');
- *   await fastify.register(byokRelayPlugin, {
- *     relayUrl: process.env.RELAY_URL,   // default: managed relay
- *     pathPrefix: '/relay',               // default
- *     allowedAppIds: ['app-1', 'app-2'], // optional allowlist
- *     timeoutMs: 30000,                   // default
- *   });
+ * @example
+ * const { Elysia } = require('elysia');
+ * const { byokRelayPlugin } = require('@byok-relay/elysia');
  *
- * After registration the Fastify instance is decorated with:
- *   fastify.byokRelayClient  — a ByokRelayClient instance (server-side, in-memory storage)
+ * const app = new Elysia()
+ *   .use(byokRelayPlugin())
+ *   .listen(3000);
  *
- * The plugin registers `fastify.all('/relay/*', ...)` inside an encapsulated
- * scope so it does not bleed into parent scope. If you want the decoration to
- * be available on the parent instance, wrap with `fastify-plugin`:
- *   const fp = require('fastify-plugin');
- *   module.exports = fp(byokRelayPlugin);
+ * // With options:
+ * const app = new Elysia()
+ *   .use(byokRelayPlugin({
+ *     relayUrl:      process.env.RELAY_URL,
+ *     pathPrefix:    '/relay',          // default
+ *     allowedAppIds: ['app-1', 'app-2'],
+ *     timeoutMs:     30_000,            // default
+ *   }))
+ *   .listen(3000);
+ *
+ * @param {object} [opts]
+ * @param {string}   [opts.relayUrl]       – upstream relay URL (default: env → managed)
+ * @param {string}   [opts.pathPrefix]     – mount prefix (default: '/relay')
+ * @param {string[]} [opts.allowedAppIds]  – optional app_id allowlist
+ * @param {number}   [opts.timeoutMs]      – upstream fetch timeout ms (default: 30000)
+ * @returns {Elysia} – a composable Elysia plugin instance
  */
-async function byokRelayPlugin (fastify, opts) {
+function byokRelayPlugin (opts = {}) {
   const relayUrl    = _resolveRelayUrl(opts.relayUrl);
   const pathPrefix  = (opts.pathPrefix || DEFAULT_PATH_PREFIX).replace(/\/$/, '');
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
-  const timeoutMs   = opts.timeoutMs ?? 30_000;
+  const timeoutMs   = opts.timeoutMs || 30_000;
 
-  // Decorate the fastify instance with a server-side ByokRelayClient
-  if (!fastify.byokRelayClient) {
-    fastify.decorate('byokRelayClient', new ByokRelayClient({ relayUrl }));
+  // Lazy-load Elysia to keep the peer dep optional at module load time
+  let ElysiaClass;
+  try {
+    ElysiaClass = require('elysia').Elysia;
+  } catch (_) {
+    throw new Error(
+      '@byok-relay/elysia: could not resolve the "elysia" peer dependency. ' +
+      'Run `bun add elysia` or `npm install elysia`.'
+    );
   }
 
-  // Preserve raw request bodies for the relay. Fastify's default JSON and text
-  // parsers would otherwise parse or reject these before the proxy sees them.
-  const rawBodyParserOptions = { parseAs: 'buffer', bodyLimit: 52_428_800 /* 50 MB */ };
-  const rawBodyParser = (req, body, done) => done(null, body);
-  for (const contentType of ['application/json', 'text/plain']) {
-    fastify.removeContentTypeParser(contentType);
-    fastify.addContentTypeParser(contentType, rawBodyParserOptions, rawBodyParser);
-  }
+  const plugin = new ElysiaClass({ name: '@byok-relay/elysia', seed: pathPrefix });
 
-  // Catch all remaining content types and store the raw buffer.
-  fastify.addContentTypeParser(
-    /^.*$/,
-    rawBodyParserOptions,
-    rawBodyParser
-  );
+  // Catch-all: handles all HTTP methods on `<pathPrefix>/*`
+  plugin.all(`${pathPrefix}/*`, async (ctx) => {
+    const req = ctx.request;
 
-  // Catch-all route: `${pathPrefix}/*`
-  fastify.all(`${pathPrefix}/*`, {
-    config: { rawBody: true },
-  }, async (request, reply) => {
-    // Optional app_id allowlist
-    const appId = request.headers['x-app-id'] || (request.query && request.query.app_id);
+    // Optional app_id allowlist (from header or query)
+    const appId = req.headers.get('x-app-id') || (ctx.query && ctx.query.app_id);
     if (allowedApps && (!appId || !allowedApps.has(appId))) {
-      return reply.code(403).send({ error: 'app_id not allowed' });
+      return new Response(JSON.stringify({ error: 'app_id not allowed' }), {
+        status:  403,
+        headers: { 'content-type': 'application/json' },
+      });
     }
 
-    // Fastify wildcard parameter is `*`
-    const subPath = request.params['*'] || '';
+    // Elysia exposes the wildcard segment as ctx.params['*']
+    const subPath = (ctx.params && ctx.params['*']) || '';
 
-    // Derive raw body — Fastify stores parsed body on `request.body`
+    // Read raw body as ArrayBuffer (works for JSON, binary, multipart)
     let body = null;
-    if (request.body !== undefined && request.body !== null) {
-      body = Buffer.isBuffer(request.body)
-        ? request.body
-        : typeof request.body === 'string'
-          ? request.body
-          : JSON.stringify(request.body);
-    }
+    try {
+      if (!['GET', 'HEAD'].includes(req.method.toUpperCase())) {
+        body = await req.arrayBuffer();
+        body = body.byteLength > 0 ? body : null;
+      }
+    } catch (_) { /* no body */ }
 
-    await _proxy({
+    return _proxy({
       relayUrl,
       subPath,
-      rawUrl: request.raw.url,
-      method: request.method,
-      headers: request.headers,
+      rawUrl:   req.url,
+      method:   req.method,
+      headers:  req.headers,
       body,
       timeoutMs,
-      reply,
     });
   });
-}
 
-// Expose plugin metadata (Fastify 4 convention)
-byokRelayPlugin[Symbol.for('skip-override')] = false; // scoped by default
-byokRelayPlugin.fastify = '4.x - 5.x';
+  return plugin;
+}
 
 /* ========================================================================== */
 /* createRelayRouteHandler — standalone handler factory                       */
 /* ========================================================================== */
 
 /**
- * Returns a Fastify route handler that proxies all traffic to the upstream relay.
- * Use when you want full control over route definition:
+ * Returns an Elysia context handler for manual `app.all()` registration.
  *
- *   const handler = createRelayRouteHandler({ relayUrl: process.env.RELAY_URL });
- *   fastify.all('/relay/*', handler);
+ * @example
+ * const { Elysia } = require('elysia');
+ * const { createRelayRouteHandler } = require('@byok-relay/elysia');
  *
- * Options: same as byokRelayPlugin.
+ * const handler = createRelayRouteHandler({ relayUrl: process.env.RELAY_URL });
+ *
+ * const app = new Elysia()
+ *   .all('/relay/*', handler)
+ *   .listen(3000);
+ *
+ * @param {object} [opts] – same options as `byokRelayPlugin`
+ * @returns {Function} – Elysia route handler `(ctx) => Promise<Response>`
  */
 function createRelayRouteHandler (opts = {}) {
   const relayUrl    = _resolveRelayUrl(opts.relayUrl);
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
-  const timeoutMs   = opts.timeoutMs ?? 30_000;
+  const timeoutMs   = opts.timeoutMs || 30_000;
 
-  return async function relayRouteHandler (request, reply) {
-    const appId = request.headers['x-app-id'] || (request.query && request.query.app_id);
+  return async function relayRouteHandler (ctx) {
+    const req = ctx.request;
+
+    const appId = req.headers.get('x-app-id') || (ctx.query && ctx.query.app_id);
     if (allowedApps && (!appId || !allowedApps.has(appId))) {
-      return reply.code(403).send({ error: 'app_id not allowed' });
+      return new Response(JSON.stringify({ error: 'app_id not allowed' }), {
+        status:  403,
+        headers: { 'content-type': 'application/json' },
+      });
     }
 
-    const subPath = request.params['*'] || request.params.path || '';
+    const subPath = (ctx.params && (ctx.params['*'] || ctx.params.path)) || '';
 
     let body = null;
-    if (request.body !== undefined && request.body !== null) {
-      body = Buffer.isBuffer(request.body)
-        ? request.body
-        : typeof request.body === 'string'
-          ? request.body
-          : JSON.stringify(request.body);
-    }
+    try {
+      if (!['GET', 'HEAD'].includes(req.method.toUpperCase())) {
+        const ab = await req.arrayBuffer();
+        body = ab.byteLength > 0 ? ab : null;
+      }
+    } catch (_) { /* no body */ }
 
-    await _proxy({
+    return _proxy({
       relayUrl,
       subPath,
-      rawUrl: request.raw.url,
-      method: request.method,
-      headers: request.headers,
+      rawUrl:   req.url,
+      method:   req.method,
+      headers:  req.headers,
       body,
       timeoutMs,
-      reply,
     });
   };
 }
@@ -321,30 +324,33 @@ function createRelayRouteHandler (opts = {}) {
 
 /**
  * Plain-JS client for the byok-relay API.
- * Works in Fastify route handlers, hooks, plugins, and (when bundled) browsers.
+ * Works in Elysia route handlers, lifecycle hooks, and Bun scripts.
+ * Also works in browser bundles (localStorage default).
  *
  * @example
+ * const { ByokRelayClient } = require('@byok-relay/elysia');
  * const client = new ByokRelayClient({ relayUrl: process.env.RELAY_URL });
+ *
  * const { token } = await client.register({ appId: 'my-app' });
  * await client.storeKey('openai', process.env.OPENAI_API_KEY);
  * const reply = await client.chat({
  *   model: 'openai/gpt-4o',
- *   messages: [{ role: 'user', content: 'Hi' }]
+ *   messages: [{ role: 'user', content: 'Hi' }],
  * });
  */
 class ByokRelayClient {
   /**
-   * @param {object} opts
-   * @param {string} [opts.relayUrl]  – relay base URL (default: process.env.RELAY_URL → managed relay)
-   * @param {string} [opts.appId]    – your application identifier
-   * @param {object} [opts.storage]  – custom storage adapter { getItem, setItem, removeItem }
+   * @param {object}  [opts]
+   * @param {string}  [opts.relayUrl]  – relay base URL (default: env → managed relay)
+   * @param {string}  [opts.appId]    – your application identifier
+   * @param {object}  [opts.storage]  – custom storage { getItem, setItem, removeItem }
    */
   constructor (opts = {}) {
     this._relayUrl = _resolveRelayUrl(opts.relayUrl);
     this._appId    = opts.appId || 'default';
     this._storage  = opts.storage || _defaultStorage();
     this._tokenStorageKey = _tokenStorageKey(this._relayUrl, this._appId);
-    this._token    = _loadStoredToken(this._storage, this._tokenStorageKey);
+    this._token    = this._storage.getItem(this._tokenStorageKey) || null;
   }
 
   /* ---- Token management -------------------------------------------------- */
@@ -356,13 +362,12 @@ class ByokRelayClient {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ app_id: appId }),
     });
-    if (!res.ok) throw new Error(`Register failed: ${res.status}`);
+    if (!res.ok) throw new Error(`register failed: ${res.status}`);
     const data = await res.json();
     this._appId = appId;
     this._tokenStorageKey = _tokenStorageKey(this._relayUrl, this._appId);
     this._token = data.token;
     this._storage.setItem(this._tokenStorageKey, this._token);
-    this._storage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
     return data;
   }
 
@@ -374,7 +379,6 @@ class ByokRelayClient {
   logout () {
     this._token = null;
     this._storage.removeItem(this._tokenStorageKey);
-    this._storage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
   }
 
   /* ---- Key management ---------------------------------------------------- */
@@ -424,10 +428,9 @@ class ByokRelayClient {
 
   async relayRequest (path, init = {}) {
     const token = await this.ensureToken();
-    const url = `${this._relayUrl}${path.startsWith('/') ? '' : '/'}${path}`;
+    const url   = `${this._relayUrl}${path.startsWith('/') ? '' : '/'}${path}`;
     const headers = Object.assign({ 'Authorization': `Bearer ${token}` }, init.headers || {});
-    const res = await fetch(url, Object.assign({}, init, { headers }));
-    return res;
+    return fetch(url, Object.assign({}, init, { headers }));
   }
 
   async chat (opts = {}) {
@@ -504,8 +507,7 @@ class ByokRelayClient {
   /* ---- Utility ----------------------------------------------------------- */
 
   async health (deep = false) {
-    const url = `${this._relayUrl}/health${deep ? '?deep=1' : ''}`;
-    const res = await fetch(url);
+    const res = await fetch(`${this._relayUrl}/health${deep ? '?deep=1' : ''}`);
     return res.json();
   }
 
@@ -527,7 +529,7 @@ class ByokRelayClient {
 
   async deleteAccount () {
     const token = await this.ensureToken();
-    const res = await fetch(`${this._relayUrl}/users`, {
+    const res   = await fetch(`${this._relayUrl}/users`, {
       method:  'DELETE',
       headers: { 'Authorization': `Bearer ${token}` },
     });
@@ -538,7 +540,7 @@ class ByokRelayClient {
 }
 
 /* ========================================================================== */
-/* Default storage (in-memory on Node, localStorage in browser)               */
+/* Default storage (in-memory on Bun/Node, localStorage in browser)           */
 /* ========================================================================== */
 
 function _defaultStorage () {

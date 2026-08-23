@@ -2,8 +2,8 @@
 
 Fastify plugin and route factory for [byok-relay](https://byokrelay.com) — proxy AI provider requests server-side while your users bring their own API keys.
 
-```
-npm install @byok-relay/fastify
+```sh
+npm install @byok-relay/fastify fastify
 ```
 
 ---
@@ -38,7 +38,7 @@ await fastify.register(byokRelayPlugin, {
 await fastify.listen({ port: 3000 });
 ```
 
-After registration, `fastify.byokRelayClient` is available as a server-side client for use in other route handlers and plugins.
+The plugin's `byokRelayClient` decoration is available within its registered Fastify scope. To use it from the parent instance, wrap `byokRelayPlugin` with [`fastify-plugin`](https://github.com/fastify/fastify-plugin) before registering it.
 
 ### Standalone route handler
 
@@ -104,7 +104,7 @@ for await (const chunk of client.streamChat({
   model: 'openai/gpt-4o',
   messages: [{ role: 'user', content: 'Tell me a story' }],
 })) {
-  process.stdout.write(chunk);
+  console.log(chunk);
 }
 ```
 

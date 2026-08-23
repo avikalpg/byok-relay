@@ -203,6 +203,43 @@ async function runTests () {
     assert.strictEqual(client._storage, adapter);
   });
 
+  await test('migrates a legacy token into the current scoped key', () => {
+    const store = new Map([['byok_relay_token', 'legacy-token']]);
+    const adapter = {
+      getItem    : (k) => store.get(k) || null,
+      setItem    : (k, v) => store.set(k, v),
+      removeItem : (k) => store.delete(k),
+    };
+    const client = new ByokRelayClient({
+      relayUrl: 'http://relay.test',
+      appId: 'migrated-app',
+      storage: adapter,
+    });
+    assert.strictEqual(client._token, 'legacy-token');
+    assert.strictEqual(store.get(client._tokenStorageKey), 'legacy-token');
+    assert.strictEqual(store.has('byok_relay_token'), false);
+  });
+
+  await test('register clears a remaining legacy token after persisting the scoped token', async () => {
+    const store = new Map();
+    const adapter = {
+      getItem    : (k) => store.get(k) || null,
+      setItem    : (k, v) => store.set(k, v),
+      removeItem : (k) => store.delete(k),
+    };
+    const client = new ByokRelayClient({ storage: adapter });
+    store.set('byok_relay_token', 'legacy-token');
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({ ok: true, json: async () => ({ token: 'fresh-token' }) });
+    try {
+      await client.register();
+      assert.strictEqual(store.get(client._tokenStorageKey), 'fresh-token');
+      assert.strictEqual(store.has('byok_relay_token'), false);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   await test('logout clears token', () => {
     const store = new Map();
     const adapter = {
@@ -212,9 +249,11 @@ async function runTests () {
     };
     const client = new ByokRelayClient({ storage: adapter });
     client._token = 'test-tok';
-    store.set('byok_relay_token', 'test-tok');
+    store.set(client._tokenStorageKey, 'test-tok');
+    store.set('byok_relay_token', 'legacy-token');
     client.logout();
     assert.strictEqual(client._token, null);
+    assert.strictEqual(store.has(client._tokenStorageKey), false);
     assert.strictEqual(store.has('byok_relay_token'), false);
   });
 
@@ -433,7 +472,7 @@ async function runTests () {
     await fastify.close();
   });
 
-  await test('byokRelayPlugin allows request with no app_id header when allowlist set', async () => {
+  await test('byokRelayPlugin blocks requests with no app_id header when allowlist set', async () => {
     const fastify = createMinimalFastifyLike();
     await byokRelayPlugin(fastify, {
       relayUrl: upstreamUrl,
@@ -441,9 +480,9 @@ async function runTests () {
     });
     const { url: serverUrl } = await fastify.listen();
 
-    // No x-app-id header — passes through (allowlist only blocks explicit mis-match)
+    // No x-app-id header — allowlisted routes require an explicit permitted ID.
     const res = await fetch(`${serverUrl}/relay/health`);
-    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.status, 403);
     await fastify.close();
   });
 
@@ -518,13 +557,20 @@ async function runTests () {
     };
     try {
       await handler({
-        headers: { 'content-length': '1', 'x-client': 'kept' },
+        headers: {
+          'content-length': '1',
+          cookie: 'session=secret',
+          host: 'app.example.test',
+          'x-client': 'kept',
+        },
         raw: { url: '/relay/chat' },
         method: 'POST',
         params: { '*': 'chat' },
         body: { message: 'hello' },
       }, reply);
       assert.strictEqual(forwardedHeaders['content-length'], undefined);
+      assert.strictEqual(forwardedHeaders.cookie, undefined);
+      assert.strictEqual(forwardedHeaders.host, undefined);
       assert.strictEqual(forwardedHeaders['x-client'], 'kept');
       assert.strictEqual(reply.headers['content-encoding'], undefined);
       assert.strictEqual(reply.headers['content-length'], undefined);

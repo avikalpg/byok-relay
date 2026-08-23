@@ -233,6 +233,33 @@ fastify.all('/relay/*', createRelayRouteHandler({ relayUrl: process.env.RELAY_UR
 The plugin decorates `fastify.byokRelayClient` for server-side usage in other routes. Supports `allowedAppIds` allowlist, 30 s `AbortController` timeout, and `ByokRelayClient` with custom session-storage adapter.
 npm: https://www.npmjs.com/package/@byok-relay/fastify
 
+## Elysia Integration (`@byok-relay/elysia`)
+
+Elysia plugin and standalone route handler for Bun-native Elysia 1.x servers (also Node.js 18+). `RELAY_URL` stays in `Bun.env` or `process.env` and never enters the browser bundle.
+
+```bash
+bun add @byok-relay/elysia elysia
+```
+
+```js
+const { Elysia } = require('elysia');
+const { byokRelayPlugin } = require('@byok-relay/elysia');
+
+const app = new Elysia()
+  .use(byokRelayPlugin({ relayUrl: Bun.env.RELAY_URL }))
+  .listen(3000);
+```
+
+Or use the standalone handler for explicit route registration:
+
+```js
+const { createRelayRouteHandler } = require('@byok-relay/elysia');
+app.all('/relay/*', createRelayRouteHandler({ relayUrl: Bun.env.RELAY_URL }));
+```
+
+Returns a native `Response` with the upstream `ReadableStream` piped directly, so SSE streaming works out of the box on Bun. Supports `allowedAppIds`, timeout configuration, and `ByokRelayClient` with a custom storage adapter.
+npm: https://www.npmjs.com/package/@byok-relay/elysia
+
 ## SolidJS Signals (`@byok-relay/solid`)
 
 For SolidJS or SolidStart apps, install the signals package:
