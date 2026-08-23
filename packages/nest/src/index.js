@@ -159,25 +159,34 @@ async function _proxyNode ({ relayUrl, subPath, req, res, timeoutMs }) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) { res.end(); break; }
+          let removeBackpressureListeners;
+          const outcome = new Promise(resolve => {
+            const settle = (event) => {
+              res.removeListener('drain', onDrain);
+              res.removeListener('close', onClose);
+              res.removeListener('error', onError);
+              resolve(event);
+            };
+            const onDrain = () => settle('drain');
+            const onClose = () => settle('close');
+            const onError = () => settle('error');
+            res.once('drain', onDrain);
+            res.once('close', onClose);
+            res.once('error', onError);
+            removeBackpressureListeners = () => {
+              res.removeListener('drain', onDrain);
+              res.removeListener('close', onClose);
+              res.removeListener('error', onError);
+            };
+          });
           if (!res.write(value)) {
-            const outcome = await new Promise(resolve => {
-              const settle = (event) => {
-                res.removeListener('drain', onDrain);
-                res.removeListener('close', onClose);
-                res.removeListener('error', onError);
-                resolve(event);
-              };
-              const onDrain = () => settle('drain');
-              const onClose = () => settle('close');
-              const onError = () => settle('error');
-              res.once('drain', onDrain);
-              res.once('close', onClose);
-              res.once('error', onError);
-            });
-            if (outcome !== 'drain') {
+            const result = await outcome;
+            if (result !== 'drain') {
               try { await reader.cancel(); } catch (_) {}
               return;
             }
+          } else {
+            removeBackpressureListeners();
           }
         }
       };

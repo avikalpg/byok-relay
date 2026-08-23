@@ -8,6 +8,7 @@
 
 const http   = require('http');
 const assert = require('assert');
+const { EventEmitter } = require('events');
 const {
   ByokRelayModule,
   ByokRelayMiddleware,
@@ -332,6 +333,42 @@ await test('proxies POST with body', async () => {
   } finally {
     server.close();
     mock.server.close();
+  }
+});
+
+await test('cancels upstream when response closes synchronously during backpressure', async () => {
+  const originalFetch = global.fetch;
+  let cancelled = false;
+  global.fetch = async () => ({
+    status: 200,
+    headers: new Map(),
+    body: {
+      getReader: () => ({
+        read: async () => ({ done: false, value: Buffer.from('chunk') }),
+        cancel: async () => { cancelled = true; },
+      }),
+    },
+  });
+
+  const req = { url: '/relay/stream', method: 'GET', headers: {} };
+  const res = new EventEmitter();
+  res.writeHead = () => {};
+  res.write = () => {
+    res.emit('close');
+    return false;
+  };
+  res.end = () => {};
+  const mw = new ByokRelayMiddleware({ relayUrl: 'http://relay.example.com', pathPrefix: '/relay' });
+
+  try {
+    const completed = await Promise.race([
+      mw.use(req, res, () => { throw new Error('next should not be called'); }).then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 100)),
+    ]);
+    assert.strictEqual(completed, true, 'proxy should not wait forever after synchronous close');
+    assert.ok(cancelled, 'upstream reader should be cancelled after response close');
+  } finally {
+    global.fetch = originalFetch;
   }
 });
 
