@@ -1,0 +1,53 @@
+{
+  "name": "@byok-relay/nest",
+  "version": "1.0.0",
+  "description": "NestJS module, middleware, and injectable service for BYOK AI relay — proxy AI provider requests server-side while users bring their own API keys",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/nest.test.js"
+  },
+  "keywords": [
+    "nestjs",
+    "nest",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "module",
+    "middleware",
+    "injectable",
+    "node",
+    "self-hosted",
+    "no-backend",
+    "enterprise"
+  ],
+  "peerDependencies": {
+    "@nestjs/common": ">=8.0.0",
+    "@nestjs/core": ">=8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@nestjs/common": {
+      "optional": true
+    },
+    "@nestjs/core": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/nest"
+  },
+  "homepage": "https://byokrelay.com"
+}
