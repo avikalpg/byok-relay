@@ -72,11 +72,24 @@ const { appRouter } = require('../../../../trpc/router');
 
 const handler = createByokRelayFetchHandler({
   router:   appRouter,
+  createContext,
   relayUrl: process.env.RELAY_URL,  // stays server-side
   endpoint: '/api/trpc',
 });
 
 module.exports = { GET: handler, POST: handler };
+```
+
+For server-side requests, provide session-scoped token storage to
+`createByokRelayContext` so the same authenticated user keeps the same relay
+account across requests. `storage` may be an adapter or a factory that receives
+the request:
+
+```js
+const createContext = createByokRelayContext({
+  relayUrl: process.env.RELAY_URL,
+  storage: (request) => sessionStorageFor(request),
+});
 ```
 
 ### 4. Use from the client
