@@ -182,7 +182,18 @@ async function runHandlerTests () {
     assert(res.status === 403, 'blocked app_id returns 403');
   }
 
-  // 3.5 Timeout → 504
+  // 3.5 app_id allowlist — missing IDs are also blocked
+  {
+    const blockedHandler = createRelayRouteHandler({
+      relayUrl:      'http://relay.test',
+      allowedAppIds: ['app-1'],
+    });
+    const ctx = makeCtx({ params: { '*': 'relay' } });
+    const res = await blockedHandler(ctx);
+    assert(res.status === 403, 'missing app_id returns 403 when an allowlist is configured');
+  }
+
+  // 3.6 Timeout → 504
   {
     _mockFetchResponse = () => new Promise((_, reject) => {
       const err = new Error('The operation was aborted.');
@@ -385,9 +396,28 @@ async function runClientTests () {
     status: 200, headers: { 'content-type': 'application/json' },
   });
   await client2.register({ appId: 'test' });
-  assert(store['byok_relay_token'] === 'tok-custom', 'custom storage adapter used for token');
+  assert(store[client2._tokenStorageKey] === 'tok-custom', 'custom storage adapter used for scoped token');
 
-  // 4.17 relayRequest
+  // 4.17 storage keys isolate relay endpoints and application IDs
+  const sameRelayOtherApp = new ByokRelayClient({
+    relayUrl: 'http://relay.test',
+    appId:    'other-app',
+    storage:  customStorage,
+  });
+  const otherRelaySameApp = new ByokRelayClient({
+    relayUrl: 'http://other-relay.test',
+    appId:    'test',
+    storage:  customStorage,
+  });
+  assert(sameRelayOtherApp._token === null, 'different app ID does not reuse a stored token');
+  assert(otherRelaySameApp._token === null, 'different relay URL does not reuse a stored token');
+  assert(
+    client2._tokenStorageKey !== sameRelayOtherApp._tokenStorageKey &&
+      client2._tokenStorageKey !== otherRelaySameApp._tokenStorageKey,
+    'token storage keys include relay URL and application ID'
+  );
+
+  // 4.18 relayRequest
   let capturedRelayUrl;
   _mockFetchResponse = (url) => {
     capturedRelayUrl = url;
@@ -444,11 +474,18 @@ await runClientTests();
 
 console.log('\n--- 5. Relay URL resolution ---');
 {
-  const client = new ByokRelayClient({});
-  assert(
-    client._relayUrl === 'https://relay.byokrelay.com',
-    'defaults to managed relay when no env or option set'
-  );
+  const originalRelayUrl = process.env.RELAY_URL;
+  try {
+    delete process.env.RELAY_URL;
+    const client = new ByokRelayClient({});
+    assert(
+      client._relayUrl === 'https://relay.byokrelay.com',
+      'defaults to managed relay when no env or option set'
+    );
+  } finally {
+    if (originalRelayUrl === undefined) delete process.env.RELAY_URL;
+    else process.env.RELAY_URL = originalRelayUrl;
+  }
 
   const clientOpt = new ByokRelayClient({ relayUrl: 'http://custom.relay' });
   assert(clientOpt._relayUrl === 'http://custom.relay', 'explicit option wins over env');
@@ -470,6 +507,8 @@ console.log('\n--- 6. Header filtering ---');
 
   const hopHeaders = new Headers({
     'authorization':    'Bearer tok',
+    'cookie':            'session=secret',
+    'host':              'app.example.test',
     'content-type':     'application/json',
     'transfer-encoding': 'chunked',   // hop-by-hop — must be stripped
     'connection':        'keep-alive', // hop-by-hop — must be stripped
@@ -489,6 +528,8 @@ console.log('\n--- 6. Header filtering ---');
   await handler(ctx);
   assert(!('transfer-encoding' in capturedHeaders), 'transfer-encoding stripped');
   assert(!('connection' in capturedHeaders), 'connection stripped');
+  assert(!('cookie' in capturedHeaders), 'cookie stripped');
+  assert(!('host' in capturedHeaders), 'host stripped');
   assert(capturedHeaders['authorization'] === 'Bearer tok', 'authorization forwarded');
 
   _mockFetchResponse = null;

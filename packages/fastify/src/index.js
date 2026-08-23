@@ -40,6 +40,7 @@ const HOP_BY_HOP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailers', 'transfer-encoding', 'upgrade', 'content-length',
 ]);
+const REQUEST_HEADERS_TO_STRIP = new Set([...HOP_BY_HOP, 'cookie', 'host']);
 
 // fetch transparently decompresses upstream responses, so these wire-level
 // headers may no longer describe the body delivered to Fastify.
@@ -69,11 +70,11 @@ function _safeRemove (key) {
   try { window.localStorage.removeItem(key); } catch (_) {}
 }
 
-/** Strip hop-by-hop headers; return a plain object. */
+/** Strip hop-by-hop and origin-specific headers; return a plain object. */
 function _filterHeaders (headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
-    if (!HOP_BY_HOP.has(k.toLowerCase())) out[k] = v;
+    if (!REQUEST_HEADERS_TO_STRIP.has(k.toLowerCase())) out[k] = v;
   }
   return out;
 }
@@ -95,6 +96,11 @@ function _resolveRelayUrl (opt) {
 function _buildUpstreamUrl (relayUrl, subPath, rawUrl) {
   const qs = rawUrl && rawUrl.includes('?') ? '?' + rawUrl.split('?').slice(1).join('?') : '';
   return `${relayUrl.replace(/\/$/, '')}/${subPath.replace(/^\//, '')}${qs}`;
+}
+
+/** Keep browser-persisted tokens isolated by relay endpoint and application. */
+function _tokenStorageKey (relayUrl, appId) {
+  return `byok_relay_token:${encodeURIComponent(relayUrl.replace(/\/$/, ''))}:${encodeURIComponent(appId)}`;
 }
 
 /**
@@ -209,7 +215,7 @@ async function byokRelayPlugin (fastify, opts) {
   }, async (request, reply) => {
     // Optional app_id allowlist
     const appId = request.headers['x-app-id'] || (request.query && request.query.app_id);
-    if (allowedApps && appId && !allowedApps.has(appId)) {
+    if (allowedApps && (!appId || !allowedApps.has(appId))) {
       return reply.code(403).send({ error: 'app_id not allowed' });
     }
 
@@ -263,7 +269,7 @@ function createRelayRouteHandler (opts = {}) {
 
   return async function relayRouteHandler (request, reply) {
     const appId = request.headers['x-app-id'] || (request.query && request.query.app_id);
-    if (allowedApps && appId && !allowedApps.has(appId)) {
+    if (allowedApps && (!appId || !allowedApps.has(appId))) {
       return reply.code(403).send({ error: 'app_id not allowed' });
     }
 
@@ -319,7 +325,8 @@ class ByokRelayClient {
     this._relayUrl = _resolveRelayUrl(opts.relayUrl);
     this._appId    = opts.appId || 'default';
     this._storage  = opts.storage || _defaultStorage();
-    this._token    = this._storage.getItem('byok_relay_token') || null;
+    this._tokenStorageKey = _tokenStorageKey(this._relayUrl, this._appId);
+    this._token    = this._storage.getItem(this._tokenStorageKey) || null;
   }
 
   /* ---- Token management -------------------------------------------------- */
@@ -333,8 +340,10 @@ class ByokRelayClient {
     });
     if (!res.ok) throw new Error(`Register failed: ${res.status}`);
     const data = await res.json();
+    this._appId = appId;
+    this._tokenStorageKey = _tokenStorageKey(this._relayUrl, this._appId);
     this._token = data.token;
-    this._storage.setItem('byok_relay_token', this._token);
+    this._storage.setItem(this._tokenStorageKey, this._token);
     return data;
   }
 
@@ -345,7 +354,7 @@ class ByokRelayClient {
 
   logout () {
     this._token = null;
-    this._storage.removeItem('byok_relay_token');
+    this._storage.removeItem(this._tokenStorageKey);
   }
 
   /* ---- Key management ---------------------------------------------------- */

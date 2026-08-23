@@ -212,10 +212,10 @@ async function runTests () {
     };
     const client = new ByokRelayClient({ storage: adapter });
     client._token = 'test-tok';
-    store.set('byok_relay_token', 'test-tok');
+    store.set(client._tokenStorageKey, 'test-tok');
     client.logout();
     assert.strictEqual(client._token, null);
-    assert.strictEqual(store.has('byok_relay_token'), false);
+    assert.strictEqual(store.has(client._tokenStorageKey), false);
   });
 
   // ---- ByokRelayClient integration (against mock relay) -------------------
@@ -433,7 +433,7 @@ async function runTests () {
     await fastify.close();
   });
 
-  await test('byokRelayPlugin allows request with no app_id header when allowlist set', async () => {
+  await test('byokRelayPlugin blocks requests with no app_id header when allowlist set', async () => {
     const fastify = createMinimalFastifyLike();
     await byokRelayPlugin(fastify, {
       relayUrl: upstreamUrl,
@@ -441,9 +441,9 @@ async function runTests () {
     });
     const { url: serverUrl } = await fastify.listen();
 
-    // No x-app-id header — passes through (allowlist only blocks explicit mis-match)
+    // No x-app-id header — allowlisted routes require an explicit permitted ID.
     const res = await fetch(`${serverUrl}/relay/health`);
-    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.status, 403);
     await fastify.close();
   });
 
@@ -518,13 +518,20 @@ async function runTests () {
     };
     try {
       await handler({
-        headers: { 'content-length': '1', 'x-client': 'kept' },
+        headers: {
+          'content-length': '1',
+          cookie: 'session=secret',
+          host: 'app.example.test',
+          'x-client': 'kept',
+        },
         raw: { url: '/relay/chat' },
         method: 'POST',
         params: { '*': 'chat' },
         body: { message: 'hello' },
       }, reply);
       assert.strictEqual(forwardedHeaders['content-length'], undefined);
+      assert.strictEqual(forwardedHeaders.cookie, undefined);
+      assert.strictEqual(forwardedHeaders.host, undefined);
       assert.strictEqual(forwardedHeaders['x-client'], 'kept');
       assert.strictEqual(reply.headers['content-encoding'], undefined);
       assert.strictEqual(reply.headers['content-length'], undefined);
