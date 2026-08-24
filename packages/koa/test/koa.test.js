@@ -95,6 +95,14 @@ await testAsync('middleware calls next() when path does not match prefix', async
   assert.ok(nextCalled, 'next() should be called for non-relay paths');
 });
 
+await testAsync('middleware calls next() for similarly prefixed paths', async () => {
+  const mw = createByokRelayMiddleware({ pathPrefix: '/relay' });
+  let nextCalled = false;
+  const ctx = { path: '/relay-admin', headers: {}, query: {} };
+  await mw(ctx, () => { nextCalled = true; });
+  assert.ok(nextCalled, 'next() should be called for paths outside the relay prefix');
+});
+
 await testAsync('middleware returns 403 for disallowed app_id', async () => {
   const mw = createByokRelayMiddleware({
     pathPrefix: '/relay',
@@ -317,6 +325,24 @@ await testAsync('ByokRelayClient aborts a stalled fetch at timeoutMs', async () 
   try {
     const client = new ByokRelayClient({ timeoutMs: 10 });
     await assert.rejects(() => client.health(), { name: 'AbortError' });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await testAsync('ByokRelayClient does not register when streamChat signal is already aborted', async () => {
+  const originalFetch = global.fetch;
+  let fetchCalls = 0;
+  global.fetch = async () => { fetchCalls++; };
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    const client = new ByokRelayClient();
+    await assert.rejects(
+      () => client.streamChat({ model: 'test-model', messages: [], signal: controller.signal }).next(),
+      { name: 'AbortError' }
+    );
+    assert.strictEqual(fetchCalls, 0, 'already-aborted streamChat must not register or fetch');
   } finally {
     global.fetch = originalFetch;
   }

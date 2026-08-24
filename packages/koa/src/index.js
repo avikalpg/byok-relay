@@ -219,7 +219,8 @@ function createByokRelayMiddleware (opts = {}) {
   const maxBodySize = opts.maxBodySize ?? DEFAULT_MAX_BODY_SIZE;
 
   return async function byokRelayMiddleware (ctx, next) {
-    if (!ctx.path.startsWith(pathPrefix)) return next();
+    const matchesPath = ctx.path === pathPrefix || ctx.path.startsWith(`${pathPrefix}/`);
+    if (!matchesPath) return next();
     return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs, maxBodySize });
   };
 }
@@ -504,6 +505,11 @@ class ByokRelayClient {
    * @yields {string} text chunk
    */
   async * streamChat ({ model, messages, extraParams = {}, signal }) {
+    if (signal?.aborted) {
+      const error = new Error('streamChat aborted');
+      error.name = 'AbortError';
+      throw error;
+    }
     const token = await this.ensureToken();
     const timeout = this._timeoutController(signal);
     try {
