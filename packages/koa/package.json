@@ -48,5 +48,11 @@
     "url": "https://github.com/avikalpg/byok-relay.git",
     "directory": "packages/koa"
   },
-  "homepage": "https://byokrelay.com"
+  "homepage": "https://byokrelay.com",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@koa/router": ">=12.0.0"
+  }
 }

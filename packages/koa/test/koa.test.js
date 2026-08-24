@@ -8,6 +8,7 @@
 'use strict';
 
 const assert = require('assert');
+const { PassThrough } = require('node:stream');
 
 const {
   createByokRelayMiddleware,
@@ -131,6 +132,40 @@ await testAsync('middleware passes through when app_id is in allowedAppIds', asy
   assert.ok(ctx.status === 502 || ctx.status === 504, `expected 502/504, got ${ctx.status}`);
 });
 
+await testAsync('middleware forwards an upstream WHATWG stream as a Node stream', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response('proxied payload', {
+    status: 201,
+    headers: { 'content-type': 'text/plain' },
+  });
+  try {
+    const ctx = {
+      path: '/relay/openai/chat/completions',
+      headers: {}, query: {}, method: 'GET', querystring: '',
+      set: () => {},
+    };
+    await createByokRelayMiddleware({ relayUrl: 'https://relay.example' })(ctx, () => {});
+    let body = '';
+    for await (const chunk of ctx.body) body += chunk;
+    assert.strictEqual(ctx.status, 201);
+    assert.strictEqual(body, 'proxied payload');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+await testAsync('middleware times out while reading a request body', async () => {
+  const req = new PassThrough();
+  const ctx = {
+    path: '/relay/openai/chat/completions',
+    headers: {}, query: {}, request: {}, req,
+    method: 'POST', querystring: '', set: () => {},
+  };
+  await createByokRelayMiddleware({ relayUrl: 'https://relay.example', timeoutMs: 10 })(ctx, () => {});
+  assert.strictEqual(ctx.status, 504);
+  req.destroy();
+});
+
 /* ------------------------------------------------------------------ */
 /* createRelayRouter — no peer dep smoke tests                         */
 /* ------------------------------------------------------------------ */
@@ -143,6 +178,8 @@ test('createRelayRouter without @koa/router throws a helpful error', () => {
     // If we reach here, @koa/router IS installed — verify it looks like a router
     assert.ok(typeof router.routes === 'function', 'router.routes should be a function');
     assert.ok(typeof router.allowedMethods === 'function', 'router.allowedMethods should be a function');
+    assert.ok(router.stack.some(layer => layer.path === '/relay'), 'router should mount the relay prefix');
+    assert.ok(!router.stack.some(layer => String(layer.path).includes('(.*)')), 'router should not use unsupported wildcard routes');
   } catch (err) {
     assert.ok(
       err.message.includes('@koa/router') || err.message.includes('koa-router'),
@@ -168,6 +205,11 @@ test('ByokRelayClient accepts relayUrl option', () => {
 test('ByokRelayClient accepts appId option', () => {
   const client = new ByokRelayClient({ appId: 'my-koa-app' });
   assert.strictEqual(client._appId, 'my-koa-app');
+});
+
+test('ByokRelayClient accepts timeoutMs option', () => {
+  const client = new ByokRelayClient({ timeoutMs: 123 });
+  assert.strictEqual(client._timeoutMs, 123);
 });
 
 test('ByokRelayClient has register method', () => {
@@ -228,6 +270,23 @@ test('ByokRelayClient has streamChat method (async generator)', () => {
 test('ByokRelayClient has health method', () => {
   const client = new ByokRelayClient();
   assert.strictEqual(typeof client.health, 'function');
+});
+
+await testAsync('ByokRelayClient aborts a stalled fetch at timeoutMs', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = (_url, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => {
+      const err = new Error('aborted');
+      err.name = 'AbortError';
+      reject(err);
+    }, { once: true });
+  });
+  try {
+    const client = new ByokRelayClient({ timeoutMs: 10 });
+    await assert.rejects(() => client.health(), { name: 'AbortError' });
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test('ByokRelayClient has stats method', () => {

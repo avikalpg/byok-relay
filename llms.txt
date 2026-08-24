@@ -736,7 +736,10 @@ npm: https://www.npmjs.com/package/@byok-relay/trpc
 
 Koa `async (ctx, next)` middleware and `@koa/router` router factory for BYOK AI.
 `RELAY_URL` stays in `process.env` — browser only calls your `/relay` Koa route.
-`npm install @byok-relay/koa`
+`npm install @byok-relay/koa koa`
+
+For the `createRelayRouter` API, also install its optional peer dependency:
+`npm install @koa/router`
 
 ```js
 const Koa = require('koa');

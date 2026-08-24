@@ -29,6 +29,8 @@
 
 'use strict';
 
+const { Readable } = require('node:stream');
+
 /* ========================================================================== */
 /* Constants                                                                   */
 /* ========================================================================== */
@@ -48,7 +50,11 @@ const HOP_BY_HOP = new Set([
 
 /** True only when running in a browser context (not Node.js). */
 function _isClient () {
-  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch (_) {
+    return false;
+  }
 }
 
 function _safeGet (key) {
@@ -81,18 +87,81 @@ function _resolveRelayUrl (opt) {
   return opt || process.env.RELAY_URL || DEFAULT_RELAY_URL;
 }
 
-/** Read raw body from Koa ctx as a Buffer. */
-async function _readBody (ctx) {
+/** Read raw body from Koa ctx as a Buffer, respecting an abort signal. */
+async function _readBody (ctx, signal) {
   // If koa-body / @koa/bodyparser already ran, use the parsed raw body
   if (ctx.request.rawBody) return Buffer.from(ctx.request.rawBody);
   if (ctx.req.body instanceof Buffer) return ctx.req.body;
-  // Otherwise stream it ourselves
+  // A consumed stream has no remaining body to proxy. Do not wait for events
+  // that have already fired when middleware is mounted after a body parser.
+  if (ctx.req.readableEnded || ctx.req.destroyed) return Buffer.alloc(0);
   return new Promise((resolve, reject) => {
     const chunks = [];
-    ctx.req.on('data', c => chunks.push(c));
-    ctx.req.on('end', () => resolve(Buffer.concat(chunks)));
-    ctx.req.on('error', reject);
+    const cleanup = () => {
+      ctx.req.removeListener('data', onData);
+      ctx.req.removeListener('end', onEnd);
+      ctx.req.removeListener('error', onError);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onData = c => chunks.push(c);
+    const onEnd = () => { cleanup(); resolve(Buffer.concat(chunks)); };
+    const onError = err => { cleanup(); reject(err); };
+    const onAbort = () => {
+      cleanup();
+      const err = new Error('request body read aborted');
+      err.name = 'AbortError';
+      reject(err);
+    };
+    if (signal?.aborted) return onAbort();
+    ctx.req.on('data', onData);
+    ctx.req.once('end', onEnd);
+    ctx.req.once('error', onError);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/** Set a Koa-compatible response body while preserving upstream streaming. */
+async function _forwardResponse (ctx, response) {
+  ctx.status = response.status;
+  for (const [k, v] of response.headers.entries()) {
+    if (!HOP_BY_HOP.has(k.toLowerCase())) ctx.set(k, v);
+  }
+  ctx.body = response.body
+    ? Readable.fromWeb(response.body)
+    : Buffer.from(await response.arrayBuffer());
+}
+
+/** Shared proxy implementation for middleware and @koa/router adapters. */
+async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs }) {
+  const appId = ctx.headers['x-app-id'] || ctx.query.app_id;
+  if (allowedApps && appId && !allowedApps.has(appId)) {
+    ctx.status = 403;
+    ctx.body = { error: 'app_id not allowed' };
+    return;
+  }
+
+  const subPath = ctx.path.slice(pathPrefix.length) || '/';
+  const qs = ctx.querystring ? `?${ctx.querystring}` : '';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const body = ['GET', 'HEAD', 'OPTIONS'].includes(ctx.method.toUpperCase())
+      ? undefined
+      : await _readBody(ctx, controller.signal);
+    const response = await fetch(`${relayUrl}${subPath}${qs}`, {
+      method: ctx.method,
+      headers: _filterHeaders(ctx.headers),
+      body,
+      signal: controller.signal,
+      duplex: 'half',
+    });
+    await _forwardResponse(ctx, response);
+  } catch (err) {
+    ctx.status = err.name === 'AbortError' ? 504 : 502;
+    ctx.body = { error: err.name === 'AbortError' ? 'upstream timeout' : 'Failed to reach AI provider' };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /* ========================================================================== */
@@ -112,67 +181,14 @@ async function _readBody (ctx) {
  *   app.use(createByokRelayMiddleware({ relayUrl: process.env.RELAY_URL }));
  */
 function createByokRelayMiddleware (opts = {}) {
-  const relayUrl    = _resolveRelayUrl(opts.relayUrl);
+  const relayUrl    = _resolveRelayUrl(opts.relayUrl).replace(/\/$/, '');
   const pathPrefix  = opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX;
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
   const timeoutMs   = opts.timeoutMs || 30_000;
 
   return async function byokRelayMiddleware (ctx, next) {
     if (!ctx.path.startsWith(pathPrefix)) return next();
-
-    // Optional app_id allowlist
-    const appId = ctx.headers['x-app-id'] || ctx.query.app_id;
-    if (allowedApps && appId && !allowedApps.has(appId)) {
-      ctx.status = 403;
-      ctx.body = { error: 'app_id not allowed' };
-      return;
-    }
-
-    const subPath  = ctx.path.slice(pathPrefix.length) || '/';
-    const qs       = ctx.querystring ? `?${ctx.querystring}` : '';
-    const upstream = `${relayUrl.replace(/\/$/, '')}${subPath}${qs}`;
-
-    const headers = _filterHeaders(ctx.headers);
-    const body    = ['GET', 'HEAD', 'OPTIONS'].includes(ctx.method.toUpperCase())
-      ? undefined
-      : await _readBody(ctx);
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await fetch(upstream, {
-        method:  ctx.method,
-        headers,
-        body,
-        signal:  controller.signal,
-        duplex:  'half',
-      });
-
-      clearTimeout(timer);
-
-      // Forward status + headers
-      ctx.status = response.status;
-      for (const [k, v] of response.headers.entries()) {
-        if (!HOP_BY_HOP.has(k.toLowerCase())) ctx.set(k, v);
-      }
-
-      // Stream or buffer body
-      if (response.body) {
-        ctx.body = response.body;
-      } else {
-        ctx.body = await response.arrayBuffer();
-      }
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === 'AbortError') {
-        ctx.status = 504;
-        ctx.body = { error: 'upstream timeout' };
-      } else {
-        ctx.status = 502;
-        ctx.body = { error: 'Failed to reach AI provider' };
-      }
-    }
+    return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs });
   };
 }
 
@@ -191,7 +207,7 @@ function createByokRelayMiddleware (opts = {}) {
  *   app.use(relayRouter.allowedMethods());
  */
 function createRelayRouter (opts = {}) {
-  const relayUrl    = _resolveRelayUrl(opts.relayUrl);
+  const relayUrl    = _resolveRelayUrl(opts.relayUrl).replace(/\/$/, '');
   const pathPrefix  = (opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX).replace(/\/$/, '');
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
   const timeoutMs   = opts.timeoutMs || 30_000;
@@ -212,60 +228,14 @@ function createRelayRouter (opts = {}) {
   }
 
   const router = new Router();
-
   async function handler (ctx) {
-    const appId = ctx.headers['x-app-id'] || ctx.query.app_id;
-    if (allowedApps && appId && !allowedApps.has(appId)) {
-      ctx.status = 403;
-      ctx.body = { error: 'app_id not allowed' };
-      return;
-    }
-
-    // ctx.params[0] contains the catch-all path segment from `(.*)`
-    const subPath  = '/' + (ctx.params[0] || '').replace(/^\/+/, '');
-    const qs       = ctx.querystring ? `?${ctx.querystring}` : '';
-    const upstream = `${relayUrl}${subPath}${qs}`;
-
-    const headers = _filterHeaders(ctx.headers);
-    const body    = ['GET', 'HEAD', 'OPTIONS'].includes(ctx.method.toUpperCase())
-      ? undefined
-      : await _readBody(ctx);
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await fetch(upstream, {
-        method:  ctx.method,
-        headers,
-        body,
-        signal:  controller.signal,
-        duplex:  'half',
-      });
-
-      clearTimeout(timer);
-
-      ctx.status = response.status;
-      for (const [k, v] of response.headers.entries()) {
-        if (!HOP_BY_HOP.has(k.toLowerCase())) ctx.set(k, v);
-      }
-      ctx.body = response.body || await response.arrayBuffer();
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === 'AbortError') {
-        ctx.status = 504;
-        ctx.body = { error: 'upstream timeout' };
-      } else {
-        ctx.status = 502;
-        ctx.body = { error: 'Failed to reach AI provider' };
-      }
-    }
+    return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs });
   }
 
-  // Register catch-all for all HTTP methods
-  router.all(`${pathPrefix}/(.*)`, handler);
+  // router.use covers every method under the prefix without path-to-regexp
+  // wildcard syntax, which @koa/router rejects in recent versions.
+  router.use(pathPrefix, handler);
   router.all(pathPrefix, handler);
-
   return router;
 }
 
@@ -291,10 +261,12 @@ class ByokRelayClient {
    * @param {string}  [opts.relayUrl]  – relay base URL (default: process.env.RELAY_URL or managed relay)
    * @param {string}  [opts.appId]     – your app identifier
    * @param {object}  [opts.storage]   – custom storage: { get(key), set(key,val), remove(key) }
+   * @param {number}  [opts.timeoutMs] – per-request timeout in ms (default: 30000)
    */
   constructor (opts = {}) {
     this._relayUrl = _resolveRelayUrl(opts.relayUrl);
     this._appId    = opts.appId || 'koa-app';
+    this._timeoutMs = opts.timeoutMs || 30_000;
     this._storage  = opts.storage || {
       get:    _safeGet,
       set:    _safeSet,
@@ -331,6 +303,32 @@ class ByokRelayClient {
 
   get _tokenKey () { return `byok_relay_token_${this._appId}`; }
 
+  _timeoutController (externalSignal) {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), this._timeoutMs);
+    return {
+      signal: controller.signal,
+      cleanup: () => {
+        clearTimeout(timer);
+        externalSignal?.removeEventListener('abort', onAbort);
+      },
+    };
+  }
+
+  /** Fetch with a bounded connection/response-start timeout. */
+  async _fetch (url, options = {}) {
+    const { signal: externalSignal, ...requestOptions } = options;
+    const timeout = this._timeoutController(externalSignal);
+    try {
+      return await fetch(url, { ...requestOptions, signal: timeout.signal });
+    } finally {
+      timeout.cleanup();
+    }
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Auth                                                                     */
   /* ---------------------------------------------------------------------- */
@@ -341,7 +339,7 @@ class ByokRelayClient {
    */
   async register (appId) {
     if (appId) this._appId = appId;
-    const res  = await fetch(`${this._relayUrl}/users`, {
+    const res  = await this._fetch(`${this._relayUrl}/users`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ app_id: this._appId }),
@@ -370,7 +368,7 @@ class ByokRelayClient {
 
   async storeKey (provider, apiKey) {
     const token = await this.ensureToken();
-    const res   = await fetch(`${this._relayUrl}/keys/${provider}`, {
+    const res   = await this._fetch(`${this._relayUrl}/keys/${provider}`, {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -384,7 +382,7 @@ class ByokRelayClient {
 
   async listKeys () {
     const token = await this.ensureToken();
-    const res   = await fetch(`${this._relayUrl}/keys`, {
+    const res   = await this._fetch(`${this._relayUrl}/keys`, {
       headers: { 'Authorization': `Bearer ${token}` },
     });
     if (!res.ok) throw new Error(`listKeys failed: ${res.status}`);
@@ -393,7 +391,7 @@ class ByokRelayClient {
 
   async deleteKey (provider) {
     const token = await this.ensureToken();
-    const res   = await fetch(`${this._relayUrl}/keys/${provider}`, {
+    const res   = await this._fetch(`${this._relayUrl}/keys/${provider}`, {
       method:  'DELETE',
       headers: { 'Authorization': `Bearer ${token}` },
     });
@@ -403,7 +401,7 @@ class ByokRelayClient {
 
   async rotateKey (provider, newApiKey) {
     const token = await this.ensureToken();
-    const res   = await fetch(`${this._relayUrl}/keys/${provider}/rotate`, {
+    const res   = await this._fetch(`${this._relayUrl}/keys/${provider}/rotate`, {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -429,7 +427,7 @@ class ByokRelayClient {
    */
   async relayRequest (providerPath, body, extraHeaders = {}) {
     const token = await this.ensureToken();
-    return fetch(`${this._relayUrl}/relay/${providerPath}`, {
+    return this._fetch(`${this._relayUrl}/relay/${providerPath}`, {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -451,7 +449,7 @@ class ByokRelayClient {
    */
   async chat ({ model, messages, extraParams = {} }) {
     const token = await this.ensureToken();
-    const res   = await fetch(`${this._relayUrl}/relay`, {
+    const res   = await this._fetch(`${this._relayUrl}/relay`, {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -474,44 +472,49 @@ class ByokRelayClient {
    */
   async * streamChat ({ model, messages, extraParams = {}, signal }) {
     const token = await this.ensureToken();
-    const res   = await fetch(`${this._relayUrl}/relay`, {
-      method:  'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body:   JSON.stringify({ model, messages, stream: true, ...extraParams }),
-      signal,
-    });
+    const timeout = this._timeoutController(signal);
+    try {
+      const res = await fetch(`${this._relayUrl}/relay`, {
+        method:  'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body:   JSON.stringify({ model, messages, stream: true, ...extraParams }),
+        signal: timeout.signal,
+      });
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`streamChat failed (${res.status}): ${err}`);
-    }
-
-    const reader  = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer    = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return;
-        try {
-          const parsed = JSON.parse(data);
-          const chunk  = parsed.choices?.[0]?.delta?.content
-            ?? parsed.delta?.text
-            ?? '';
-          if (chunk) yield chunk;
-        } catch (_) {}
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`streamChat failed (${res.status}): ${err}`);
       }
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer    = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return;
+          try {
+            const parsed = JSON.parse(data);
+            const chunk  = parsed.choices?.[0]?.delta?.content
+              ?? parsed.delta?.text
+              ?? '';
+            if (chunk) yield chunk;
+          } catch (_) {}
+        }
+      }
+    } finally {
+      timeout.cleanup();
     }
   }
 
@@ -521,14 +524,14 @@ class ByokRelayClient {
 
   async health (deep = false) {
     const url = `${this._relayUrl}/health${deep ? '?deep=1' : ''}`;
-    const res = await fetch(url);
+    const res = await this._fetch(url);
     return res.json();
   }
 
   async stats (appId) {
     const token = await this.ensureToken();
     const path  = appId ? `/stats/${appId}` : '/stats';
-    const res   = await fetch(`${this._relayUrl}${path}`, {
+    const res   = await this._fetch(`${this._relayUrl}${path}`, {
       headers: { 'Authorization': `Bearer ${token}` },
     });
     if (!res.ok) throw new Error(`stats failed: ${res.status}`);
@@ -536,7 +539,7 @@ class ByokRelayClient {
   }
 
   async getModels () {
-    const res = await fetch(`${this._relayUrl}/models`);
+    const res = await this._fetch(`${this._relayUrl}/models`);
     if (!res.ok) throw new Error(`getModels failed: ${res.status}`);
     return res.json();
   }
@@ -544,7 +547,7 @@ class ByokRelayClient {
   /** Delete account and all associated keys (GDPR Art. 17). */
   async deleteAccount () {
     const token = await this.ensureToken();
-    const res   = await fetch(`${this._relayUrl}/users`, {
+    const res   = await this._fetch(`${this._relayUrl}/users`, {
       method:  'DELETE',
       headers: { 'Authorization': `Bearer ${token}` },
     });

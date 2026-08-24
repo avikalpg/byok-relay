@@ -185,7 +185,7 @@ Or use the managed relay at `https://relay.byokrelay.com` for development.
 
 ## Key differentiator vs `@byok-relay/express`
 
-`@byok-relay/koa` uses Koa's `async (ctx, next)` middleware signature and integrates natively with `@koa/router`. Unlike Express, Koa's context object (`ctx`) merges request + response — no separate `req`/`res` parameters. The body-reading logic handles both koa-body/bodyparser raw bodies and raw stream consumption, so it works with or without a body parser middleware.
+`@byok-relay/koa` uses Koa's `async (ctx, next)` middleware signature and integrates natively with `@koa/router`. Unlike Express, Koa's context object (`ctx`) merges request + response — no separate `req`/`res` parameters. Mount the relay middleware or router before body parsers unless your parser preserves `ctx.request.rawBody`; this keeps the original request stream available for forwarding.
 
 ## Related packages
 
