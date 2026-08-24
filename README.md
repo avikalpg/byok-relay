@@ -1678,6 +1678,33 @@ function ChatScreen() {
 
 Also supports **Expo SecureStore** as a custom storage adapter for credential-grade encrypted storage. `storeKey()` sends the relay contract payload `{ key }` with the `x-relay-token` header, and chat/streaming requests reuse that relay token. Exports: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `ByokRelayClient`, `createAsyncStorage`. [Full docs →](packages/expo/README.md)
 
+## tRPC Integration (`@byok-relay/trpc`)
+
+Type-safe AI procedures with user-owned keys. `RELAY_URL` stays in `process.env` — the browser only calls your tRPC server.
+
+```bash
+npm install @byok-relay/trpc @trpc/server
+```
+
+```js
+// trpc/router.js
+const { initTRPC } = require('@trpc/server');
+const { createByokRelayContext, createByokRelayRouter } = require('@byok-relay/trpc');
+const t = initTRPC.context().create();
+const appRouter = t.router({ relay: createByokRelayRouter(t) });
+module.exports = { appRouter };
+
+// app/api/trpc/[trpc]/route.js  (Next.js App Router)
+const { createByokRelayFetchHandler } = require('@byok-relay/trpc');
+const { appRouter } = require('../../../../trpc/router');
+const handler = createByokRelayFetchHandler({ router: appRouter });
+module.exports = { GET: handler, POST: handler };
+```
+
+Client: `trpc.relay.chat.mutate({ model: 'openai/gpt-4o', messages })` returns `{ reply }`.
+Procedures: health · register · storeKey · listKeys · deleteKey · rotateKey · chat · stats · models.
+`createRelayProcedure(t.procedure)` injects `ctx.relay` into any individual procedure.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:

@@ -707,3 +707,26 @@ npm: pending publication for @byok-relay/expo
 - @byok-relay/client (framework-agnostic): https://www.npmjs.com/package/@byok-relay/client
 - @byok-relay/mcp (Claude Desktop/Code MCP): https://www.npmjs.com/package/@byok-relay/mcp
 - @byok-relay/hono (Hono middleware): https://www.npmjs.com/package/@byok-relay/hono
+## tRPC Integration (`@byok-relay/trpc`)
+
+tRPC v11 router adapter, context factory, and middleware for BYOK AI.
+`RELAY_URL` stays in `process.env` — browser only calls your tRPC server.
+`npm install @byok-relay/trpc @trpc/server`
+
+```js
+// trpc/init.js
+const { initTRPC } = require('@trpc/server');
+const { createByokRelayContext } = require('@byok-relay/trpc');
+const createContext = createByokRelayContext({ relayUrl: process.env.RELAY_URL });
+const t = initTRPC.context().create();
+module.exports = { t, createContext };
+
+// trpc/router.js
+const { createByokRelayRouter } = require('@byok-relay/trpc');
+const relayRouter = createByokRelayRouter(t);
+const appRouter = t.router({ relay: relayRouter });
+```
+
+Client: `trpc.relay.chat.mutate({ model: 'openai/gpt-4o', messages })` returns `{ reply }`.
+All relay ops: health, register, storeKey, listKeys, deleteKey, rotateKey, chat, stats, models.
+npm: https://www.npmjs.com/package/@byok-relay/trpc
