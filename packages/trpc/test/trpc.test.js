@@ -47,9 +47,11 @@ async function assertThrowsAsync(fn, msg) {
     await fn();
     console.error(`  ❌ ${msg} (expected throw, got none)`);
     failed++;
-  } catch (_) {
+    return null;
+  } catch (error) {
     console.log(`  ✅ ${msg}`);
     passed++;
+    return error;
   }
 }
 
@@ -304,9 +306,13 @@ section('createByokRelayFetchHandler — throws when @trpc/server not installed 
   });
   // This will throw because @trpc/server is not installed in the test env.
   // That is the correct behavior — the error message tells the user what to install.
-  await assertThrowsAsync(
+  const error = await assertThrowsAsync(
     () => handler(new Request('https://example.com/api/trpc/health')),
     'throws with install instructions when @trpc/server missing'
+  );
+  assert(
+    error?.message.includes('@trpc/server'),
+    'missing-peer error mentions @trpc/server installation'
   );
 }
 
