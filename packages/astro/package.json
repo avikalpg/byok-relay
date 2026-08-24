@@ -1,0 +1,47 @@
+{
+  "name": "@byok-relay/astro",
+  "version": "1.0.0",
+  "description": "Astro integration for BYOK AI relay — server middleware, API route factory, client-side ByokRelayClient",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/integration.test.js"
+  },
+  "keywords": [
+    "astro",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "middleware",
+    "ssr",
+    "frontend",
+    "islands",
+    "astro-integration"
+  ],
+  "peerDependencies": {
+    "astro": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "astro": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/astro"
+  },
+  "homepage": "https://byokrelay.com"
+}

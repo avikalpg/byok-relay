@@ -74,6 +74,15 @@ function _safeRemove(key) {
   try { window.localStorage.removeItem(key); } catch (_) {}
 }
 
+/**
+ * Resolve either a storage adapter or a request/context-aware storage factory.
+ * Server adapters should use a factory to select storage for the authenticated
+ * request instead of sharing a process-wide token store.
+ */
+function _resolveStorage(storage, requestOrContext) {
+  return typeof storage === 'function' ? storage(requestOrContext) : storage;
+}
+
 /* ========================================================================== */
 /* ByokRelayClient — plain-JS class, no framework dependency                  */
 /* ========================================================================== */
@@ -392,7 +401,8 @@ class ByokRelayClient {
  * @param {object} [opts]
  * @param {string} [opts.relayUrl]  Upstream relay URL. Defaults to process.env.RELAY_URL or managed relay.
  * @param {string} [opts.appId]     Optional app_id for client registration.
- * @param {object} [opts.storage]   Custom storage adapter.
+ * @param {object|Function} [opts.storage] Custom storage adapter, or a factory
+ *   receiving the request and returning an adapter for its authenticated session.
  * @returns {(req: Request) => object} tRPC context factory
  *
  * @example
@@ -404,9 +414,8 @@ class ByokRelayClient {
 function createByokRelayContext(opts = {}) {
   const relayUrl = opts.relayUrl || process.env.RELAY_URL || DEFAULT_RELAY_URL;
   const appId    = opts.appId || 'byok-relay-trpc';
-  const storage  = opts.storage;
-
-  return function createContext(/* req */) {
+  return function createContext(req) {
+    const storage = _resolveStorage(opts.storage, req);
     const client = new ByokRelayClient({ relayUrl, appId, storage });
     return { relay: client, relayUrl };
   };
@@ -448,9 +457,11 @@ function createByokRelayRouter(t, opts = {}) {
 
   // Helper: get relay client from context or create ad-hoc from opts
   function getClient(ctx) {
-    if (ctx && ctx.relay instanceof ByokRelayClient) return ctx.relay;
+    if (ctx && ctx.relay) return ctx.relay;
     return new ByokRelayClient({
       relayUrl: opts.relayUrl || process.env.RELAY_URL || DEFAULT_RELAY_URL,
+      appId:    opts.appId,
+      storage:  _resolveStorage(opts.storage, ctx),
     });
   }
 
@@ -579,7 +590,8 @@ function createByokRelayRouter(t, opts = {}) {
  * @param {object} [opts]
  * @param {string} [opts.relayUrl] Upstream relay URL.
  * @param {string} [opts.appId]
- * @param {object} [opts.storage]
+ * @param {object|Function} [opts.storage] Custom storage adapter, or a factory
+ *   receiving tRPC context and returning a session-scoped adapter.
  * @returns enhanced tRPC procedure with `ctx.relay: ByokRelayClient`
  *
  * @example
@@ -602,9 +614,10 @@ function createRelayProcedure(baseProcedure, opts = {}) {
 
   const relayUrl = opts.relayUrl || process.env.RELAY_URL || DEFAULT_RELAY_URL;
   const appId    = opts.appId;
-  const storage  = opts.storage;
 
   return baseProcedure.use(({ ctx, next }) => {
+    if (ctx && ctx.relay) return next({ ctx });
+    const storage = _resolveStorage(opts.storage, ctx);
     const relay = new ByokRelayClient({ relayUrl, appId, storage });
     return next({ ctx: { ...ctx, relay } });
   });
@@ -625,6 +638,8 @@ function createRelayProcedure(baseProcedure, opts = {}) {
  * @param {string}  [opts.endpoint]  tRPC endpoint prefix (default '/api/trpc')
  * @param {string}  [opts.relayUrl]  Upstream relay URL
  * @param {string}  [opts.appId]     Optional app_id
+ * @param {object|Function} [opts.storage] Custom storage adapter, or a factory
+ *   receiving the request and returning a session-scoped adapter.
  * @param {Function} [opts.createContext] Additional context factories to merge
  * @returns {(request: Request) => Promise<Response>}
  *
@@ -650,8 +665,12 @@ function createByokRelayFetchHandler(opts = {}) {
       );
     }
 
-    const baseCtx = opts.createContext ? await opts.createContext(request) : {};
-    const relay   = new ByokRelayClient({ relayUrl, appId });
+    const baseCtx = (opts.createContext ? await opts.createContext(request) : {}) || {};
+    const relay   = baseCtx.relay || new ByokRelayClient({
+      relayUrl,
+      appId,
+      storage: _resolveStorage(opts.storage, request),
+    });
 
     return fetchAdapter.fetchRequestHandler({
       endpoint:      opts.endpoint || '/api/trpc',

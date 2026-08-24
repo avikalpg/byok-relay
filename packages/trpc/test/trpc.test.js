@@ -47,15 +47,19 @@ async function assertThrowsAsync(fn, msg) {
     await fn();
     console.error(`  ❌ ${msg} (expected throw, got none)`);
     failed++;
-  } catch (_) {
+    return null;
+  } catch (error) {
     console.log(`  ✅ ${msg}`);
     passed++;
+    return error;
   }
 }
 
 function section(name) {
   console.log(`\n📋 ${name}`);
 }
+
+async function main() {
 
 /* ========================================================================== */
 /* ByokRelayClient — unit tests                                                */
@@ -124,10 +128,9 @@ section('ByokRelayClient — ensureToken returns cached token');
   let called = false;
   const origRegister = client.register.bind(client);
   client.register = async () => { called = true; return 'tok_new'; };
-  client.ensureToken().then((tok) => {
-    assert(tok === 'tok_existing', 'ensureToken returns cached token');
-    assert(!called, 'ensureToken does not call register when cached');
-  });
+  const tok = await client.ensureToken();
+  assert(tok === 'tok_existing', 'ensureToken returns cached token');
+  assert(!called, 'ensureToken does not call register when cached');
 }
 
 /* ========================================================================== */
@@ -160,6 +163,25 @@ section('createByokRelayContext — factory');
   const factory = createByokRelayContext();
   const ctx = factory({});
   assert(ctx.relay._relayUrl === 'https://relay.byokrelay.com', 'falls back to managed relay when env unset');
+}
+
+{
+  const sessionStores = new Map();
+  const storageFor = (request) => {
+    if (!sessionStores.has(request.sessionId)) sessionStores.set(request.sessionId, {});
+    const store = sessionStores.get(request.sessionId);
+    return {
+      get:    (k) => store[k] || null,
+      set:    (k, v) => { store[k] = v; },
+      remove: (k) => { delete store[k]; },
+    };
+  };
+  const factory = createByokRelayContext({ storage: storageFor });
+  factory({ sessionId: 'alice' }).relay._store('byok_relay_token', 'alice-token');
+  assert(
+    factory({ sessionId: 'alice' }).relay._load('byok_relay_token') === 'alice-token',
+    'storage factory reuses token storage for the authenticated request session'
+  );
 }
 
 /* ========================================================================== */
@@ -284,9 +306,13 @@ section('createByokRelayFetchHandler — throws when @trpc/server not installed 
   });
   // This will throw because @trpc/server is not installed in the test env.
   // That is the correct behavior — the error message tells the user what to install.
-  assertThrowsAsync(
+  const error = await assertThrowsAsync(
     () => handler(new Request('https://example.com/api/trpc/health')),
     'throws with install instructions when @trpc/server missing'
+  );
+  assert(
+    error?.message.includes('@trpc/server'),
+    'missing-peer error mentions @trpc/server installation'
   );
 }
 
@@ -371,8 +397,14 @@ console.log(`Results: ${passed} passed, ${failed} failed`);
 
 if (failed > 0) {
   console.error('\n❌ Some tests failed.');
-  process.exit(1);
+  process.exitCode = 1;
 } else {
   console.log('\n✅ All tests passed.');
-  process.exit(0);
 }
+
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
