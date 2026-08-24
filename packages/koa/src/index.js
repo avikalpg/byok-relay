@@ -37,6 +37,7 @@ const { Readable } = require('node:stream');
 
 const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
 const DEFAULT_RELAY_PATH_PREFIX = '/relay';
+const DEFAULT_MAX_BODY_SIZE = 1_048_576;
 
 /** Headers that must not be forwarded upstream (hop-by-hop). */
 const HOP_BY_HOP = new Set([
@@ -87,23 +88,48 @@ function _resolveRelayUrl (opt) {
   return opt || process.env.RELAY_URL || DEFAULT_RELAY_URL;
 }
 
-/** Read raw body from Koa ctx as a Buffer, respecting an abort signal. */
-async function _readBody (ctx, signal) {
+function _bodyTooLargeError () {
+  const err = new Error('request body exceeds maximum size');
+  err.code = 'BODY_TOO_LARGE';
+  return err;
+}
+
+/** Read raw body from Koa ctx as a Buffer, respecting an abort signal and size limit. */
+async function _readBody (ctx, signal, maxBodySize) {
   // If koa-body / @koa/bodyparser already ran, use the parsed raw body
-  if (ctx.request.rawBody) return Buffer.from(ctx.request.rawBody);
-  if (ctx.req.body instanceof Buffer) return ctx.req.body;
+  if (ctx.request.rawBody) {
+    const body = Buffer.from(ctx.request.rawBody);
+    if (body.length > maxBodySize) throw _bodyTooLargeError();
+    return body;
+  }
+  if (ctx.req.body instanceof Buffer) {
+    if (ctx.req.body.length > maxBodySize) throw _bodyTooLargeError();
+    return ctx.req.body;
+  }
   // A consumed stream has no remaining body to proxy. Do not wait for events
   // that have already fired when middleware is mounted after a body parser.
   if (ctx.req.readableEnded || ctx.req.destroyed) return Buffer.alloc(0);
   return new Promise((resolve, reject) => {
     const chunks = [];
+    let size = 0;
     const cleanup = () => {
       ctx.req.removeListener('data', onData);
       ctx.req.removeListener('end', onEnd);
       ctx.req.removeListener('error', onError);
       signal?.removeEventListener('abort', onAbort);
     };
-    const onData = c => chunks.push(c);
+    const onData = c => {
+      size += c.length;
+      if (size > maxBodySize) {
+        cleanup();
+        // Resume without data listeners so the remaining request is drained
+        // instead of being buffered while the 413 response is sent.
+        ctx.req.resume();
+        reject(_bodyTooLargeError());
+        return;
+      }
+      chunks.push(c);
+    };
     const onEnd = () => { cleanup(); resolve(Buffer.concat(chunks)); };
     const onError = err => { cleanup(); reject(err); };
     const onAbort = () => {
@@ -132,9 +158,9 @@ async function _forwardResponse (ctx, response) {
 }
 
 /** Shared proxy implementation for middleware and @koa/router adapters. */
-async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs }) {
+async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs, maxBodySize }) {
   const appId = ctx.headers['x-app-id'] || ctx.query.app_id;
-  if (allowedApps && appId && !allowedApps.has(appId)) {
+  if (allowedApps && (!appId || !allowedApps.has(appId))) {
     ctx.status = 403;
     ctx.body = { error: 'app_id not allowed' };
     return;
@@ -147,7 +173,7 @@ async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutM
   try {
     const body = ['GET', 'HEAD', 'OPTIONS'].includes(ctx.method.toUpperCase())
       ? undefined
-      : await _readBody(ctx, controller.signal);
+      : await _readBody(ctx, controller.signal, maxBodySize);
     const response = await fetch(`${relayUrl}${subPath}${qs}`, {
       method: ctx.method,
       headers: _filterHeaders(ctx.headers),
@@ -157,8 +183,12 @@ async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutM
     });
     await _forwardResponse(ctx, response);
   } catch (err) {
-    ctx.status = err.name === 'AbortError' ? 504 : 502;
-    ctx.body = { error: err.name === 'AbortError' ? 'upstream timeout' : 'Failed to reach AI provider' };
+    ctx.status = err.code === 'BODY_TOO_LARGE' ? 413 : err.name === 'AbortError' ? 504 : 502;
+    ctx.body = {
+      error: err.code === 'BODY_TOO_LARGE'
+        ? 'request body too large'
+        : err.name === 'AbortError' ? 'upstream timeout' : 'Failed to reach AI provider',
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -176,6 +206,7 @@ async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutM
  *   pathPrefix    – prefix to intercept (default: '/relay')
  *   allowedAppIds – if set, only these app_id values pass through (403 otherwise)
  *   timeoutMs     – upstream fetch timeout in ms (default: 30000)
+ *   maxBodySize   – maximum proxied request body size in bytes (default: 1048576)
  *
  * Mount before your routes:
  *   app.use(createByokRelayMiddleware({ relayUrl: process.env.RELAY_URL }));
@@ -185,10 +216,11 @@ function createByokRelayMiddleware (opts = {}) {
   const pathPrefix  = opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX;
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
   const timeoutMs   = opts.timeoutMs || 30_000;
+  const maxBodySize = opts.maxBodySize ?? DEFAULT_MAX_BODY_SIZE;
 
   return async function byokRelayMiddleware (ctx, next) {
     if (!ctx.path.startsWith(pathPrefix)) return next();
-    return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs });
+    return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs, maxBodySize });
   };
 }
 
@@ -211,6 +243,7 @@ function createRelayRouter (opts = {}) {
   const pathPrefix  = (opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX).replace(/\/$/, '');
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
   const timeoutMs   = opts.timeoutMs || 30_000;
+  const maxBodySize = opts.maxBodySize ?? DEFAULT_MAX_BODY_SIZE;
 
   // Lazy-resolve @koa/router to keep it an optional peer dep
   let Router;
@@ -229,7 +262,7 @@ function createRelayRouter (opts = {}) {
 
   const router = new Router();
   async function handler (ctx) {
-    return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs });
+    return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs, maxBodySize });
   }
 
   // router.use covers every method under the prefix without path-to-regexp

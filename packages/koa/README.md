@@ -78,6 +78,7 @@ const relayRouter = createRelayRouter({
   relayUrl:      process.env.RELAY_URL,   // optional — reads env automatically
   allowedAppIds: ['my-app', 'other-app'], // optional allowlist
   timeoutMs:     30_000,                  // default
+  maxBodySize:   1_048_576,               // default, in bytes
 });
 
 app.use(relayRouter.routes());
@@ -136,6 +137,7 @@ router.post('/register-key', async ctx => {
 | `pathPrefix` | string | `'/relay'` | Path prefix to intercept |
 | `allowedAppIds` | string[] | — | Allowlist of `x-app-id` header values (403 on mismatch) |
 | `timeoutMs` | number | `30000` | Upstream fetch timeout in ms (504 on expiry) |
+| `maxBodySize` | number | `1048576` | Maximum proxied request body size in bytes (413 on overflow) |
 
 ## `createRelayRouter` options
 

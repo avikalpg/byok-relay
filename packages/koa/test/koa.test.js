@@ -111,6 +111,22 @@ await testAsync('middleware returns 403 for disallowed app_id', async () => {
   assert.ok(ctx.body.error);
 });
 
+await testAsync('middleware returns 403 when an allowlist is configured without an app_id', async () => {
+  const mw = createByokRelayMiddleware({
+    pathPrefix: '/relay',
+    allowedAppIds: ['allowed-app'],
+  });
+  const ctx = {
+    path: '/relay/openai/chat/completions',
+    headers: {},
+    query: {},
+    set: () => {},
+  };
+  await mw(ctx, () => {});
+  assert.strictEqual(ctx.status, 403);
+  assert.ok(ctx.body.error);
+});
+
 await testAsync('middleware passes through when app_id is in allowedAppIds', async () => {
   // Should attempt upstream fetch (will fail with network error — that is expected)
   const mw = createByokRelayMiddleware({
@@ -164,6 +180,23 @@ await testAsync('middleware times out while reading a request body', async () =>
   await createByokRelayMiddleware({ relayUrl: 'https://relay.example', timeoutMs: 10 })(ctx, () => {});
   assert.strictEqual(ctx.status, 504);
   req.destroy();
+});
+
+await testAsync('middleware rejects a request body that exceeds maxBodySize', async () => {
+  const req = new PassThrough();
+  const ctx = {
+    path: '/relay/openai/chat/completions',
+    headers: {}, query: {}, request: {}, req,
+    method: 'POST', querystring: '', set: () => {},
+  };
+  const pending = createByokRelayMiddleware({
+    relayUrl: 'https://relay.example',
+    maxBodySize: 4,
+  })(ctx, () => {});
+  req.end('12345');
+  await pending;
+  assert.strictEqual(ctx.status, 413);
+  assert.strictEqual(ctx.body.error, 'request body too large');
 });
 
 /* ------------------------------------------------------------------ */
