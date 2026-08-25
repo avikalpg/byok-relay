@@ -208,7 +208,13 @@ export async function load({ cookies }) {
 
 ### `createRelayRouteHandlers(opts?)`
 
-Same options as `createByokRelayHandle`. Returns `{ GET, POST, PUT, PATCH, DELETE, OPTIONS }` SvelteKit `RequestHandler` functions.
+Returns `{ GET, POST, PUT, PATCH, DELETE, OPTIONS }` SvelteKit `RequestHandler` functions. The SvelteKit route mount point defines the relay path prefix.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `relayUrl` | `string` | `process.env.RELAY_URL` | Upstream relay base URL |
+| `allowedAppIds` | `string[]` | — | If set, only these `x-app-id` header values pass (403 otherwise) |
+| `timeoutMs` | `number` | `30000` | Upstream fetch timeout in ms |
 
 ### `new ByokRelayClient(opts?)`
 

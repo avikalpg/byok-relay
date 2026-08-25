@@ -112,6 +112,20 @@ await testAsync('handle passes non-matching paths to resolve()', async () => {
   assert.ok(resolveCalled, 'resolve should be called for non-relay paths');
 });
 
+await testAsync('handle passes sibling paths to resolve()', async () => {
+  const handle = createByokRelayHandle({ pathPrefix: '/relay', relayUrl: 'http://localhost:3000' });
+  let resolveCalled = false;
+  const mockEvent = {
+    url: new URL('http://localhost:5173/relayed-notes'),
+    request: new Request('http://localhost:5173/relayed-notes'),
+  };
+  await handle({ event: mockEvent, resolve: async () => {
+    resolveCalled = true;
+    return new Response('ok');
+  } });
+  assert.ok(resolveCalled, 'resolve should be called for sibling paths');
+});
+
 await testAsync('handle does NOT call resolve() for matching path prefix', async () => {
   // We can't make a real upstream call; instead verify resolve isn't called
   // by mocking fetch to return a valid response
@@ -157,6 +171,40 @@ await testAsync('handle returns 403 for disallowed app_id', async () => {
   };
   const response = await handle({ event: mockEvent, resolve: async () => new Response('ok') });
   assert.strictEqual(response.status, 403);
+});
+
+await testAsync('handle returns 403 when an allowlist is configured without app_id', async () => {
+  const handle = createByokRelayHandle({
+    pathPrefix: '/relay',
+    relayUrl: 'http://localhost:3000',
+    allowedAppIds: ['allowed-app'],
+  });
+  const mockEvent = {
+    url: new URL('http://localhost:5173/relay/openai/chat/completions'),
+    request: new Request('http://localhost:5173/relay/openai/chat/completions', {
+      method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' },
+    }),
+  };
+  const response = await handle({ event: mockEvent, resolve: async () => new Response('ok') });
+  assert.strictEqual(response.status, 403);
+});
+
+await testAsync('handle drops stale encoding and length response headers', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response('decoded', {
+    status: 200,
+    headers: { 'content-encoding': 'gzip', 'content-length': '999', 'x-request-id': 'abc' },
+  });
+  const handle = createByokRelayHandle({ relayUrl: 'http://localhost:3000' });
+  const mockEvent = {
+    url: new URL('http://localhost:5173/relay/health'),
+    request: new Request('http://localhost:5173/relay/health'),
+  };
+  const response = await handle({ event: mockEvent, resolve: async () => new Response('ok') });
+  assert.strictEqual(response.headers.get('content-encoding'), null);
+  assert.strictEqual(response.headers.get('content-length'), null);
+  assert.strictEqual(response.headers.get('x-request-id'), 'abc');
+  global.fetch = originalFetch;
 });
 
 await testAsync('handle returns 504 when upstream times out', async () => {
@@ -439,6 +487,44 @@ await testAsync('ByokRelayClient.streamChat() yields text chunks', async () => {
     chunks.push(chunk);
   }
   assert.deepStrictEqual(chunks, ['Hello', ' world']);
+  global.fetch = originalFetch;
+});
+
+await testAsync('ByokRelayClient.streamChat() cancels the reader on early exit', async () => {
+  const originalFetch = global.fetch;
+  let cancelled = false;
+  global.fetch = async (url) => {
+    if (url.includes('/users')) return new Response(JSON.stringify({ token: 'tok' }), { status: 201 });
+    return {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => ({ done: false, value: new TextEncoder().encode('data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n') }),
+          cancel: async () => { cancelled = true; },
+        }),
+      },
+    };
+  };
+  const client = new ByokRelayClient({ relayUrl: 'http://localhost:3000' });
+  for await (const chunk of client.streamChat({ model: 'gpt-4o', messages: [] })) {
+    assert.strictEqual(chunk, 'Hello');
+    break;
+  }
+  assert.ok(cancelled, 'reader should be cancelled when the consumer exits early');
+  global.fetch = originalFetch;
+});
+
+await testAsync('ByokRelayClient.streamChat() rejects an empty successful body', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (url.includes('/users')) return new Response(JSON.stringify({ token: 'tok' }), { status: 201 });
+    return { ok: true, body: null };
+  };
+  const client = new ByokRelayClient({ relayUrl: 'http://localhost:3000' });
+  await assert.rejects(
+    async () => { for await (const _ of client.streamChat({ model: 'gpt-4o', messages: [] })) {} },
+    /empty response body/
+  );
   global.fetch = originalFetch;
 });
 

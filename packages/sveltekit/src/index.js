@@ -104,7 +104,7 @@ function _resolveRelayUrl (opt) {
 async function _proxyToRelay (upstreamUrl, request, timeoutMs, allowedApps) {
   // Optional app_id allowlist check
   const appId = request.headers.get('x-app-id');
-  if (allowedApps && appId && !allowedApps.has(appId)) {
+  if (allowedApps && (!appId || !allowedApps.has(appId))) {
     return new Response(JSON.stringify({ error: 'app_id not allowed' }), {
       status: 403,
       headers: { 'Content-Type': 'application/json' },
@@ -135,7 +135,10 @@ async function _proxyToRelay (upstreamUrl, request, timeoutMs, allowedApps) {
     // Forward status and headers; stream the body
     const responseHeaders = {};
     for (const [k, v] of response.headers.entries()) {
-      if (!HOP_BY_HOP.has(k.toLowerCase())) responseHeaders[k] = v;
+      const header = k.toLowerCase();
+      if (!HOP_BY_HOP.has(header) && header !== 'content-encoding' && header !== 'content-length') {
+        responseHeaders[k] = v;
+      }
     }
 
     return new Response(response.body, {
@@ -197,11 +200,12 @@ function createByokRelayHandle (opts = {}) {
   return async function byokRelayHandle ({ event, resolve }) {
     const { pathname, search } = event.url;
 
-    if (!pathname.startsWith(pathPrefix)) {
+    const prefix = pathPrefix.replace(/\/$/, '');
+    if (pathname !== prefix && !pathname.startsWith(`${prefix}/`)) {
       return resolve(event);
     }
 
-    const subPath  = pathname.slice(pathPrefix.length) || '/';
+    const subPath  = pathname.slice(prefix.length) || '/';
     const upstream = `${relayUrl.replace(/\/$/, '')}${subPath}${search}`;
 
     return _proxyToRelay(upstream, event.request, timeoutMs, allowedApps);
@@ -232,7 +236,6 @@ function createByokRelayHandle (opts = {}) {
  */
 function createRelayRouteHandlers (opts = {}) {
   const relayUrl    = _resolveRelayUrl(opts.relayUrl);
-  const pathPrefix  = (opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX).replace(/\/$/, '');
   const allowedApps = opts.allowedAppIds ? new Set(opts.allowedAppIds) : null;
   const timeoutMs   = opts.timeoutMs || 30_000;
 
@@ -495,29 +498,35 @@ class ByokRelayClient {
       throw new Error(`streamChat failed (${res.status}): ${err}`);
     }
 
+    if (!res.body) throw new Error('streamChat failed: empty response body');
+
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer    = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return;
-        try {
-          const parsed = JSON.parse(data);
-          const chunk  = parsed.choices?.[0]?.delta?.content
-            ?? parsed.delta?.text
-            ?? '';
-          if (chunk) yield chunk;
-        } catch (_) {}
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return;
+          try {
+            const parsed = JSON.parse(data);
+            const chunk  = parsed.choices?.[0]?.delta?.content
+              ?? parsed.delta?.text
+              ?? '';
+            if (chunk) yield chunk;
+          } catch (_) {}
+        }
       }
+    } finally {
+      try { await reader.cancel(); } catch (_) {}
     }
   }
 
