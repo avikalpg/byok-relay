@@ -328,27 +328,34 @@ function _mixTokens (inst) {
     delete this._memStore[key];
   };
 
+  inst._pendingTokens = inst._pendingTokens || new Map();
+
   inst._ensureToken = async function () {
-    const k = `byok_relay_token_${this._appId}`;
+    const appId = this._appId;
+    const k = `byok_relay_token_${appId}`;
     const existing = this._kget(k);
     if (existing) return existing;
-    if (!this._pendingToken) {
-      this._pendingToken = (async () => {
+
+    let pending = this._pendingTokens.get(k);
+    if (!pending) {
+      pending = (async () => {
         const res = await fetch(`${this._relayUrl}/users`, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ app_id: this._appId }),
+          body:    JSON.stringify({ app_id: appId }),
         });
         if (!res.ok) throw new Error(`byok-relay register failed: ${res.status}`);
         const data = await res.json();
         this._kset(k, data.token);
         return data.token;
       })();
+      this._pendingTokens.set(k, pending);
     }
+
     try {
-      return await this._pendingToken;
+      return await pending;
     } finally {
-      this._pendingToken = null;
+      if (this._pendingTokens.get(k) === pending) this._pendingTokens.delete(k);
     }
   };
 

@@ -195,6 +195,39 @@ await testAsync('ensureToken() shares one in-flight registration', async () => {
   restoreFetch();
 });
 
+await testAsync('concurrent registrations for different app IDs keep separate tokens', async () => {
+  const store = {};
+  const pending = {};
+  _fetchCalls = [];
+  global.fetch = (url, opts) => new Promise(resolve => {
+    _fetchCalls.push({ url, opts });
+    const appId = JSON.parse(opts.body).app_id;
+    pending[appId] = () => resolve({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: `tok_${appId}` }),
+    });
+  });
+
+  const c = new pkg.ByokRelayClient({
+    relayUrl: 'http://r',
+    appId: 'app-a',
+    storage: { get: k => store[k] || null, set: (k, v) => { store[k] = v; }, remove: k => { delete store[k]; } },
+  });
+  const first = c.ensureToken();
+  const second = c.register('app-b');
+  assert.strictEqual(_fetchCalls.length, 2, 'each app should register independently');
+  pending['app-b']();
+  pending['app-a']();
+
+  const [firstToken, secondToken] = await Promise.all([first, second]);
+  assert.strictEqual(firstToken, 'tok_app-a');
+  assert.strictEqual(secondToken, 'tok_app-b');
+  assert.strictEqual(store['byok_relay_token_app-a'], 'tok_app-a');
+  assert.strictEqual(store['byok_relay_token_app-b'], 'tok_app-b');
+  restoreFetch();
+});
+
 await testAsync('logout() removes token from storage', async () => {
   const store = {};
   const c = new pkg.ByokRelayClient({
