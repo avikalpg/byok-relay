@@ -169,6 +169,17 @@ await testAsync('ensureToken() returns cached token without re-fetching', async 
   restoreFetch();
 });
 
+
+await testAsync('ensureToken() shares one in-flight registration', async () => {
+  const c = new pkg.ByokRelayClient({ relayUrl: 'http://r', appId: 'app-race', storage: null });
+  mockFetch([{ body: { token: 'tok_shared' } }]);
+  const [first, second] = await Promise.all([c.ensureToken(), c.ensureToken()]);
+  assert.strictEqual(first, 'tok_shared');
+  assert.strictEqual(second, 'tok_shared');
+  assert.strictEqual(_fetchCalls.length, 1, 'concurrent calls should register once');
+  restoreFetch();
+});
+
 await testAsync('logout() removes token from storage', async () => {
   const store = {};
   const c = new pkg.ByokRelayClient({
@@ -388,6 +399,38 @@ await testAsync('_generate() with tools sends tools array', async () => {
   const body = JSON.parse(_fetchCalls[0].opts.body);
   assert.ok(body.tools, 'tools not in request body');
   assert.strictEqual(body.tools[0].function.name, 'get_weather');
+  restoreFetch();
+});
+
+
+await testAsync('_stream() parses chunked SSE content and a trailing tool-call delta', async () => {
+  const store = { 'byok_relay_token_langchain-app': 'tok-stream' };
+  const encoder = new TextEncoder();
+  const chunks = [
+    encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n'),
+    encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"world\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}'),
+  ];
+  _fetchCalls = [];
+  global.fetch = async (url, opts) => {
+    _fetchCalls.push({ url, opts });
+    let offset = 0;
+    return {
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({ read: async () => offset < chunks.length
+        ? { done: false, value: chunks[offset++] }
+        : { done: true }, }) },
+    };
+  };
+  const m = new pkg.ByokRelayChatModel({
+    relayUrl: 'http://r', appId: 'langchain-app',
+    storage: { get: k=>store[k]||null, set:(k,v)=>{store[k]=v;}, remove:k=>{delete store[k];} },
+  });
+  const messages = [{ _getType: () => 'human', content: 'Hi', constructor: { name: 'HumanMessage' } }];
+  const streamed = [];
+  for await (const chunk of m._stream(messages)) streamed.push(chunk.text);
+  assert.deepStrictEqual(streamed, ['Hello ', 'world']);
+  assert.strictEqual(_fetchCalls.length, 1);
   restoreFetch();
 });
 
