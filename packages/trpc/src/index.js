@@ -426,24 +426,14 @@ function createByokRelayContext(opts = {}) {
 /* ========================================================================== */
 
 /**
- * Create a tRPC router pre-wired with all BYOK relay procedures.
- * Merge into your app router under any namespace.
+ * Creates a tRPC router containing BYOK relay procedures.
  *
- * Requires a `t` instance from `initTRPC.context<{ relay: ByokRelayClient }>().create()`.
- * Falls back to a minimal shim if @trpc/server is not installed.
- *
- * @param {object} t  initTRPC result ({ router, procedure })
- * @param {object} [opts]
- * @param {string} [opts.relayUrl]  Override relay URL for this router.
- * @returns tRPC router
- *
- * @example
- * // trpc/router.js
- * const { initTRPC } = require('@trpc/server');
- * const { createByokRelayRouter, createByokRelayContext } = require('@byok-relay/trpc');
- * const t = initTRPC.context().create();
- * const relayRouter = createByokRelayRouter(t);
- * const appRouter = t.router({ relay: relayRouter });
+ * @param {object} t - The tRPC initialization result containing `router` and `procedure`.
+ * @param {object} [opts] - Router configuration options.
+ * @param {string} [opts.relayUrl] - Relay URL override.
+ * @param {string} [opts.appId] - Application identifier used when creating relay clients.
+ * @returns {object} The configured tRPC router.
+ * @throws {Error} If `t` is not a valid tRPC initialization result.
  */
 function createByokRelayRouter(t, opts = {}) {
   if (!t || typeof t.router !== 'function' || typeof t.procedure !== 'object') {

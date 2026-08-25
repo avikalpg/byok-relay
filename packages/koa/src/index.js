@@ -49,7 +49,10 @@ const HOP_BY_HOP = new Set([
 /* Utility                                                                     */
 /* ========================================================================== */
 
-/** True only when running in a browser context (not Node.js). */
+/**
+ * Determines whether browser local storage is available.
+ * @return {boolean} `true` if browser local storage is available, `false` otherwise.
+ */
 function _isClient () {
   try {
     return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -58,22 +61,40 @@ function _isClient () {
   }
 }
 
+/**
+ * Safely retrieve a value from browser local storage.
+ * @param {string} key - The storage key to retrieve.
+ * @return {string|null} The stored value, or `null` when local storage is unavailable or access fails.
+ */
 function _safeGet (key) {
   if (!_isClient()) return null;
   try { return window.localStorage.getItem(key); } catch (_) { return null; }
 }
 
+/**
+ * Stores a value in browser local storage when available.
+ * @param {string} key - The local storage key.
+ * @param {string} val - The value to store.
+ */
 function _safeSet (key, val) {
   if (!_isClient()) return;
   try { window.localStorage.setItem(key, val); } catch (_) {}
 }
 
+/**
+ * Removes a value from browser local storage without throwing errors.
+ * @param {string} key - The storage key to remove.
+ */
 function _safeRemove (key) {
   if (!_isClient()) return;
   try { window.localStorage.removeItem(key); } catch (_) {}
 }
 
-/** Strip hop-by-hop headers; return a plain object. */
+/**
+ * Filters hop-by-hop headers from a header collection.
+ * @param {object} headers - The headers to filter.
+ * @return {object} A plain object containing the remaining headers.
+ */
 function _filterHeaders (headers) {
   const out = {};
   const src = typeof headers.toJSON === 'function' ? headers.toJSON() : headers;
@@ -83,18 +104,33 @@ function _filterHeaders (headers) {
   return out;
 }
 
-/** Resolve the upstream relay URL (env → option → managed default). */
+/**
+ * Resolves the relay URL from an explicit option, environment variable, or managed default.
+ * @param {string} opt - An optional relay URL override.
+ * @return {string} The resolved relay URL.
+ */
 function _resolveRelayUrl (opt) {
   return opt || process.env.RELAY_URL || DEFAULT_RELAY_URL;
 }
 
+/**
+ * Creates an error indicating that a request body exceeds the maximum permitted size.
+ * @return {Error} An error with code `BODY_TOO_LARGE`.
+ */
 function _bodyTooLargeError () {
   const err = new Error('request body exceeds maximum size');
   err.code = 'BODY_TOO_LARGE';
   return err;
 }
 
-/** Read raw body from Koa ctx as a Buffer, respecting an abort signal and size limit. */
+/**
+ * Reads the Koa request body as a buffer.
+ * @param {Object} ctx - The Koa context containing the request.
+ * @param {AbortSignal} [signal] - Signal that aborts the body read.
+ * @param {number} maxBodySize - Maximum permitted body size in bytes.
+ * @returns {Promise<Buffer>} The request body.
+ * @throws {Error} If the body exceeds the size limit or the read is aborted.
+ */
 async function _readBody (ctx, signal, maxBodySize) {
   // If koa-body / @koa/bodyparser already ran, use the parsed raw body
   if (ctx.request.rawBody) {
@@ -157,7 +193,16 @@ async function _forwardResponse (ctx, response) {
     : Buffer.from(await response.arrayBuffer());
 }
 
-/** Shared proxy implementation for middleware and @koa/router adapters. */
+/**
+ * Proxies a Koa request to the configured relay and forwards the upstream response.
+ * @param {Object} ctx - The Koa request and response context.
+ * @param {Object} options - Proxy configuration.
+ * @param {string} options.relayUrl - The relay base URL.
+ * @param {string} options.pathPrefix - The request path prefix to remove before forwarding.
+ * @param {Set<string>} [options.allowedApps] - Application IDs permitted to use the relay.
+ * @param {number} options.timeoutMs - Maximum time allowed for the upstream request.
+ * @param {number} options.maxBodySize - Maximum accepted request body size in bytes.
+ */
 async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs, maxBodySize }) {
   const appId = ctx.headers['x-app-id'] || ctx.query.app_id;
   if (allowedApps && (!appId || !allowedApps.has(appId))) {
@@ -199,17 +244,15 @@ async function _proxyRequest (ctx, { relayUrl, pathPrefix, allowedApps, timeoutM
 /* ========================================================================== */
 
 /**
- * Returns a Koa `async (ctx, next)` middleware.
+ * Creates middleware that proxies requests under a configured path prefix to a relay service.
  *
- * Options:
- *   relayUrl      – upstream relay base URL (default: process.env.RELAY_URL)
- *   pathPrefix    – prefix to intercept (default: '/relay')
- *   allowedAppIds – if set, only these app_id values pass through (403 otherwise)
- *   timeoutMs     – upstream fetch timeout in ms (default: 30000)
- *   maxBodySize   – maximum proxied request body size in bytes (default: 1048576)
- *
- * Mount before your routes:
- *   app.use(createByokRelayMiddleware({ relayUrl: process.env.RELAY_URL }));
+ * @param {Object} [opts] - Middleware configuration.
+ * @param {string} [opts.relayUrl] - Upstream relay base URL.
+ * @param {string} [opts.pathPrefix='/relay'] - Request path prefix to intercept.
+ * @param {string[]} [opts.allowedAppIds] - Application IDs permitted to use the relay.
+ * @param {number} [opts.timeoutMs=30000] - Upstream request timeout in milliseconds.
+ * @param {number} [opts.maxBodySize=1048576] - Maximum proxied request body size in bytes.
+ * @returns {Function} Koa middleware that proxies matching requests and passes other requests to the next middleware.
  */
 function createByokRelayMiddleware (opts = {}) {
   const relayUrl    = _resolveRelayUrl(opts.relayUrl).replace(/\/$/, '');
@@ -230,14 +273,11 @@ function createByokRelayMiddleware (opts = {}) {
 /* ========================================================================== */
 
 /**
- * Returns a `@koa/router` Router with a catch-all route for all HTTP methods.
+ * Creates a Koa router that proxies requests under the configured path prefix.
  *
- * Options: same as createByokRelayMiddleware.
- *
- * Usage:
- *   const relayRouter = createRelayRouter({ relayUrl: process.env.RELAY_URL });
- *   app.use(relayRouter.routes());
- *   app.use(relayRouter.allowedMethods());
+ * @param {Object} [opts={}] - Relay and proxy configuration options.
+ * @returns {Object} A Koa router handling all HTTP methods under the path prefix.
+ * @throws {Error} If neither `@koa/router` nor `koa-router` is installed.
  */
 function createRelayRouter (opts = {}) {
   const relayUrl    = _resolveRelayUrl(opts.relayUrl).replace(/\/$/, '');
@@ -262,6 +302,10 @@ function createRelayRouter (opts = {}) {
   }
 
   const router = new Router();
+  /**
+   * Proxies a matched Koa request through the configured relay.
+   * @param {import('koa').Context} ctx - The Koa request context.
+   */
   async function handler (ctx) {
     return _proxyRequest(ctx, { relayUrl, pathPrefix, allowedApps, timeoutMs, maxBodySize });
   }
