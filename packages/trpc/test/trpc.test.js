@@ -239,6 +239,19 @@ section('createByokRelayRouter — builds router with valid t shim');
   assert('chat' in relayRouter._routes, 'has chat procedure');
   assert('stats' in relayRouter._routes, 'has stats procedure');
   assert('models' in relayRouter._routes, 'has models procedure');
+
+  const healthResult = await relayRouter._routes.health._handler({
+    input: { deep: true, provider: 'openai&unexpected=value' },
+    ctx: {
+      relay: {
+        _fetch: async (url) => ({ json: async () => ({ url }) }),
+      },
+    },
+  });
+  assert(
+    healthResult.url === '/health?deep=1&provider=openai%26unexpected%3Dvalue',
+    'health procedure URL-encodes the provider query parameter'
+  );
 }
 
 /* ========================================================================== */

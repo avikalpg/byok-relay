@@ -475,7 +475,7 @@ function createByokRelayRouter(t, opts = {}) {
       .query(async ({ input, ctx }) => {
         const client = getClient(ctx);
         const url = input.deep
-          ? `/health?deep=1${input.provider ? `&provider=${input.provider}` : ''}`
+          ? `/health?deep=1${input.provider ? `&provider=${encodeURIComponent(input.provider)}` : ''}`
           : '/health';
         const res = await client._fetch(url);
         return res.json();

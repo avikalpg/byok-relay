@@ -730,3 +730,24 @@ const appRouter = t.router({ relay: relayRouter });
 Client: `trpc.relay.chat.mutate({ model: 'openai/gpt-4o', messages })` returns `{ reply }`.
 All relay ops: health, register, storeKey, listKeys, deleteKey, rotateKey, chat, stats, models.
 npm: https://www.npmjs.com/package/@byok-relay/trpc
+
+
+## Koa Middleware (`@byok-relay/koa`)
+
+Koa `async (ctx, next)` middleware and `@koa/router` router factory for BYOK AI.
+`RELAY_URL` stays in `process.env` — browser only calls your `/relay` Koa route.
+`npm install @byok-relay/koa koa`
+
+For the `createRelayRouter` API, also install its optional peer dependency:
+`npm install @koa/router`
+
+```js
+const Koa = require('koa');
+const { createByokRelayMiddleware, ByokRelayClient } = require('@byok-relay/koa');
+const app = new Koa();
+app.use(createByokRelayMiddleware({ pathPrefix: '/relay' }));
+app.listen(3000);
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/koa
+
