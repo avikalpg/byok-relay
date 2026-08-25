@@ -105,23 +105,28 @@ async function * _parseSSE (body) {
     try { return { payload: JSON.parse(raw) }; } catch (_) { return null; }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    for (const line of lines) {
-      const event = parseLine(line);
-      if (!event) continue;
-      if (event.done) return;
-      yield event.payload;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        const event = parseLine(line);
+        if (!event) continue;
+        if (event.done) return;
+        yield event.payload;
+      }
     }
-  }
 
-  buffer += decoder.decode();
-  const event = parseLine(buffer);
-  if (event && !event.done) yield event.payload;
+    buffer += decoder.decode();
+    const event = parseLine(buffer);
+    if (event && !event.done) yield event.payload;
+  } finally {
+    try { await reader.cancel(); } catch (_) {}
+    try { reader.releaseLock(); } catch (_) {}
+  }
 }
 
 /* ========================================================================== */
@@ -245,7 +250,11 @@ function _convertTools (tools) {
     // Let LangChain convert StructuredTool Zod schemas to OpenAI JSON Schema.
     const functions = _tryRequire('@langchain/core/utils/function_calling');
     if (functions && typeof functions.convertToOpenAITool === 'function') {
-      try { return functions.convertToOpenAITool(tool); } catch (_) {}
+      try {
+        const converted = functions.convertToOpenAITool(tool);
+        if (converted && converted.type === 'function' && converted.function &&
+            typeof converted.function.name === 'string') return converted;
+      } catch (_) {}
     }
     // LangChain StructuredTool with schema
     if (tool.name) {
@@ -631,6 +640,7 @@ class ByokRelayClient {
 
   async register (appId) {
     if (appId) this._appId = appId;
+    this._kremove(this._tokenKey);
     return this._ensureToken();
   }
 
@@ -701,7 +711,8 @@ class ByokRelayClient {
       throw new Error(`streamChat failed (${res.status}): ${err}`);
     }
     for await (const parsed of _parseSSE(res.body)) {
-      const chunk = (parsed.choices && parsed.choices[0].delta.content) || '';
+      const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+      const chunk = (delta && delta.content) || '';
       if (chunk) yield chunk;
     }
   }

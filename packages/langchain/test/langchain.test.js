@@ -169,6 +169,21 @@ await testAsync('ensureToken() returns cached token without re-fetching', async 
   restoreFetch();
 });
 
+await testAsync('register() refreshes an existing token', async () => {
+  const store = { 'byok_relay_token_app2': 'cached_tok' };
+  const c = new pkg.ByokRelayClient({
+    relayUrl: 'http://r',
+    appId: 'app2',
+    storage: { get: k => store[k] || null, set: (k,v) => { store[k]=v; }, remove: k => { delete store[k]; } },
+  });
+  mockFetch([{ body: { token: 'fresh_tok' } }]);
+  const tok = await c.register();
+  assert.strictEqual(tok, 'fresh_tok');
+  assert.strictEqual(store['byok_relay_token_app2'], 'fresh_tok');
+  assert.strictEqual(_fetchCalls.length, 1, 'register should request a fresh token');
+  restoreFetch();
+});
+
 
 await testAsync('ensureToken() shares one in-flight registration', async () => {
   const c = new pkg.ByokRelayClient({ relayUrl: 'http://r', appId: 'app-race', storage: null });
@@ -431,6 +446,61 @@ await testAsync('_stream() parses chunked SSE content and a trailing tool-call d
   for await (const chunk of m._stream(messages)) streamed.push(chunk.text);
   assert.deepStrictEqual(streamed, ['Hello ', 'world']);
   assert.strictEqual(_fetchCalls.length, 1);
+  restoreFetch();
+});
+
+await testAsync('_stream() cancels and releases the reader after early termination', async () => {
+  const store = { 'byok_relay_token_langchain-app': 'tok-stream' };
+  const encoder = new TextEncoder();
+  let cancelled = false;
+  let released = false;
+  global.fetch = async () => {
+    let sent = false;
+    return {
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({
+        read: async () => sent ? { done: true } : (sent = true, {
+          done: false,
+          value: encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n'),
+        }),
+        cancel: async () => { cancelled = true; },
+        releaseLock: () => { released = true; },
+      }) },
+    };
+  };
+  const m = new pkg.ByokRelayChatModel({
+    relayUrl: 'http://r', appId: 'langchain-app',
+    storage: { get: k=>store[k]||null, set:(k,v)=>{store[k]=v;}, remove:k=>{delete store[k];} },
+  });
+  const messages = [{ _getType: () => 'human', content: 'Hi', constructor: { name: 'HumanMessage' } }];
+  for await (const _chunk of m._stream(messages)) break;
+  assert.ok(cancelled, 'reader should be cancelled after early termination');
+  assert.ok(released, 'reader lock should be released after early termination');
+  restoreFetch();
+});
+
+await testAsync('streamChat() ignores terminal chunks without a delta', async () => {
+  const store = { 'byok_relay_token_langchain-app': 'tok-stream' };
+  const encoder = new TextEncoder();
+  global.fetch = async () => {
+    let offset = 0;
+    const chunks = [encoder.encode('data: {\"choices\":[]}\n'), encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n')];
+    return {
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({
+        read: async () => offset < chunks.length ? { done: false, value: chunks[offset++] } : { done: true },
+      }) },
+    };
+  };
+  const c = new pkg.ByokRelayClient({
+    relayUrl: 'http://r', appId: 'langchain-app',
+    storage: { get: k=>store[k]||null, set:(k,v)=>{store[k]=v;}, remove:k=>{delete store[k];} },
+  });
+  const streamed = [];
+  for await (const chunk of c.streamChat({ model: 'openai/gpt-4o', messages: [] })) streamed.push(chunk);
+  assert.deepStrictEqual(streamed, ['ok']);
   restoreFetch();
 });
 
