@@ -691,6 +691,62 @@ Exported: `useByokRelay`, `useChat`, `useStreamingChat`, `useRelayHealth`, `Byok
 npm: pending publication for @byok-relay/expo
 
 
+## SvelteKit Integration
+
+Full-stack SvelteKit apps can proxy AI requests server-side using the `handle` hook. `RELAY_URL` stays in `process.env` and is never bundled into the browser. Compatible with all SvelteKit adapters (adapter-node, adapter-vercel, adapter-cloudflare, adapter-netlify).
+
+```bash
+npm install @byok-relay/sveltekit
+```
+
+### Handle hook (hooks.server.js)
+
+```js
+// src/hooks.server.js
+import { createByokRelayHandle } from '@byok-relay/sveltekit';
+export const handle = createByokRelayHandle();
+// Set RELAY_URL in your .env file
+```
+
+### Route handlers ([...path]/+server.js)
+
+```js
+// src/routes/relay/[...path]/+server.js
+import { createRelayRouteHandlers } from '@byok-relay/sveltekit';
+export const { GET, POST, PUT, PATCH, DELETE, OPTIONS } = createRelayRouteHandlers();
+```
+
+### Browser streaming (Svelte component)
+
+```js
+import { ByokRelayClient } from '@byok-relay/sveltekit';
+const client = new ByokRelayClient({ relayUrl: '/relay' });
+await client.storeKey('openai', 'sk-...');
+for await (const chunk of client.streamChat({ model: 'openai/gpt-4o', messages })) {
+  content += chunk; // reactive update
+}
+```
+
+### Cookie storage adapter (server load functions)
+
+```js
+// src/routes/+page.server.js
+import { ByokRelayClient } from '@byok-relay/sveltekit';
+export async function load({ cookies }) {
+  const client = new ByokRelayClient({
+    relayUrl: process.env.RELAY_URL,
+    storage: {
+      get: (k) => cookies.get(k) ?? null,
+      set: (k, v) => cookies.set(k, v, { path: '/', httpOnly: true }),
+      remove: (k) => cookies.delete(k, { path: '/' }),
+    },
+  });
+  return { providers: await client.listKeys() };
+}
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/sveltekit
+
 ## Links
 
 - GitHub: https://github.com/avikalpg/byok-relay
