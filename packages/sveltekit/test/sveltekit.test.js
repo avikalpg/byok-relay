@@ -490,6 +490,27 @@ await testAsync('ByokRelayClient.streamChat() yields text chunks', async () => {
   global.fetch = originalFetch;
 });
 
+await testAsync('ByokRelayClient.streamChat() yields an unterminated final SSE event', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (url.includes('/users')) return new Response(JSON.stringify({ token: 'tok' }), { status: 201 });
+    const stream = new ReadableStream({
+      start (controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"final chunk"}}]}'));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  };
+  const client = new ByokRelayClient({ relayUrl: 'http://localhost:3000' });
+  const chunks = [];
+  for await (const chunk of client.streamChat({ model: 'gpt-4o', messages: [] })) {
+    chunks.push(chunk);
+  }
+  assert.deepStrictEqual(chunks, ['final chunk']);
+  global.fetch = originalFetch;
+});
+
 await testAsync('ByokRelayClient.streamChat() cancels the reader on early exit', async () => {
   const originalFetch = global.fetch;
   let cancelled = false;

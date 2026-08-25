@@ -504,25 +504,40 @@ class ByokRelayClient {
     const decoder = new TextDecoder();
     let buffer    = '';
 
+    const parseLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data:')) return {};
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') return { done: true };
+      try {
+        const parsed = JSON.parse(data);
+        return {
+          chunk: parsed.choices?.[0]?.delta?.content
+            ?? parsed.delta?.text
+            ?? '',
+        };
+      } catch (_) {
+        return {};
+      }
+    };
+
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          buffer += decoder.decode();
+          const { chunk, done: finished } = parseLine(buffer);
+          if (finished) return;
+          if (chunk) yield chunk;
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop();
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data:')) continue;
-          const data = trimmed.slice(5).trim();
-          if (data === '[DONE]') return;
-          try {
-            const parsed = JSON.parse(data);
-            const chunk  = parsed.choices?.[0]?.delta?.content
-              ?? parsed.delta?.text
-              ?? '';
-            if (chunk) yield chunk;
-          } catch (_) {}
+          const { chunk, done: finished } = parseLine(line);
+          if (finished) return;
+          if (chunk) yield chunk;
         }
       }
     } finally {
