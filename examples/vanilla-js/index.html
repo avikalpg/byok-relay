@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>byok-relay — Vanilla JS Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f1117;
+      color: #e8eaf0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    header h1 { font-size: 1.6rem; font-weight: 700; }
+    header p  { color: #9095a0; margin-top: .4rem; font-size: .9rem; }
+    header a  { color: #7c83fd; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2a2e3f;
+      border-radius: 12px;
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 640px;
+      margin-bottom: 1.25rem;
+    }
+    .card h2 { font-size: .95rem; font-weight: 600; color: #9095a0;
+               text-transform: uppercase; letter-spacing: .06em; margin-bottom: 1rem; }
+
+    label { display: block; font-size: .85rem; color: #9095a0; margin-bottom: .3rem; }
+
+    select, input[type="text"], input[type="password"], textarea {
+      width: 100%; padding: .55rem .75rem;
+      background: #0f1117; border: 1px solid #2a2e3f; border-radius: 8px;
+      color: #e8eaf0; font-size: .9rem; outline: none;
+      transition: border-color .15s;
+    }
+    select:focus, input:focus, textarea:focus { border-color: #7c83fd; }
+
+    .row { display: flex; gap: .75rem; margin-bottom: .9rem; }
+    .row > * { flex: 1; }
+    .row:last-child { margin-bottom: 0; }
+
+    button {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: .4rem; padding: .55rem 1.1rem;
+      border: none; border-radius: 8px; font-size: .9rem; font-weight: 600;
+      cursor: pointer; transition: opacity .15s, background .15s;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: #7c83fd; color: #fff; }
+    .btn-primary:not(:disabled):hover { background: #6870fc; }
+    .btn-sm { padding: .35rem .75rem; font-size: .8rem; font-weight: 500; }
+    .btn-danger { background: #3d1a1a; color: #ff6b6b; border: 1px solid #5a2222; }
+    .btn-danger:not(:disabled):hover { background: #4d2020; }
+
+    .status-row {
+      display: flex; align-items: center; gap: .5rem;
+      font-size: .82rem; color: #9095a0; margin-top: .75rem;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #2a2e3f; flex-shrink: 0; transition: background .3s;
+    }
+    .dot.ok   { background: #4caf82; }
+    .dot.warn { background: #f0b429; }
+    .dot.err  { background: #ff6b6b; }
+
+    /* Chat */
+    #chat-section { display: none; }
+
+    #messages {
+      height: 340px; overflow-y: auto; display: flex; flex-direction: column;
+      gap: .65rem; padding: .25rem 0; margin-bottom: 1rem;
+    }
+    .msg {
+      max-width: 88%; padding: .6rem .9rem; border-radius: 10px;
+      font-size: .9rem; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+    }
+    .msg.user      { background: #7c83fd22; border: 1px solid #7c83fd44;
+                     align-self: flex-end; color: #c8ceff; }
+    .msg.assistant { background: #1e2233; border: 1px solid #2a2e3f;
+                     align-self: flex-start; color: #e8eaf0; }
+    .msg.system    { background: transparent; border: none; color: #6b7280;
+                     font-size: .78rem; text-align: center; align-self: center; }
+
+    .input-row { display: flex; gap: .6rem; }
+    #user-input {
+      flex: 1; resize: none; height: 44px; line-height: 1.4;
+      font-family: inherit; transition: height .1s;
+    }
+    #user-input:focus { height: 88px; }
+
+    .meta { font-size: .75rem; color: #4a5060; margin-top: .6rem; text-align: right; }
+
+    /* Relay URL config */
+    #relay-url-row { margin-bottom: .9rem; }
+
+    .inline-code {
+      background: #0f1117; border: 1px solid #2a2e3f; border-radius: 5px;
+      padding: .15rem .4rem; font-family: monospace; font-size: .82rem; color: #a8b4ff;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ byok-relay — Vanilla JS Demo</h1>
+  <p>
+    Bring Your Own Key, no backend needed ·
+    <a href="https://github.com/avikalpg/byok-relay" target="_blank" rel="noopener noreferrer">GitHub</a> ·
+    <a href="https://byokrelay.com" target="_blank" rel="noopener noreferrer">Docs</a>
+  </p>
+</header>
+
+<!-- Step 1: Relay URL -->
+<div class="card" id="config-card">
+  <h2>1 · Relay</h2>
+  <div id="relay-url-row">
+    <label for="relay-url">Relay URL</label>
+    <input type="text" id="relay-url"
+           value="https://relay.byokrelay.com"
+           placeholder="http://localhost:3000" />
+  </div>
+  <div class="row">
+    <div>
+      <label for="provider-select">Provider</label>
+      <select id="provider-select">
+        <option value="anthropic">Anthropic</option>
+        <option value="openai">OpenAI</option>
+      </select>
+    </div>
+    <div>
+      <label for="model-input">Model</label>
+      <input type="text" id="model-input" value="claude-3-5-haiku-20241022" />
+    </div>
+  </div>
+  <div style="margin-bottom:.9rem">
+    <label for="api-key-input">API Key <span style="color:#4a5060">(sent to relay once, never stored in browser)</span></label>
+    <div style="display:flex;gap:.5rem">
+      <input type="password" id="api-key-input" placeholder="sk-ant-… or sk-…" style="flex:1" />
+      <button class="btn-primary btn-sm" id="store-key-btn">Save key</button>
+    </div>
+  </div>
+  <div class="status-row">
+    <span class="dot" id="relay-dot"></span>
+    <span id="relay-status">Not connected</span>
+    <span style="flex:1"></span>
+    <button class="btn-danger btn-sm" id="reset-btn" style="display:none">Reset session</button>
+  </div>
+</div>
+
+<!-- Step 2: Chat -->
+<div class="card" id="chat-section">
+  <h2>2 · Chat</h2>
+  <div id="messages">
+    <div class="msg system">Key stored ✓ — start chatting below.</div>
+  </div>
+  <div class="input-row">
+    <textarea id="user-input" placeholder="Type a message… (Enter to send, Shift+Enter for newline)"></textarea>
+    <button class="btn-primary" id="send-btn">Send</button>
+  </div>
+  <div class="meta" id="token-meta"></div>
+</div>
+
+<script>
+// ─── Config ─────────────────────────────────────────────────────────────────
+const TOKEN_KEY  = 'byok_relay_token'
+const RELAY_TIMEOUT_MS = 30_000  // 30 s timeout for relay API calls
+
+// ─── Fetch with timeout ───────────────────────────────────────────────────────
+async function fetchWithTimeout(url, options = {}, timeoutMs = RELAY_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+const MODELS = {
+  anthropic: 'claude-3-5-haiku-20241022',
+  openai:    'gpt-4o-mini',
+}
+
+// ─── DOM ─────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id)
+
+const relayUrlEl     = $('relay-url')
+const providerEl     = $('provider-select')
+const modelEl        = $('model-input')
+const apiKeyEl       = $('api-key-input')
+const storeKeyBtn    = $('store-key-btn')
+const relayDot       = $('relay-dot')
+const relayStatusEl  = $('relay-status')
+const resetBtn       = $('reset-btn')
+const chatSection    = $('chat-section')
+const messagesEl     = $('messages')
+const userInputEl    = $('user-input')
+const sendBtn        = $('send-btn')
+const tokenMetaEl    = $('token-meta')
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let relayToken  = localStorage.getItem(TOKEN_KEY) || null
+let messages    = []   // {role, content}[]
+let streaming   = false
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function relayUrl() { return relayUrlEl.value.replace(/\/$/, '') }
+function provider() { return providerEl.value }
+
+function setStatus(state, text) {
+  relayDot.className = 'dot ' + state
+  relayStatusEl.textContent = text
+}
+
+function scrollToBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight
+}
+
+function appendMsg(role, content) {
+  const div = document.createElement('div')
+  div.className = 'msg ' + role
+  div.textContent = content
+  messagesEl.appendChild(div)
+  scrollToBottom()
+  return div
+}
+
+function updateTokenMeta() {
+  tokenMetaEl.textContent = relayToken
+    ? `Token: ${relayToken.slice(0, 8)}…`
+    : ''
+}
+
+// ─── Registration ─────────────────────────────────────────────────────────────
+async function ensureToken() {
+  if (relayToken) return relayToken
+  const res = await fetchWithTimeout(`${relayUrl()}/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: 'vanilla-js-example' }),
+  })
+  if (!res.ok) throw new Error(`Registration failed: ${res.status}`)
+  const { token } = await res.json()
+  relayToken = token
+  localStorage.setItem(TOKEN_KEY, token)
+  updateTokenMeta()
+  return token
+}
+
+// ─── Key storage ──────────────────────────────────────────────────────────────
+storeKeyBtn.addEventListener('click', async () => {
+  const key = apiKeyEl.value.trim()
+  if (!key) { setStatus('warn', 'Enter an API key first'); return }
+
+  storeKeyBtn.disabled = true
+  setStatus('warn', 'Connecting…')
+  try {
+    const token = await ensureToken()
+    const res = await fetchWithTimeout(`${relayUrl()}/keys/${provider()}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-relay-token': token,
+      },
+      body: JSON.stringify({ key }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `HTTP ${res.status}`)
+    }
+    apiKeyEl.value = ''
+    setStatus('ok', `${provider()} key saved · ready to chat`)
+    resetBtn.style.display = 'inline-flex'
+    chatSection.style.display = 'block'
+    updateTokenMeta()
+    userInputEl.focus()
+  } catch (e) {
+    setStatus('err', 'Error: ' + e.message)
+  } finally {
+    storeKeyBtn.disabled = false
+  }
+})
+
+// ─── Provider toggle ──────────────────────────────────────────────────────────
+providerEl.addEventListener('change', () => {
+  modelEl.value = MODELS[provider()] || ''
+})
+
+// ─── Reset ────────────────────────────────────────────────────────────────────
+resetBtn.addEventListener('click', () => {
+  localStorage.removeItem(TOKEN_KEY)
+  relayToken = null
+  messages = []
+  messagesEl.innerHTML = '<div class="msg system">Session reset. Enter a new API key.</div>'
+  chatSection.style.display = 'none'
+  resetBtn.style.display = 'none'
+  setStatus('', 'Not connected')
+  updateTokenMeta()
+})
+
+// ─── Streaming chat ───────────────────────────────────────────────────────────
+async function sendMessage() {
+  const text = userInputEl.value.trim()
+  if (!text || streaming) return
+
+  userInputEl.value = ''
+  userInputEl.style.height = ''
+  messages.push({ role: 'user', content: text })
+  appendMsg('user', text)
+
+  const assistantDiv = appendMsg('assistant', '▋')
+  sendBtn.disabled = true
+  streaming = true
+  let fullText = ''
+
+  try {
+    const token = await ensureToken()
+    let url, headers, body
+
+    if (provider() === 'anthropic') {
+      url     = `${relayUrl()}/relay/anthropic/v1/messages`
+      headers = {
+        'Content-Type': 'application/json',
+        'x-relay-token': token,
+        'anthropic-version': '2023-06-01',
+      }
+      body = JSON.stringify({
+        model: modelEl.value,
+        max_tokens: 1024,
+        stream: true,
+        messages,
+      })
+    } else {
+      url     = `${relayUrl()}/relay/openai/v1/chat/completions`
+      headers = {
+        'Content-Type': 'application/json',
+        'x-relay-token': token,
+      }
+      body = JSON.stringify({
+        model: modelEl.value,
+        stream: true,
+        messages,
+      })
+    }
+
+    const res = await fetchWithTimeout(url, { method: 'POST', headers, body })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `HTTP ${res.status}`)
+    }
+
+    const reader  = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const data = line.slice(6).trim()
+        if (data === '[DONE]') continue
+        try {
+          const json = JSON.parse(data)
+          // Anthropic
+          if (json.type === 'content_block_delta' && json.delta?.text) {
+            fullText += json.delta.text
+          }
+          // OpenAI
+          const delta = json.choices?.[0]?.delta?.content
+          if (delta) fullText += delta
+        } catch { /* skip malformed SSE */ }
+      }
+
+      assistantDiv.textContent = fullText + '▋'
+      scrollToBottom()
+    }
+
+    assistantDiv.textContent = fullText
+    messages.push({ role: 'assistant', content: fullText })
+
+  } catch (e) {
+    assistantDiv.textContent = '⚠ ' + e.message
+    assistantDiv.style.color = '#ff6b6b'
+  } finally {
+    streaming = false
+    sendBtn.disabled = false
+    userInputEl.focus()
+    scrollToBottom()
+  }
+}
+
+// ─── Send on Enter ────────────────────────────────────────────────────────────
+sendBtn.addEventListener('click', sendMessage)
+userInputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    sendMessage()
+  }
+})
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+updateTokenMeta()
+if (relayToken) {
+  setStatus('ok', 'Session found in localStorage · enter a key to use it')
+  resetBtn.style.display = 'inline-flex'
+  chatSection.style.display = 'block'
+}
+</script>
+</body>
+</html>
