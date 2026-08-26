@@ -1855,6 +1855,96 @@ const result = await engine.query({ query: 'What does byok-relay do?' });
 
 Supports: streaming (`for await`), tool calling (`withTools()`), ReActAgent, RAG with VectorStoreIndex.
 
+## LangChain.js Integration
+
+Drop `ByokRelayChatModel` into any LangChain chain, agent, or RAG pipeline. Users supply their own keys; the relay stores them AES-256-GCM encrypted.
+
+```bash
+npm install @byok-relay/langchain @langchain/core
+```
+
+```js
+import { ByokRelayChatModel, ByokRelayEmbeddings } from '@byok-relay/langchain';
+import { HumanMessage } from '@langchain/core/messages';
+
+// Chat model — works with LCEL chains, agents, tool calling
+const model = new ByokRelayChatModel({ relayUrl: process.env.RELAY_URL, modelName: 'openai/gpt-4o' });
+await model.storeKey('openai', 'sk-...');           // user supplies key via settings UI
+const result = await model.invoke([new HumanMessage('Explain BYOK.')]);
+
+// Embeddings — drop into any LangChain vector store
+const embeddings = new ByokRelayEmbeddings({ modelName: 'openai/text-embedding-3-small' });
+const vectors = await embeddings.embedDocuments(['doc1', 'doc2']);
+```
+
+Supports: streaming, tool calling (`bindTools`), LCEL pipes, ReAct agents, RAG with vector stores.
+
+## OpenAI SDK — Drop-in Compatible Client
+
+Replace `new OpenAI({ apiKey })` with `new ByokRelayOpenAI(...)`. Callers provide keys to `storeKey`; the relay stores them **AES-256-GCM encrypted** and does not return them. The client supports these OpenAI-compatible namespaces: `chat.completions`, `embeddings`, `images`, `models`, `audio`, `completions`.
+
+```bash
+npm install @byok-relay/openai
+```
+
+```js
+import { ByokRelayOpenAI } from '@byok-relay/openai';
+
+// Drop-in replacement for new OpenAI({ apiKey: ... })
+const client = new ByokRelayOpenAI();
+
+// User stores their key once via your settings UI
+await client.storeKey('openai', userApiKey);
+
+// Use exactly like the openai SDK
+const completion = await client.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+
+// Streaming — identical interface
+const stream = await client.chat.completions.create({ model: 'gpt-4o', messages, stream: true });
+// Node.js example:
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
+}
+
+// Multi-provider — register the provider key, then prefix the model name
+await client.storeKey('anthropic', userAnthropicApiKey);
+const reply = await client.chat.completions.create({
+  model: 'anthropic/claude-3-5-sonnet-20241022',   // routes to Anthropic
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+```
+
+Supports: streaming, tool calling, embeddings, image generation, audio transcription/speech, legacy completions.
+
+## LlamaIndex.TS Integration
+
+Drop `ByokRelayLLM` into any LlamaIndex pipeline — RAG, query engines, ReActAgent. Users supply their own keys; the relay stores them AES-256-GCM encrypted.
+
+```bash
+npm install @byok-relay/llamaindex llamaindex
+```
+
+```js
+import { ByokRelayLLM, ByokRelayEmbedding } from '@byok-relay/llamaindex';
+import { VectorStoreIndex, Document } from 'llamaindex';
+
+// LLM — non-streaming + streaming + tool calling
+const llm = new ByokRelayLLM({ model: 'openai/gpt-4o' });
+await llm.storeKey('openai', 'sk-...');             // user supplies key via settings UI
+const response = await llm.chat({ messages: [{ role: 'user', content: 'Explain BYOK.' }] });
+
+// Embeddings — drop-in for VectorStoreIndex embedModel
+const embed = new ByokRelayEmbedding({ model: 'openai/text-embedding-3-small' });
+const index = await VectorStoreIndex.fromDocuments([new Document({ text: 'hello' })], { embedModel: embed });
+const engine = index.asQueryEngine({ llm });
+const result = await engine.query({ query: 'What does byok-relay do?' });
+```
+
+Supports: streaming (`for await`), tool calling (`withTools()`), ReActAgent, RAG with VectorStoreIndex.
+
 ## For AI coding agents
 
 If you're using a coding agent (Cursor, Claude Code, Copilot, Codex, etc.), install the skill and let it handle the integration:
