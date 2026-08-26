@@ -169,6 +169,65 @@ await testAsync('ensureToken() returns cached token without re-fetching', async 
   restoreFetch();
 });
 
+await testAsync('register() refreshes an existing token', async () => {
+  const store = { 'byok_relay_token_app2': 'cached_tok' };
+  const c = new pkg.ByokRelayClient({
+    relayUrl: 'http://r',
+    appId: 'app2',
+    storage: { get: k => store[k] || null, set: (k,v) => { store[k]=v; }, remove: k => { delete store[k]; } },
+  });
+  mockFetch([{ body: { token: 'fresh_tok' } }]);
+  const tok = await c.register();
+  assert.strictEqual(tok, 'fresh_tok');
+  assert.strictEqual(store['byok_relay_token_app2'], 'fresh_tok');
+  assert.strictEqual(_fetchCalls.length, 1, 'register should request a fresh token');
+  restoreFetch();
+});
+
+
+await testAsync('ensureToken() shares one in-flight registration', async () => {
+  const c = new pkg.ByokRelayClient({ relayUrl: 'http://r', appId: 'app-race', storage: null });
+  mockFetch([{ body: { token: 'tok_shared' } }]);
+  const [first, second] = await Promise.all([c.ensureToken(), c.ensureToken()]);
+  assert.strictEqual(first, 'tok_shared');
+  assert.strictEqual(second, 'tok_shared');
+  assert.strictEqual(_fetchCalls.length, 1, 'concurrent calls should register once');
+  restoreFetch();
+});
+
+await testAsync('concurrent registrations for different app IDs keep separate tokens', async () => {
+  const store = {};
+  const pending = {};
+  _fetchCalls = [];
+  global.fetch = (url, opts) => new Promise(resolve => {
+    _fetchCalls.push({ url, opts });
+    const appId = JSON.parse(opts.body).app_id;
+    pending[appId] = () => resolve({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: `tok_${appId}` }),
+    });
+  });
+
+  const c = new pkg.ByokRelayClient({
+    relayUrl: 'http://r',
+    appId: 'app-a',
+    storage: { get: k => store[k] || null, set: (k, v) => { store[k] = v; }, remove: k => { delete store[k]; } },
+  });
+  const first = c.ensureToken();
+  const second = c.register('app-b');
+  assert.strictEqual(_fetchCalls.length, 2, 'each app should register independently');
+  pending['app-b']();
+  pending['app-a']();
+
+  const [firstToken, secondToken] = await Promise.all([first, second]);
+  assert.strictEqual(firstToken, 'tok_app-a');
+  assert.strictEqual(secondToken, 'tok_app-b');
+  assert.strictEqual(store['byok_relay_token_app-a'], 'tok_app-a');
+  assert.strictEqual(store['byok_relay_token_app-b'], 'tok_app-b');
+  restoreFetch();
+});
+
 await testAsync('logout() removes token from storage', async () => {
   const store = {};
   const c = new pkg.ByokRelayClient({
@@ -388,6 +447,93 @@ await testAsync('_generate() with tools sends tools array', async () => {
   const body = JSON.parse(_fetchCalls[0].opts.body);
   assert.ok(body.tools, 'tools not in request body');
   assert.strictEqual(body.tools[0].function.name, 'get_weather');
+  restoreFetch();
+});
+
+
+await testAsync('_stream() parses chunked SSE content and a trailing tool-call delta', async () => {
+  const store = { 'byok_relay_token_langchain-app': 'tok-stream' };
+  const encoder = new TextEncoder();
+  const chunks = [
+    encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n'),
+    encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"world\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}'),
+  ];
+  _fetchCalls = [];
+  global.fetch = async (url, opts) => {
+    _fetchCalls.push({ url, opts });
+    let offset = 0;
+    return {
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({ read: async () => offset < chunks.length
+        ? { done: false, value: chunks[offset++] }
+        : { done: true }, }) },
+    };
+  };
+  const m = new pkg.ByokRelayChatModel({
+    relayUrl: 'http://r', appId: 'langchain-app',
+    storage: { get: k=>store[k]||null, set:(k,v)=>{store[k]=v;}, remove:k=>{delete store[k];} },
+  });
+  const messages = [{ _getType: () => 'human', content: 'Hi', constructor: { name: 'HumanMessage' } }];
+  const streamed = [];
+  for await (const chunk of m._stream(messages)) streamed.push(chunk.text);
+  assert.deepStrictEqual(streamed, ['Hello ', 'world']);
+  assert.strictEqual(_fetchCalls.length, 1);
+  restoreFetch();
+});
+
+await testAsync('_stream() cancels and releases the reader after early termination', async () => {
+  const store = { 'byok_relay_token_langchain-app': 'tok-stream' };
+  const encoder = new TextEncoder();
+  let cancelled = false;
+  let released = false;
+  global.fetch = async () => {
+    let sent = false;
+    return {
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({
+        read: async () => sent ? { done: true } : (sent = true, {
+          done: false,
+          value: encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n'),
+        }),
+        cancel: async () => { cancelled = true; },
+        releaseLock: () => { released = true; },
+      }) },
+    };
+  };
+  const m = new pkg.ByokRelayChatModel({
+    relayUrl: 'http://r', appId: 'langchain-app',
+    storage: { get: k=>store[k]||null, set:(k,v)=>{store[k]=v;}, remove:k=>{delete store[k];} },
+  });
+  const messages = [{ _getType: () => 'human', content: 'Hi', constructor: { name: 'HumanMessage' } }];
+  for await (const _chunk of m._stream(messages)) break;
+  assert.ok(cancelled, 'reader should be cancelled after early termination');
+  assert.ok(released, 'reader lock should be released after early termination');
+  restoreFetch();
+});
+
+await testAsync('streamChat() ignores terminal chunks without a delta', async () => {
+  const store = { 'byok_relay_token_langchain-app': 'tok-stream' };
+  const encoder = new TextEncoder();
+  global.fetch = async () => {
+    let offset = 0;
+    const chunks = [encoder.encode('data: {\"choices\":[]}\n'), encoder.encode('data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n')];
+    return {
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({
+        read: async () => offset < chunks.length ? { done: false, value: chunks[offset++] } : { done: true },
+      }) },
+    };
+  };
+  const c = new pkg.ByokRelayClient({
+    relayUrl: 'http://r', appId: 'langchain-app',
+    storage: { get: k=>store[k]||null, set:(k,v)=>{store[k]=v;}, remove:k=>{delete store[k];} },
+  });
+  const streamed = [];
+  for await (const chunk of c.streamChat({ model: 'openai/gpt-4o', messages: [] })) streamed.push(chunk);
+  assert.deepStrictEqual(streamed, ['ok']);
   restoreFetch();
 });
 

@@ -88,6 +88,47 @@ function _getOutputs () {
   return _tryRequire('@langchain/core/outputs') || {};
 }
 
+/**
+ * Yield parsed payloads from an SSE response body. Handles chunk boundaries
+ * and a final event without a trailing newline.
+ */
+async function * _parseSSE (body) {
+  const reader  = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer    = '';
+
+  const parseLine = line => {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('data:')) return null;
+    const raw = trimmed.slice(5).trim();
+    if (raw === '[DONE]') return { done: true };
+    try { return { payload: JSON.parse(raw) }; } catch (_) { return null; }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        const event = parseLine(line);
+        if (!event) continue;
+        if (event.done) return;
+        yield event.payload;
+      }
+    }
+
+    buffer += decoder.decode();
+    const event = parseLine(buffer);
+    if (event && !event.done) yield event.payload;
+  } finally {
+    try { await reader.cancel(); } catch (_) {}
+    try { reader.releaseLock(); } catch (_) {}
+  }
+}
+
 /* ========================================================================== */
 /* Message conversion helpers                                                  */
 /* ========================================================================== */
@@ -206,6 +247,15 @@ function _convertTools (tools) {
   return tools.map(tool => {
     // Already in OpenAI format
     if (tool.type === 'function' && tool.function) return tool;
+    // Let LangChain convert StructuredTool Zod schemas to OpenAI JSON Schema.
+    const functions = _tryRequire('@langchain/core/utils/function_calling');
+    if (functions && typeof functions.convertToOpenAITool === 'function') {
+      try {
+        const converted = functions.convertToOpenAITool(tool);
+        if (converted && converted.type === 'function' && converted.function &&
+            typeof converted.function.name === 'string') return converted;
+      } catch (_) {}
+    }
     // LangChain StructuredTool with schema
     if (tool.name) {
       const schema = tool.schema || tool.parameters || tool.inputSchema || { type: 'object', properties: {} };
@@ -278,19 +328,35 @@ function _mixTokens (inst) {
     delete this._memStore[key];
   };
 
+  inst._pendingTokens = inst._pendingTokens || new Map();
+
   inst._ensureToken = async function () {
-    const k = `byok_relay_token_${this._appId}`;
+    const appId = this._appId;
+    const k = `byok_relay_token_${appId}`;
     const existing = this._kget(k);
     if (existing) return existing;
-    const res = await fetch(`${this._relayUrl}/users`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ app_id: this._appId }),
-    });
-    if (!res.ok) throw new Error(`byok-relay register failed: ${res.status}`);
-    const data = await res.json();
-    this._kset(k, data.token);
-    return data.token;
+
+    let pending = this._pendingTokens.get(k);
+    if (!pending) {
+      pending = (async () => {
+        const res = await fetch(`${this._relayUrl}/users`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ app_id: appId }),
+        });
+        if (!res.ok) throw new Error(`byok-relay register failed: ${res.status}`);
+        const data = await res.json();
+        this._kset(k, data.token);
+        return data.token;
+      })();
+      this._pendingTokens.set(k, pending);
+    }
+
+    try {
+      return await pending;
+    } finally {
+      if (this._pendingTokens.get(k) === pending) this._pendingTokens.delete(k);
+    }
   };
 
   inst.storeKey = async function (provider, apiKey) {
@@ -429,50 +495,38 @@ function _buildChatModel () {
       const { ChatGenerationChunk } = _getOutputs();
       const { AIMessageChunk }      = _getMessages();
 
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
-      let   buffer  = '';
+      for await (const parsed of _parseSSE(res.body)) {
+        const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+        if (!delta) continue;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
+        const text = delta.content || '';
+        const toolCallChunks = delta.tool_calls && delta.tool_calls.map(toolCall => ({
+          id:    toolCall.id,
+          index: toolCall.index,
+          name:  toolCall.function && toolCall.function.name,
+          args:  toolCall.function && toolCall.function.arguments,
+          type:  'tool_call_chunk',
+        }));
+        const msgChunk = AIMessageChunk
+          ? new AIMessageChunk({
+              content: text,
+              ...(toolCallChunks ? { tool_call_chunks: toolCallChunks } : {}),
+              additional_kwargs: delta.tool_calls ? { tool_calls: delta.tool_calls } : {},
+            })
+          : { content: text, _getType: () => 'AIMessageChunk' };
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data:')) continue;
-          const raw = trimmed.slice(5).trim();
-          if (raw === '[DONE]') return;
+        const genChunk = ChatGenerationChunk
+          ? new ChatGenerationChunk({
+              text,
+              message:        msgChunk,
+              generationInfo: { finish_reason: parsed.choices[0].finish_reason },
+            })
+          : { text, message: msgChunk };
 
-          try {
-            const parsed   = JSON.parse(raw);
-            const delta    = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
-            if (!delta) continue;
-
-            const text     = delta.content || '';
-            const msgChunk = AIMessageChunk
-              ? new AIMessageChunk({
-                  content: text,
-                  additional_kwargs: delta.tool_calls ? { tool_calls: delta.tool_calls } : {},
-                })
-              : { content: text, _getType: () => 'AIMessageChunk' };
-
-            const genChunk = ChatGenerationChunk
-              ? new ChatGenerationChunk({
-                  text,
-                  message:        msgChunk,
-                  generationInfo: { finish_reason: parsed.choices[0].finish_reason },
-                })
-              : { text, message: msgChunk };
-
-            if (runManager && typeof runManager.handleLLMNewToken === 'function') {
-              await runManager.handleLLMNewToken(text, genChunk);
-            }
-            yield genChunk;
-          } catch (_) { /* skip malformed lines */ }
+        if (runManager && typeof runManager.handleLLMNewToken === 'function') {
+          await runManager.handleLLMNewToken(text, genChunk);
         }
+        yield genChunk;
       }
     }
   }
@@ -593,21 +647,12 @@ class ByokRelayClient {
 
   async register (appId) {
     if (appId) this._appId = appId;
-    const res = await fetch(`${this._relayUrl}/users`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ app_id: this._appId }),
-    });
-    if (!res.ok) throw new Error(`register failed: ${res.status}`);
-    const data = await res.json();
-    this._kset(this._tokenKey, data.token);
-    return data.token;
+    this._kremove(this._tokenKey);
+    return this._ensureToken();
   }
 
   async ensureToken () {
-    const existing = this._kget(this._tokenKey);
-    if (existing) return existing;
-    return this.register(this._appId);
+    return this._ensureToken();
   }
 
   logout () { this._kremove(this._tokenKey); }
@@ -672,26 +717,10 @@ class ByokRelayClient {
       const err = await res.text();
       throw new Error(`streamChat failed (${res.status}): ${err}`);
     }
-    const reader  = res.body.getReader();
-    const decoder = new TextDecoder();
-    let   buffer  = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return;
-        try {
-          const parsed = JSON.parse(data);
-          const chunk  = (parsed.choices && parsed.choices[0].delta.content) || '';
-          if (chunk) yield chunk;
-        } catch (_) {}
-      }
+    for await (const parsed of _parseSSE(res.body)) {
+      const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+      const chunk = (delta && delta.content) || '';
+      if (chunk) yield chunk;
     }
   }
 
