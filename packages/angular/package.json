@@ -1,0 +1,56 @@
+{
+  "name": "@byok-relay/angular",
+  "version": "1.0.0",
+  "description": "Angular injectable services for byok-relay — drop-in BYOK AI in any Angular or Analog app",
+  "keywords": [
+    "byok",
+    "ai",
+    "angular",
+    "analog",
+    "angularjs",
+    "injectable",
+    "signals",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "frontend",
+    "lovable",
+    "bolt",
+    "no-backend",
+    "api-key",
+    "self-hosted"
+  ],
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/services.test.js"
+  },
+  "peerDependencies": {
+    "@angular/core": ">=14.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@angular/core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/angular"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "MIT",
+  "author": "avikalpg"
+}
