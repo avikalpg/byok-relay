@@ -1,7 +1,31 @@
-.git
-node_modules
-data
+# Dependency directories
+node_modules/
+
+# Data / database files — mounted as a volume, not baked into the image
+data/
+
+# Git
+.git/
+.gitignore
+
+# Environment files — secrets must never be baked into images
 .env
+.env.*
+!.env.example
+
+# Development / editor files
 *.log
-coverage
 .DS_Store
+.vscode/
+.idea/
+
+# Test artifacts
+test/
+coverage/
+
+# Documentation (not needed at runtime)
+README.md
+CHANGELOG.md
+examples/
+deploy/
+skills/

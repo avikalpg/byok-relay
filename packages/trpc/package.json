@@ -1,0 +1,57 @@
+{
+  "name": "@byok-relay/trpc",
+  "version": "1.0.0",
+  "description": "tRPC v11 router adapter and context factory for BYOK AI relay — type-safe AI procedures with user-owned API keys",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/trpc.test.js"
+  },
+  "keywords": [
+    "trpc",
+    "trpc-v11",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "router",
+    "procedure",
+    "context",
+    "typescript",
+    "type-safe",
+    "next",
+    "nextjs",
+    "self-hosted",
+    "no-backend"
+  ],
+  "peerDependencies": {
+    "@trpc/server": ">=11.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@trpc/server": {
+      "optional": true
+    }
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/trpc"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
