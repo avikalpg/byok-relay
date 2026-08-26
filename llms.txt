@@ -287,6 +287,71 @@ for await (const chunk of await chain.stream({ input: 'Hello' })) {
 
 npm: https://www.npmjs.com/package/@byok-relay/langchain
 
+## LlamaIndex.TS Integration
+
+Drop `ByokRelayLLM` into any LlamaIndex pipeline — RAG, query engines, ReActAgent. Users supply their own AI provider keys; keys are AES-256-GCM encrypted at rest in the relay.
+
+```bash
+npm install @byok-relay/llamaindex llamaindex
+```
+
+### ByokRelayLLM (extends BaseLLM)
+
+```js
+import { ByokRelayLLM } from '@byok-relay/llamaindex';
+
+const llm = new ByokRelayLLM({
+  relayUrl: process.env.RELAY_URL,
+  model:    'openai/gpt-4o',
+});
+await llm.storeKey('openai', 'sk-...');
+const response = await llm.chat({ messages: [{ role: 'user', content: 'Explain BYOK.' }] });
+console.log(response.message.content);
+```
+
+### ByokRelayEmbedding (extends BaseEmbedding)
+
+```js
+import { ByokRelayEmbedding } from '@byok-relay/llamaindex';
+import { VectorStoreIndex, Document } from 'llamaindex';
+
+const embed = new ByokRelayEmbedding({ model: 'openai/text-embedding-3-small' });
+await embed.storeKey('openai', 'sk-...');
+const index = await VectorStoreIndex.fromDocuments(
+  [new Document({ text: 'byok-relay is an open-source BYOK AI relay.' })],
+  { embedModel: embed },
+);
+const engine = index.asQueryEngine({ llm });
+const result = await engine.query({ query: 'What does byok-relay do?' });
+```
+
+### Tool calling (withTools)
+
+```js
+const weatherTool = {
+  name: 'get_weather',
+  description: 'Get the weather for a city',
+  parameters: {
+    type: 'object',
+    properties: { city: { type: 'string' } },
+    required: ['city'],
+  },
+};
+
+const llmWithTools = llm.withTools([weatherTool]);
+const response = await llmWithTools.chat({ messages: [{ role: 'user', content: 'Weather in Tokyo?' }] });
+// response.message.options.toolCall → [{ name: 'get_weather', input: { city: 'Tokyo' }, id: '...' }]
+```
+
+### Streaming
+
+```js
+for await (const chunk of llm.stream({ messages: [{ role: 'user', content: 'Tell me a story.' }] })) {
+  process.stdout.write(chunk.delta);
+}
+```
+
+npm: https://www.npmjs.com/package/@byok-relay/llamaindex
 
 ## License
 
@@ -352,7 +417,7 @@ npm: https://www.npmjs.com/package/@byok-relay/fastify
 
 ## Elysia Integration (`@byok-relay/elysia`)
 
-Elysia plugin and standalone route handler for Bun-native Elysia 1.x servers (also Node.js 18+). `RELAY_URL` stays in `Bun.env` or `process.env` and never enters the browser bundle.
+Elysia plugin and standalone route handler for Bun-native Elysia 1.x servers (also Node.js 18+ with the Node adapter). `RELAY_URL` stays in `Bun.env` or `process.env` and never enters the browser bundle.
 
 ```bash
 bun add @byok-relay/elysia elysia
@@ -367,11 +432,28 @@ const app = new Elysia()
   .listen(3000);
 ```
 
+For Node.js, install Elysia's Node adapter and use `process.env`:
+
+```bash
+npm install @byok-relay/elysia elysia @elysiajs/node
+```
+
+```js
+const { Elysia } = require('elysia');
+const { node } = require('@elysiajs/node');
+const { byokRelayPlugin } = require('@byok-relay/elysia');
+
+const app = new Elysia({ adapter: node() })
+  .use(byokRelayPlugin({ relayUrl: process.env.RELAY_URL }))
+  .listen(3000);
+```
+
 Or use the standalone handler for explicit route registration:
 
 ```js
 const { createRelayRouteHandler } = require('@byok-relay/elysia');
-app.all('/relay/*', createRelayRouteHandler({ relayUrl: Bun.env.RELAY_URL }));
+const relayUrl = typeof Bun !== 'undefined' ? Bun.env.RELAY_URL : process.env.RELAY_URL;
+app.all('/relay/*', createRelayRouteHandler({ relayUrl }));
 ```
 
 Returns a native `Response` with the upstream `ReadableStream` piped directly, so SSE streaming works out of the box on Bun. Supports `allowedAppIds`, timeout configuration, and `ByokRelayClient` with a custom storage adapter.
@@ -686,7 +768,7 @@ npm: https://www.npmjs.com/package/@byok-relay/nuxt
 
 ## React Native / Expo Integration (`@byok-relay/expo`)
 
-For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming requires a ReadableStream-capable implementation. Expo SDK 52+ provides `expo/fetch` and `ReadableStream` support automatically, so current Expo projects only need `@byok-relay/expo` plus AsyncStorage once the package is published. Install `expo-secure-store` only when using the optional SecureStore adapter. Older Expo SDKs or bare React Native apps must pass their own ReadableStream-capable `fetch` implementation or polyfill.
+For React Native and Expo mobile apps. Uses AsyncStorage instead of localStorage for token persistence. Fetch-based SSE streaming requires a ReadableStream-capable implementation. Expo SDK 52.0.7+ provides `expo/fetch` and `ReadableStream` support automatically, so current Expo projects only need `@byok-relay/expo` plus AsyncStorage once the package is published. Install `expo-secure-store` only when using the optional SecureStore adapter. Older Expo SDKs or bare React Native apps must pass their own ReadableStream-capable `fetch` implementation or polyfill.
 
 ```bash
 # After @byok-relay/expo is published:
@@ -702,7 +784,7 @@ npm install /path/to/byok-relay/byok-relay-expo-1.0.0.tgz
 ```
 
 ```tsx
-// Expo SDK 52+
+// Expo SDK 52.0.7+
 import { fetch as expoFetch } from 'expo/fetch';
 import { ByokRelayClient, useStreamingChat } from '@byok-relay/expo';
 
@@ -770,6 +852,20 @@ npm install @byok-relay/sveltekit
 import { createByokRelayHandle } from '@byok-relay/sveltekit';
 export const handle = createByokRelayHandle();
 // Set RELAY_URL in your .env file
+```
+
+### Cloudflare binding
+
+Cloudflare Workers expose secrets through `event.platform.env`, not necessarily
+`process.env`. Bind `RELAY_URL` in your Worker configuration and pass it to the
+hook explicitly:
+
+```js
+// src/hooks.server.js
+import { createByokRelayHandle } from '@byok-relay/sveltekit';
+
+export const handle = ({ event, resolve }) =>
+  createByokRelayHandle({ relayUrl: event.platform?.env?.RELAY_URL })({ event, resolve });
 ```
 
 ### Route handlers ([...path]/+server.js)
