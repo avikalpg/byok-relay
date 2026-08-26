@@ -22,7 +22,7 @@
  *   // After (@byok-relay/openai)
  *   import { ByokRelayOpenAI } from '@byok-relay/openai';
  *   const client = new ByokRelayOpenAI({ relayUrl: 'https://relay.byokrelay.com' });
- *   // User's key is stored in the relay — never in your app
+ *   // The relay stores the user's key encrypted at rest
  *
  * Runtime requirements: Node.js 18+ or any runtime with native fetch + ReadableStream.
  *
@@ -567,7 +567,17 @@ class ByokRelayOpenAI {
       signal: options.signal,
     });
 
-    if (params.stream) return new ByokRelayStream(res);
+    if (params.stream) {
+      if (!res.ok) {
+        let errBody;
+        try { errBody = await res.json(); } catch (_) { errBody = { error: { message: await res.text() } }; }
+        const msg = errBody?.error?.message || `Stream failed with status ${res.status}`;
+        const err = new Error(msg);
+        err.status = res.status;
+        throw err;
+      }
+      return new ByokRelayStream(res);
+    }
     return res.json();
   }
 
@@ -637,20 +647,20 @@ class ByokRelayOpenAI {
   async _audioTranscriptionsCreate (params, options = {}) {
     // Audio transcription typically uses multipart/form-data — forward body as-is
     const provider = this._provider;
-    const token = await this._client.ensureToken();
+    const auth = await this._authHeader();
     const relayUrl = this._client.relayUrl;
 
     const controller = new AbortController();
     const tid = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
     try {
       const headers = {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': auth,
         'X-App-Id': this._client.appId,
       };
 
       let body;
-      if (params instanceof FormData || (typeof FormData !== 'undefined' && params.file)) {
-        // If params look like raw FormData
+      if (typeof FormData !== 'undefined' && params instanceof FormData) {
+        // Caller passed a ready-made FormData
         body = params;
       } else {
         // Build FormData from params object

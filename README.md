@@ -1881,7 +1881,7 @@ Supports: streaming, tool calling (`bindTools`), LCEL pipes, ReAct agents, RAG w
 
 ## OpenAI SDK — Drop-in Compatible Client
 
-Replace `new OpenAI({ apiKey })` with `new ByokRelayOpenAI(...)` — users' keys are stored **AES-256-GCM encrypted** in the relay. Your app never sees the raw key. All namespaces mirror the openai SDK exactly: `chat.completions`, `embeddings`, `images`, `models`, `audio`, `completions`.
+Replace `new OpenAI({ apiKey })` with `new ByokRelayOpenAI(...)`. Callers provide keys to `storeKey`; the relay stores them **AES-256-GCM encrypted** and does not return them. The client supports these OpenAI-compatible namespaces: `chat.completions`, `embeddings`, `images`, `models`, `audio`, `completions`.
 
 ```bash
 npm install @byok-relay/openai
@@ -1891,7 +1891,7 @@ npm install @byok-relay/openai
 import { ByokRelayOpenAI } from '@byok-relay/openai';
 
 // Drop-in replacement for new OpenAI({ apiKey: ... })
-const client = new ByokRelayOpenAI({ relayUrl: process.env.RELAY_URL });
+const client = new ByokRelayOpenAI();
 
 // User stores their key once via your settings UI
 await client.storeKey('openai', userApiKey);
@@ -1904,11 +1904,13 @@ const completion = await client.chat.completions.create({
 
 // Streaming — identical interface
 const stream = await client.chat.completions.create({ model: 'gpt-4o', messages, stream: true });
+// Node.js example:
 for await (const chunk of stream) {
   process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
 }
 
-// Multi-provider — prefix the model name
+// Multi-provider — register the provider key, then prefix the model name
+await client.storeKey('anthropic', userAnthropicApiKey);
 const reply = await client.chat.completions.create({
   model: 'anthropic/claude-3-5-sonnet-20241022',   // routes to Anthropic
   messages: [{ role: 'user', content: 'Hello!' }],

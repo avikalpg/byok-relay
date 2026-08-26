@@ -8,9 +8,9 @@
 
 ## Why?
 
-The `openai` SDK needs an API key. In a browser app that key ends up in your bundle or localStorage — visible to anyone who opens DevTools. byok-relay stores the user's key **encrypted server-side** and forwards requests on their behalf. Your app never sees the raw key.
+The `openai` SDK needs an API key. In a browser app that key can end up in your bundle or localStorage, visible to anyone who opens DevTools. byok-relay receives the key from `storeKey`, stores it **encrypted server-side**, and forwards requests on the user's behalf; your application server does not receive the stored key.
 
-`@byok-relay/openai` mirrors the `openai` SDK's interface exactly, so migration is a one-line swap.
+`@byok-relay/openai` supports the documented OpenAI-compatible namespaces, so migration for those APIs is a small swap.
 
 ## Install
 
@@ -27,7 +27,7 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // After (@byok-relay/openai — key stored in relay, never in your app):
 import { ByokRelayOpenAI } from '@byok-relay/openai';
-const client = new ByokRelayOpenAI({ relayUrl: process.env.RELAY_URL });
+const client = new ByokRelayOpenAI();
 ```
 
 Then use the client **exactly like the openai SDK**:
@@ -63,6 +63,7 @@ const stream = await client.chat.completions.create({
   stream: true,
 });
 
+// Node.js example:
 for await (const chunk of stream) {
   process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
 }
@@ -82,7 +83,9 @@ Prefix the model name with the provider to route to Anthropic, Groq, Mistral, et
 
 ```js
 // Route to Anthropic Claude
-const client = new ByokRelayOpenAI({ relayUrl: process.env.RELAY_URL });
+const client = new ByokRelayOpenAI();
+
+await client.storeKey('anthropic', userAnthropicApiKey);
 
 const completion = await client.chat.completions.create({
   model: 'anthropic/claude-3-5-sonnet-20241022',   // provider/model
