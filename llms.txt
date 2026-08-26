@@ -784,7 +784,7 @@ npm install /path/to/byok-relay/byok-relay-expo-1.0.0.tgz
 ```
 
 ```tsx
-// Expo SDK 52+
+// Expo SDK 52.0.7+
 import { fetch as expoFetch } from 'expo/fetch';
 import { ByokRelayClient, useStreamingChat } from '@byok-relay/expo';
 

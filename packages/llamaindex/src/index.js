@@ -144,7 +144,9 @@ function _liToOpenAI (msg) {
       if (part.type === 'text') return { type: 'text', text: part.text };
       if (part.type === 'image_url') {
         const url = part.imageUrl || (typeof part.image_url === 'object' ? part.image_url?.url : part.image_url);
-        return { type: 'image_url', image_url: { url } };
+        const image_url = { url };
+        if (['high', 'low', 'auto'].includes(part.detail)) image_url.detail = part.detail;
+        return { type: 'image_url', image_url };
       }
       return { type: 'text', text: String(part) };
     });
@@ -224,7 +226,7 @@ class ByokRelayClient {
     this.relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
     this.appId    = opts.appId || 'llamaindex-app';
     this._token   = null;
-    this._tokenKey = `byok_relay_token_${this.appId}`;
+    this._tokenKey = `byok_relay_token_${encodeURIComponent(this.relayUrl)}_${encodeURIComponent(this.appId)}`;
 
     // Storage: localStorage in browser, in-memory fallback in Node.js/edge
     if (opts.storage) {
