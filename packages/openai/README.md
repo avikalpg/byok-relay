@@ -28,6 +28,9 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // After (@byok-relay/openai — key stored in relay, never in your app):
 import { ByokRelayOpenAI } from '@byok-relay/openai';
 const client = new ByokRelayOpenAI();
+
+// After the user enters their key in your settings UI:
+await client.storeKey('openai', userApiKey);
 ```
 
 Then use the client **exactly like the openai SDK**:

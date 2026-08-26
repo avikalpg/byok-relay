@@ -543,7 +543,8 @@ class ByokRelayOpenAI {
     if (params.stream) {
       if (!res.ok) {
         let errBody;
-        try { errBody = await res.json(); } catch (_) { errBody = { error: { message: await res.text() } }; }
+        const errorText = await res.text();
+        try { errBody = JSON.parse(errorText); } catch (_) { errBody = { error: { message: errorText } }; }
         const msg = errBody?.error?.message || `Stream failed with status ${res.status}`;
         const err = new Error(msg);
         err.status = res.status;
@@ -570,7 +571,8 @@ class ByokRelayOpenAI {
     if (params.stream) {
       if (!res.ok) {
         let errBody;
-        try { errBody = await res.json(); } catch (_) { errBody = { error: { message: await res.text() } }; }
+        const errorText = await res.text();
+        try { errBody = JSON.parse(errorText); } catch (_) { errBody = { error: { message: errorText } }; }
         const msg = errBody?.error?.message || `Stream failed with status ${res.status}`;
         const err = new Error(msg);
         err.status = res.status;

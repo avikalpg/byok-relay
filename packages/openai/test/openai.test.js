@@ -245,6 +245,21 @@ assert(stream.response.status === 200, 'response.status exposed');
   assert(toolFinal.choices[0].message.tool_calls[0].function.arguments.includes('Tokyo'), 'tool arguments accumulated');
   assert(toolFinal.choices[0].message.content === null, 'content null when tool_calls present');
 
+  /* ============================================================ */
+  /* 12. Streaming error handling                                 */
+  /* ============================================================ */
+  console.log('\n12. Streaming error handling');
+
+  const failingClient = new ByokRelayOpenAI();
+  failingClient._relayFetch = async () => new Response('<html>gateway error</html>', { status: 502 });
+  try {
+    await failingClient.completions.create({ model: 'gpt-4o', prompt: 'Hello', stream: true });
+    assert(false, 'legacy streaming errors should reject');
+  } catch (error) {
+    assertEqual(error.message, '<html>gateway error</html>', 'legacy streaming error preserves a non-JSON response body');
+    assertEqual(error.status, 502, 'legacy streaming error preserves the response status');
+  }
+
   console.log('\n' + '='.repeat(50));
   console.log(`Results: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
