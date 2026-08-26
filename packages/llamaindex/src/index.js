@@ -142,7 +142,10 @@ function _liToOpenAI (msg) {
   if (Array.isArray(content)) {
     const parts = content.map(part => {
       if (part.type === 'text') return { type: 'text', text: part.text };
-      if (part.type === 'image_url') return { type: 'image_url', image_url: { url: part.imageUrl || part.image_url } };
+      if (part.type === 'image_url') {
+        const url = part.imageUrl || (typeof part.image_url === 'object' ? part.image_url?.url : part.image_url);
+        return { type: 'image_url', image_url: { url } };
+      }
       return { type: 'text', text: String(part) };
     });
     return { role, content: parts };
@@ -221,6 +224,7 @@ class ByokRelayClient {
     this.relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
     this.appId    = opts.appId || 'llamaindex-app';
     this._token   = null;
+    this._tokenKey = `byok_relay_token_${this.appId}`;
 
     // Storage: localStorage in browser, in-memory fallback in Node.js/edge
     if (opts.storage) {
@@ -241,7 +245,7 @@ class ByokRelayClient {
 
   async ensureToken () {
     if (this._token) return this._token;
-    const stored = this._storage.getItem('byok_relay_token');
+    const stored = this._storage.getItem(this._tokenKey);
     if (stored) { this._token = stored; return stored; }
     return this.register();
   }
@@ -255,13 +259,13 @@ class ByokRelayClient {
     const data = await res.json();
     if (!res.ok) throw new Error(`Registration failed: ${data.error || res.status}`);
     this._token = data.token;
-    this._storage.setItem('byok_relay_token', data.token);
+    this._storage.setItem(this._tokenKey, data.token);
     return data.token;
   }
 
   async logout () {
     this._token = null;
-    this._storage.removeItem('byok_relay_token');
+    this._storage.removeItem(this._tokenKey);
   }
 
   /* -- Key management ---------------------------------------------------- */
@@ -353,7 +357,7 @@ class ByokRelayClient {
     const data = await res.json();
     if (!res.ok) throw new Error(`Delete account failed: ${data.error || res.status}`);
     this._token = null;
-    this._storage.removeItem('byok_relay_token');
+    this._storage.removeItem(this._tokenKey);
     return data;
   }
 }

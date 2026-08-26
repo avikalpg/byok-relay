@@ -139,6 +139,19 @@ test('uses custom storage adapter', () => {
   assert.strictEqual(c._storage.getItem('test'), 'val');
 });
 
+test('scopes stored tokens by appId', () => {
+  const store = {};
+  const adapter = {
+    getItem:    k      => store[k] ?? null,
+    setItem:    (k, v) => { store[k] = v; },
+    removeItem: k      => { delete store[k]; },
+  };
+  const first = new pkg.ByokRelayClient({ appId: 'first-app', storage: adapter });
+  const second = new pkg.ByokRelayClient({ appId: 'second-app', storage: adapter });
+  first._storage.setItem(first._tokenKey, 'first-token');
+  assert.strictEqual(second._storage.getItem(second._tokenKey), null);
+});
+
 test('in-memory storage fallback works without localStorage', () => {
   const c = new pkg.ByokRelayClient();
   c._storage.setItem('k', 'v');
@@ -392,6 +405,21 @@ await testAsync('chat() with per-call tools sends tools array to relay', async (
   assert.ok(Array.isArray(body.tools));
   assert.strictEqual(body.tools[0].type, 'function');
   assert.strictEqual(body.tools[0].function.name, 'calc');
+  restoreFetch();
+});
+
+await testAsync('chat() normalizes object-shaped image URLs', async () => {
+  mockFetch([{ body: { choices: [{ message: { role: 'assistant', content: 'ok' } }], usage: {} } }]);
+  const llm = new pkg.ByokRelayLLM({ model: 'openai/gpt-4o', relayUrl: 'https://relay.test' });
+  llm._client._token = 'tok';
+  await llm.chat({
+    messages: [{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: 'https://example.test/image.png' } }],
+    }],
+  });
+  const body = JSON.parse(_fetchCalls[0].opts.body);
+  assert.strictEqual(body.messages[0].content[0].image_url.url, 'https://example.test/image.png');
   restoreFetch();
 });
 

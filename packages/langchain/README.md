@@ -2,7 +2,7 @@
 
 LangChain.js custom chat model and embeddings adapter for [byok-relay](https://github.com/avikalpg/byok-relay).
 
-Use **user-supplied AI provider keys** in your LangChain chains, agents, and RAG pipelines — without storing keys server-side. Keys are encrypted at rest in the relay; your server only sees a relay token.
+Use **user-supplied AI provider keys** in your LangChain chains, agents, and RAG pipelines — without your application server storing them. The relay stores keys encrypted at rest; your server only sees a relay token.
 
 ```bash
 npm install @byok-relay/langchain @langchain/core langchain @langchain/langgraph zod

@@ -19,7 +19,8 @@ import { ByokRelayLLM } from '@byok-relay/llamaindex';
 
 const llm = new ByokRelayLLM({ model: 'openai/gpt-4o' });
 
-// Store the user's API key (once — persisted in localStorage)
+// Send the user's API key to the relay (once). In browsers, localStorage caches
+// the relay token; Node.js and edge runtimes use in-memory storage by default.
 await llm.storeKey('openai', 'sk-...');
 
 // Non-streaming chat
@@ -133,6 +134,26 @@ console.log(response.response); // '56'
 ## Quick start — withTools (bound tools)
 
 ```js
+const weatherTool = {
+  name: 'get_weather',
+  description: 'Get the weather for a city',
+  parameters: {
+    type: 'object',
+    properties: { city: { type: 'string' } },
+    required: ['city'],
+  },
+};
+
+const calendarTool = {
+  name: 'get_calendar',
+  description: 'Get calendar events for a date',
+  parameters: {
+    type: 'object',
+    properties: { date: { type: 'string' } },
+    required: ['date'],
+  },
+};
+
 const llmWithTools = llm.withTools([weatherTool, calendarTool]);
 
 // Tools are forwarded automatically on every call
@@ -302,4 +323,4 @@ docker compose up -d   # see byok-relay repo for docker-compose.yml
 
 ## License
 
-MIT — [byokrelay.com](https://byokrelay.com)
+Apache-2.0 — [byokrelay.com](https://byokrelay.com)
