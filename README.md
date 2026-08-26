@@ -2448,6 +2448,17 @@ Content-Type: application/json
 { "error": "Model \"gpt-4o\" is not permitted on this relay.", "allowed_models": ["gpt-4o-mini", "anthropic/claude-3-5-haiku*", "google/gemini-2.0-flash*"] }
 ```
 
+## Kubernetes / Helm
+
+The bundled Helm chart deploys byok-relay with a Deployment, Service, health probes, Secret and ConfigMap wiring, optional Ingress, and a persistent SQLite PVC. It is designed for a single replica when using SQLite.
+
+```bash
+kubectl create secret generic byok-relay-secrets --from-literal=ENCRYPTION_SECRET="$(openssl rand -hex 32)" --from-literal=TOKEN_HMAC_SECRET="$(openssl rand -hex 32)" --from-literal=ENCRYPTION_SALT="$(openssl rand -hex 32)" --from-literal=APP_SECRET="$(openssl rand -hex 32)"
+helm install byok-relay ./helm/byok-relay --set secrets.create=false --set secrets.existingSecret=byok-relay-secrets --set config.allowedOrigins=https://your-app.example.com
+```
+
+See [`helm/byok-relay/README.md`](helm/byok-relay/README.md) for configuration details.
+
 ## Deploy in one click
 
 ### Docker (recommended for self-hosters)
