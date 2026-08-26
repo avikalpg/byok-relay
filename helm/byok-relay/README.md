@@ -96,7 +96,8 @@ helm template byok-relay ./helm/byok-relay \
   --set secrets.encryptionSecret=test-secret-at-least-32-characters-long
 
 helm upgrade --install byok-relay ./helm/byok-relay \
-  --set secrets.encryptionSecret=test-secret-at-least-32-characters-long
+  --set secrets.encryptionSecret=test-secret-at-least-32-characters-long \
+  --wait --timeout 5m
 
 helm test byok-relay
 ```

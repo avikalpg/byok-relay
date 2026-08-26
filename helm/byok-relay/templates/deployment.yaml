@@ -6,6 +6,8 @@ metadata:
     {{- include "byok-relay.labels" . | nindent 4 }}
 spec:
   # The embedded SQLite database supports one writable pod only.
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
