@@ -19,7 +19,10 @@ helm install byok-relay ./helm/byok-relay \
   --set config.allowedOrigins=https://your-app.example.com
 ```
 
-Or let Helm create the Secret:
+Or let Helm create the Secret for development or testing only. This puts
+plaintext values in the shell history and Helm release values. For production,
+create a Kubernetes Secret through your secret-management workflow and use
+`secrets.existingSecret` as shown above.
 
 ```bash
 helm install byok-relay ./helm/byok-relay \
@@ -90,6 +93,9 @@ ingress:
 
 ```bash
 helm template byok-relay ./helm/byok-relay \
+  --set secrets.encryptionSecret=test-secret-at-least-32-characters-long
+
+helm upgrade --install byok-relay ./helm/byok-relay \
   --set secrets.encryptionSecret=test-secret-at-least-32-characters-long
 
 helm test byok-relay

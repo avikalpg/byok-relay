@@ -63,7 +63,9 @@ Secret name containing runtime secrets.
 {{- define "byok-relay.secretName" -}}
 {{- if .Values.secrets.existingSecret -}}
 {{- .Values.secrets.existingSecret -}}
-{{- else -}}
+{{- else if .Values.secrets.create -}}
 {{- printf "%s-secrets" (include "byok-relay.fullname" .) -}}
+{{- else -}}
+{{- fail "secrets.existingSecret must be set when secrets.create is false" -}}
 {{- end -}}
 {{- end -}}
