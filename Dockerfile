@@ -26,13 +26,14 @@ COPY src/ ./src/
 COPY package.json ./
 
 # Data directory for SQLite — will be bind-mounted in production
-RUN mkdir -p /app/data && chown relay:relay /app/data
+RUN mkdir -p /data && chown relay:relay /data
 
 # Switch to non-root user
 USER relay
 
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV DB_PATH=/data/relay.db
 
 EXPOSE 3000
 

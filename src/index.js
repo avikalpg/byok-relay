@@ -1,5 +1,7 @@
 require('dotenv').config();
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -619,6 +621,50 @@ app.get('/version', (req, res) => {
     repoUrl: REPO_URL,
     attestationUrl: COMMIT_SHA ? `${REPO_URL}/tree/${COMMIT_SHA}` : null,
   });
+});
+
+// OpenAPI spec endpoints — served for agent/tool discovery
+// AI coding agents, Postman, Insomnia, and similar tools can import these.
+const OPENAPI_JSON_PATH = path.join(__dirname, '..', 'openapi.json');
+
+function isMissingOpenApiSpec(err) {
+  return err && (
+    err.code === 'ENOENT' ||
+    (err.code === 'MODULE_NOT_FOUND' && typeof err.message === 'string' && err.message.includes(OPENAPI_JSON_PATH))
+  );
+}
+
+app.get('/openapi.json', (req, res) => {
+  try {
+    // Clear require cache so hot-reloads pick up spec changes in dev
+    delete require.cache[OPENAPI_JSON_PATH];
+    const spec = require(OPENAPI_JSON_PATH);
+    res.json(spec);
+  } catch (err) {
+    if (isMissingOpenApiSpec(err)) {
+      return res.status(404).json({ error: 'OpenAPI spec not found' });
+    }
+    return res.status(500).json({ error: 'Failed to load OpenAPI spec' });
+  }
+});
+
+app.get('/openapi.yaml', (req, res) => {
+  // Convert JSON spec to YAML on the fly via JSON.stringify indented,
+  // then serve as text/yaml for tools that prefer YAML.
+  try {
+    delete require.cache[OPENAPI_JSON_PATH];
+    const spec = require(OPENAPI_JSON_PATH);
+    // Simple JSON-to-YAML via js-yaml dump
+    const yaml = require('js-yaml');
+    const yamlStr = yaml.dump(spec, { lineWidth: 120, noRefs: true });
+    res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+    res.send(yamlStr);
+  } catch (err) {
+    if (isMissingOpenApiSpec(err)) {
+      return res.status(404).json({ error: 'OpenAPI spec not found' });
+    }
+    return res.status(500).json({ error: 'Failed to render OpenAPI spec' });
+  }
 });
 
 /**
