@@ -1,0 +1,51 @@
+{
+  "name": "@byok-relay/langchain",
+  "version": "1.0.0",
+  "description": "LangChain.js custom chat model and embeddings adapter for BYOK AI relay — ByokRelayChatModel, ByokRelayEmbeddings, ByokRelayClient",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/langchain.test.js"
+  },
+  "keywords": [
+    "langchain",
+    "langchainjs",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "chat-model",
+    "embeddings",
+    "rag",
+    "agents",
+    "chains",
+    "tool-calling",
+    "frontend",
+    "no-backend",
+    "self-hosted"
+  ],
+  "peerDependencies": {
+    "@langchain/core": ">=0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/core": {
+      "optional": true
+    }
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/langchain"
+  },
+  "homepage": "https://byokrelay.com"
+}
