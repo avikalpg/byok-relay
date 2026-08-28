@@ -20,7 +20,17 @@ jobs:
             set -e
             export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
             cd ~/byok-relay
-            git pull origin main
+            git fetch --prune origin main
+            # This checkout is deployment-only. Preserve unexpected tracked drift
+            # for inspection, then deploy the exact commit currently on main.
+            if ! git diff --quiet HEAD || ! git diff --cached --quiet HEAD; then
+              DRIFT_DIR="$HOME/byok-relay-backups/worktree-drift-$(date -u +%Y%m%dT%H%M%SZ)"
+              mkdir -p "$DRIFT_DIR"
+              git status --short > "$DRIFT_DIR/status.txt"
+              git diff --binary HEAD > "$DRIFT_DIR/tracked.patch"
+              echo "Preserved unexpected worktree drift in $DRIFT_DIR"
+            fi
+            git reset --hard origin/main
             npm ci --omit=dev
             # Inject deployment attestation env vars into .env
             COMMIT=$(git rev-parse HEAD)
