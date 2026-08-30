@@ -1,6 +1,6 @@
 # byok-relay — Product Hunt Launch Kit
 
-> Internal launch guide. Do not commit secrets. All copy below is final-draft quality — review before posting.
+> **INTERNAL, APPROVAL-GATED DRAFT. Do not publish externally until Avi approves.** Do not commit secrets. All copy below is final-draft quality — review before posting.
 
 ---
 
@@ -19,7 +19,7 @@
 1. `The missing backend for Lovable, Bolt & Cursor apps` ← recommended
 2. `CORS-safe AI relay — your users bring their own API key`
 3. `Self-hostable BYOK relay for frontend-only AI apps`
-4. `Ship AI apps without storing a single user API key`
+4. `Ship AI apps with encrypted user-key storage`
 
 ---
 
@@ -41,11 +41,11 @@ Suggested 5-image sequence:
 
 ## Description (shown in Gallery tab, ~260 chars for subtitle)
 
-> byok-relay is a self-hostable, zero-backend relay that lets your AI app's users bring their own API keys — no CORS, no key storage on your server, no vendor lock-in. Works with Lovable, Bolt, Cursor, plain Vite, and any frontend that talks HTTP.
+> byok-relay is a self-hostable relay that lets your AI app's users bring their own API keys — CORS-safe, with keys encrypted at rest in the relay's SQLite store, and no vendor lock-in. Works with Lovable, Bolt, Cursor, plain Vite, and the supported frontend integrations.
 
 ---
 
-## Maker's First Comment (post this yourself immediately after launch)
+## Maker's First Comment (post only after Avi approves the launch)
 
 Hey Product Hunt 👋
 
@@ -82,11 +82,11 @@ Happy to answer any questions about the architecture, the BYOK model, or why thi
 
 ### Timing
 
-- **Best day:** Tuesday–Thursday, launch at midnight PST (03:00 EST / 08:00 UTC)
+- **Best day:** Tuesday–Thursday, launch at midnight PT (03:00 ET; 07:00 UTC during daylight time, 08:00 UTC during standard time)
 - **Avoid:** Mondays (Product Hunt resets, crowded) and Fridays (low traffic)
 - Coordinate with DevHunt (see `submissions/devhunt-launch.md`) — run DevHunt a few days before PH for a warm-up
 
-### Launch day actions
+### Launch day actions (all pending Avi approval)
 
 - [ ] Post in @makers Slack with your PH link (community upvote boost)
 - [ ] Share on your personal Twitter/X (@AvikalpGupta) — "We're live on Product Hunt!"
@@ -126,7 +126,7 @@ DevHunt (devhunt.org) is specifically for developer tools — less competition, 
 A: OpenRouter and LiteLLM are vendor-managed proxies — users pay through the vendor's billing. byok-relay is BYOK: each user brings their own API key, paying their provider directly. You control the infra; they control their keys.
 
 **Q: Is the managed relay safe to use?**
-A: For prototypes and demos, yes. For production with paying users, self-host — it's one command. The managed relay is transparent about what transits (prompts, not keys) in the README.
+A: For prototypes and demos, submitted keys are encrypted and stored by the managed relay so it can make relay requests. For production with paying users, self-host — it's one command.
 
 **Q: What happens if byokrelay.com goes down?**
 A: Nothing changes for self-hosted users. For managed-relay users, switch the relay URL to your own instance. Zero vendor lock-in.

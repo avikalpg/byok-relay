@@ -1,6 +1,6 @@
 # byok-relay — Community Post Drafts
 
-> Ready-to-post. Review before submitting. Each post is tuned for its platform's tone and norms.
+> **Approval-gated drafts. Do not publish externally until Avi approves.** Each post is tuned for its platform's tone and norms.
 > "Show don't tell" format throughout: working code, real numbers, no pure marketing copy.
 
 ---
@@ -84,7 +84,7 @@ const stream = await relay.streamChat({
 });
 ```
 
-Works for OpenAI, Anthropic, Gemini, ElevenLabs, Deepgram, HuggingFace — anything with an HTTP API.
+Works with the supported providers listed above: OpenAI, Anthropic, Gemini, ElevenLabs, Deepgram, and HuggingFace.
 
 **Integration guides** for Lovable, Bolt.new, Framer, Next.js, plain Vite are in `INTEGRATIONS.md`:
 https://github.com/avikalpg/byok-relay/blob/main/INTEGRATIONS.md
@@ -118,12 +118,12 @@ I built **byok-relay** to be that relay. It's self-hostable, MIT-licensed, and t
 
 | | Traditional (you pay) | BYOK (user pays) |
 |---|---|---|
-| Marginal cost per user | ~$0.01–0.10/session | $0.00 |
+| AI provider cost per session/user | ~$0.01–0.10/session | $0.00 (paid directly by the user) |
 | Billing infra needed | Yes | No |
 | User trust barrier | Medium (give us $ + data) | Lower (give us data only) |
 | Best for | Mainstream users | Power users, developers |
 
-Works best when your users are technical enough to have an API key (or willing to get one in 5 min). Not a fit for consumer apps where users don't know what an API key is.
+Works best when your users are technical enough to have an API key (or willing to get one in 5 min). Hosting, storage, and bandwidth still have infrastructure costs. Not a fit for consumer apps where users don't know what an API key is.
 
 Repo: https://github.com/avikalpg/byok-relay
 Demo / managed relay: https://byokrelay.com
@@ -132,13 +132,13 @@ Happy to discuss the model — curious if others have tried BYOK as a revenue st
 
 ---
 
-## Hacker News — Show HN (see also show-hn.md)
+## Hacker News — Show HN (see also show-hn.md, blocked until Avi approves)
 
 **Title:** `Show HN: byok-relay – self-hostable BYOK relay for frontend-only AI apps`
 
 **Post:**
 
-byok-relay lets frontend-only apps (Lovable, Bolt.new, Cursor, plain Vite/React) use AI APIs without storing a server-side key or hitting CORS.
+byok-relay lets frontend-only apps (Lovable, Bolt.new, Cursor, plain Vite/React) use AI APIs without embedding a server-controlled provider key in the frontend or hitting CORS.
 
 The model: users enter their own OpenAI / Anthropic / Gemini key in your app's settings. The relay encrypts it (AES-256-GCM) and stores it in a local SQLite DB. Your frontend calls the relay instead of the AI provider directly — relay decrypts the key per-request, forwards the call, pipes back the response (including streaming and binary).
 
@@ -152,7 +152,7 @@ Source: https://github.com/avikalpg/byok-relay (MIT)
 
 ## Lovable / Bolt.new Discord (short format)
 
-```
+```text
 Built a CORS-safe relay so your Lovable apps can let users bring their own OpenAI/Anthropic key.
 
 No backend needed — just point your app at the relay URL:
