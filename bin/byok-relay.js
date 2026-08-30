@@ -31,6 +31,7 @@ Environment variables (required):
 Environment variables (optional):
   PORT                Server port (default: 3000)
   ALLOWED_ORIGINS     Comma-separated allowed origins (default: *)
+  APP_SECRET          Bearer token required at POST /users (recommended in production)
   DB_PATH             SQLite database file path (default: ./data/relay.db)
   RATE_LIMIT_GLOBAL   Max requests/min per IP (default: 100)
   RATE_LIMIT_RELAY    Max AI requests/min per token (default: 20)
@@ -39,7 +40,9 @@ Quick start:
   export ENCRYPTION_SECRET=$(openssl rand -hex 32)
   npx byok-relay
 
-Docs: https://github.com/avikalpg/byok-relay
+Docs:
+  https://byokrelay.com
+  https://github.com/avikalpg/byok-relay
 `);
   process.exit(0);
 }

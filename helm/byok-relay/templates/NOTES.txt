@@ -1,0 +1,22 @@
+byok-relay has been deployed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+Ingress hosts:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+Port-forward locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "byok-relay.fullname" . }} 3000:{{ .Values.service.port }}
+
+Then check:
+  curl http://127.0.0.1:3000/health
+{{- end }}
+
+Remember:
+- Restrict config.allowedOrigins in production.
+- Set secrets.appSecret or provide APP_SECRET in secrets.existingSecret to gate POST /users.
+- Keep persistence.enabled=true for durable SQLite storage.

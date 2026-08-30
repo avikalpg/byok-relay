@@ -29,6 +29,14 @@ const Database = require('better-sqlite3');
 const crypto = require('node:crypto');
 
 const { createMockProvider } = require('./mock-provider');
+const { isPathAllowed } = require('../../src/providers');
+
+it('allows OpenAI moderation requests as inference paths', () => {
+  assert.equal(isPathAllowed('openai', '/v1/moderations'), true);
+  assert.equal(isPathAllowed('openai-compatible', '/v1/moderations'), true);
+  assert.equal(isPathAllowed('openai', '/v1/moderations/../files'), false);
+  assert.equal(isPathAllowed('openai-compatible', '/v1/moderations/../files'), false);
+});
 
 it('startup migration preserves keys belonging to legacy-token users', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-migration-'));
@@ -316,6 +324,31 @@ async function waitForHealth(port, maxMs = 8000) {
   throw new Error(`Relay server on port ${port} did not start within ${maxMs}ms`);
 }
 
+async function waitForCondition(predicate, maxMs = 2000, message = 'condition was not met') {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(message);
+}
+
+async function stopChildProcess(child) {
+  if (!child || child.exitCode != null || child.signalCode != null) return;
+
+  await new Promise((resolve) => {
+    const killTimer = setTimeout(() => {
+      child.kill('SIGKILL');
+    }, 5000);
+    const done = () => {
+      clearTimeout(killTimer);
+      resolve();
+    };
+    child.once('exit', done);
+    if (!child.kill('SIGTERM')) done();
+  });
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Test suite
 // ──────────────────────────────────────────────────────────────────────────────
@@ -347,6 +380,22 @@ describe('byok-relay — example product end-to-end', () => {
       { 'x-relay-token': relayToken },
     );
     assert.equal(r.status, 200, `Expected to store test key for ${provider}, got ${r.status}`);
+  }
+
+  async function createRelayTokenWithKey(provider = 'openai-compatible') {
+    const created = await request(relayPort, 'POST', '/users', {
+      app_id: `e2e-extra-${provider}-${Date.now()}-${Math.random()}`,
+    });
+    assert.equal(created.status, 200, `Expected to create extra relay token, got ${created.status}`);
+
+    const token = created.body.token;
+    const stored = await request(
+      relayPort, 'POST', `/keys/${provider}`,
+      { key: FAKE_API_KEY },
+      { 'x-relay-token': token },
+    );
+    assert.equal(stored.status, 200, `Expected to store test key for extra ${provider}, got ${stored.status}`);
+    return token;
   }
 
   // Shared session state — persists across tests within this suite,
@@ -387,6 +436,7 @@ describe('byok-relay — example product end-to-end', () => {
           ENCRYPTION_SECRET: 'e2e-test-secret-at-least-32-characters-long',
           DB_PATH:           tmpDb,
           ALLOWED_ORIGINS:   '*',
+          REQUEST_BODY_LIMIT_BYTES: '4096',
           NODE_ENV:          'test',
           NODE_TLS_REJECT_UNAUTHORIZED: '0',
           E2E_OPENAI_COMPATIBLE_BASE_URL: mockBaseUrl,
@@ -593,10 +643,419 @@ describe('byok-relay — example product end-to-end', () => {
     assert.equal(r.status, 200);
     assert.ok(
       r.headers['content-type']?.includes('text/event-stream'),
-      `Content-Type should be text/event-stream, got: ${r.headers['content-type']}`,
+      'Content-Type should be text/event-stream',
     );
     assert.ok(r.body.includes('data:'),   'SSE body must contain data: lines');
     assert.ok(r.body.includes('[DONE]'),  'SSE body must contain the [DONE] sentinel');
+  });
+
+  it('POST /relay/openai-compatible — JSON upstream errors stay JSON even when stream is requested', async () => {
+    mock.clearRequests();
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Stream error test' }],
+        stream: true,
+        forceJsonError: true,
+      },
+      {
+        'x-relay-token': relayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 429);
+    assert.ok(
+      r.headers['content-type']?.includes('application/json'),
+      'Content-Type should stay application/json',
+    );
+    assert.ok(
+      !r.headers['content-type']?.includes('text/event-stream'),
+      'JSON upstream errors must not be mislabeled as SSE',
+    );
+    assert.equal(r.body.error, 'mock rate limited');
+  });
+
+  it('POST /relay/openai-compatible — JSON 200 responses stay JSON even when stream is requested', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Stream fallback test' }],
+        stream: true,
+        forceJsonDespiteStream: true,
+      },
+      {
+        'x-relay-token': extraRelayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 200);
+    assert.ok(
+      r.headers['content-type']?.includes('application/json'),
+      'Content-Type should stay application/json when upstream declares JSON',
+    );
+    assert.ok(
+      !r.headers['content-type']?.includes('text/event-stream'),
+      'JSON upstream success must not be mislabeled as SSE',
+    );
+    assert.equal(r.body.ok, true);
+  });
+
+  it('POST /relay/openai-compatible — no-content upstream success is preserved', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+
+    const r = await requestRaw(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'No content test' }],
+        forceNoContent: true,
+      },
+      {
+        'x-relay-token': extraRelayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 204);
+    assert.equal(r.body, '');
+  });
+
+  it('POST /relay/openai-compatible — upstream SSE errors are reported as SSE error events', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+
+    const r = await requestRaw(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'SSE failure test' }],
+        stream: true,
+        forceSseStreamError: true,
+      },
+      {
+        'x-relay-token': extraRelayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 200);
+    assert.ok(r.body.includes('event: error'), 'SSE error event should be sent before ending');
+    assert.ok(r.body.includes('Stream interrupted by provider'));
+  });
+
+  it('POST /relay/openai-compatible — upstream binary errors abort established responses', async () => {
+    mock.clearRequests();
+    const extraRelayToken = await createRelayTokenWithKey();
+    const payload = JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'Binary failure test' }],
+      forceBinaryStreamError: true,
+    });
+
+    const r = await new Promise((resolve, reject) => {
+      const chunks = [];
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: relayPort,
+          path: '/relay/openai-compatible/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'x-relay-token': extraRelayToken,
+            ...e2eRelayHeaders(),
+          },
+        },
+        (res) => {
+          const finish = (aborted) => resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString(),
+            aborted,
+          });
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => finish(false));
+          res.on('aborted', () => finish(true));
+          res.on('error', (err) => {
+            if (err.code === 'ECONNRESET') finish(true);
+            else reject(err);
+          });
+        },
+      );
+      req.on('error', reject);
+      req.setTimeout(2000, () => reject(new Error('timed out waiting for relay binary failure')));
+      req.write(payload);
+      req.end();
+    });
+
+    assert.equal(r.status, 200);
+    assert.equal(r.body, 'partial');
+    assert.equal(r.aborted, true, 'binary upstream failure should not end a truncated 200 cleanly');
+  });
+
+  it('POST /relay/openai-compatible — client disconnect destroys the upstream binary body', async () => {
+    mock.clearRequests();
+    mock.streamEvents.length = 0;
+    const extraRelayToken = await createRelayTokenWithKey();
+    const payload = JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'Binary disconnect cleanup test' }],
+      forceSlowBinaryUntilClientClose: true,
+    });
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: relayPort,
+          path: '/relay/openai-compatible/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'x-relay-token': extraRelayToken,
+            ...e2eRelayHeaders(),
+          },
+        },
+        (res) => {
+          res.once('data', () => {
+            req.destroy();
+            res.destroy();
+            done();
+          });
+        },
+      );
+      req.on('error', (err) => {
+        if (settled || err.code === 'ECONNRESET') return;
+        reject(err);
+      });
+      req.setTimeout(2000, () => reject(new Error('timed out waiting for relay binary data')));
+      req.write(payload);
+      req.end();
+    });
+
+    await waitForCondition(
+      () => mock.streamEvents.includes('slow-binary-response-closed'),
+      2000,
+      'relay did not destroy the upstream binary response after client disconnect',
+    );
+  });
+
+  it('POST /relay/openai-compatible — client disconnect destroys the upstream SSE body', async () => {
+    mock.clearRequests();
+    mock.streamEvents.length = 0;
+    const extraRelayToken = await createRelayTokenWithKey();
+    const payload = JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'Disconnect cleanup test' }],
+      stream: true,
+      forceSlowSseUntilClientClose: true,
+    });
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: relayPort,
+          path: '/relay/openai-compatible/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'x-relay-token': extraRelayToken,
+            ...e2eRelayHeaders(),
+          },
+        },
+        (res) => {
+          res.once('data', () => {
+            req.destroy();
+            res.destroy();
+            done();
+          });
+        },
+      );
+      req.on('error', (err) => {
+        if (settled || err.code === 'ECONNRESET') return;
+        reject(err);
+      });
+      req.setTimeout(2000, () => reject(new Error('timed out waiting for relay stream data')));
+      req.write(payload);
+      req.end();
+    });
+
+    await waitForCondition(
+      () => mock.streamEvents.includes('slow-sse-response-closed'),
+      2000,
+      'relay did not destroy the upstream SSE response after client disconnect',
+    );
+  });
+
+  it('REQUEST_BODY_LIMIT_BYTES ignores malformed values instead of truncating them', async () => {
+    const malformedLimitPort = await getFreePort();
+    const malformedLimitDb = path.join(os.tmpdir(), `byok-relay-e2e-malformed-limit-${Date.now()}.db`);
+    const malformedLimitProc = spawn(
+      process.execPath,
+      [path.resolve(__dirname, '../../src/index.js')],
+      {
+        env: {
+          ...process.env,
+          PORT: String(malformedLimitPort),
+          ENCRYPTION_SECRET: 'malformed-limit-test-secret-at-least-32-characters',
+          DB_PATH: malformedLimitDb,
+          ALLOWED_ORIGINS: '*',
+          REQUEST_BODY_LIMIT_BYTES: '10mb',
+          NODE_ENV: 'test',
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+
+    try {
+      await waitForHealth(malformedLimitPort);
+      const r = await requestRaw(
+        malformedLimitPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+        'x'.repeat(5000),
+        { 'Content-Type': 'application/octet-stream' },
+      );
+
+      assert.equal(r.status, 401);
+      assert.ok(
+        r.body.includes('x-relay-token header required'),
+        'large body should reach auth instead of being rejected by a partially parsed 10-byte limit',
+      );
+    } finally {
+      if (malformedLimitProc.exitCode == null && malformedLimitProc.signalCode == null) {
+        await new Promise((resolve) => {
+          const killTimer = setTimeout(() => {
+            malformedLimitProc.kill('SIGKILL');
+          }, 5000);
+          const done = () => {
+            clearTimeout(killTimer);
+            resolve();
+          };
+          malformedLimitProc.once('exit', done);
+          if (!malformedLimitProc.kill('SIGTERM')) done();
+        });
+      }
+      fs.rmSync(malformedLimitDb, { force: true });
+    }
+  });
+
+  it('POST /relay/:provider/* — rejects raw bodies above the configured limit', async () => {
+    const r = await requestRaw(
+      relayPort, 'POST', '/relay/openai-compatible/v1/chat/completions',
+      'x'.repeat(5000),
+      {
+        'Content-Type': 'application/octet-stream',
+        'x-relay-token': relayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 413);
+    assert.ok(r.body.includes('Request body too large'));
+  });
+
+  it('ALLOWED_MODELS — wildcard exact matches and Google path models are enforced', async () => {
+    const restrictedPort = await getFreePort();
+    const restrictedDb = path.join(os.tmpdir(), `byok-relay-restricted-${Date.now()}.db`);
+    const restrictedProc = spawn(
+      process.execPath,
+      [path.resolve(__dirname, '../../src/index.js')],
+      {
+        env: {
+          ...process.env,
+          PORT: String(restrictedPort),
+          ENCRYPTION_SECRET: 'restricted-model-test-secret-at-least-32-chars',
+          DB_PATH: restrictedDb,
+          ALLOWED_ORIGINS: '*',
+          ALLOWED_MODELS: 'gpt-4o*,google/gemini-2.0-flash',
+          NODE_ENV: 'test',
+          NODE_TLS_REJECT_UNAUTHORIZED: '0',
+          E2E_OPENAI_COMPATIBLE_BASE_URL: mockBaseUrl,
+          E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN: E2E_BASE_URL_OVERRIDE_TOKEN,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+
+    try {
+      await waitForHealth(restrictedPort);
+
+      const created = await request(restrictedPort, 'POST', '/users', {
+        app_id: `restricted-models-${Date.now()}`,
+      });
+      assert.equal(created.status, 200, `Expected user creation to succeed, got ${created.status}`);
+      const token = created.body.token;
+
+      const allowedBare = await request(
+        restrictedPort, 'POST', '/relay',
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
+        { 'x-relay-token': token },
+      );
+      assert.equal(
+        allowedBare.status,
+        400,
+        `Expected exact wildcard match gpt-4o* to pass allowlist and fail only on missing key, got ${allowedBare.status}`,
+      );
+      assert.ok(allowedBare.body.error?.toLowerCase().includes('no api key'));
+
+      const storedGoogle = await request(
+        restrictedPort, 'POST', '/keys/google',
+        { key: FAKE_API_KEY },
+        { 'x-relay-token': token },
+      );
+      assert.equal(storedGoogle.status, 200, `Expected to store google key, got ${storedGoogle.status}`);
+
+      const blockedPathModel = await request(
+        restrictedPort, 'POST', '/relay/google/v1beta/models/gemini-2.0-pro:generateContent',
+        { contents: [{ parts: [{ text: 'hi' }] }] },
+        { 'x-relay-token': token },
+      );
+      assert.equal(blockedPathModel.status, 403);
+      assert.equal(blockedPathModel.body.error, 'Model "gemini-2.0-pro" is not permitted on this relay.');
+      assert.deepEqual(blockedPathModel.body.allowed_models, ['gpt-4o*', 'google/gemini-2.0-flash']);
+
+      mock.clearRequests();
+      const allowedGooglePathModel = await request(
+        restrictedPort, 'POST', '/relay/google/v1beta/models/gemini-2.0-flash:generateContent',
+        { contents: [{ parts: [{ text: 'hi' }] }] },
+        { 'x-relay-token': token, ...e2eRelayHeaders() },
+      );
+      assert.notEqual(
+        allowedGooglePathModel.status,
+        403,
+        `Expected provider-qualified Google allowlist match to avoid local 403, got ${JSON.stringify(allowedGooglePathModel.body)}`,
+      );
+      assert.equal(mock.requests.length, 1, 'allowed Google model path should be forwarded to the mock provider');
+      assert.ok(mock.requests[0].url.startsWith('/v1beta/models/gemini-2.0-flash:generateContent'));
+    } finally {
+      await stopChildProcess(restrictedProc);
+      fs.rmSync(restrictedDb, { force: true });
+    }
   });
 
   // ── 7. Relay — error paths ───────────────────────────────────────────────
@@ -610,6 +1069,26 @@ describe('byok-relay — example product end-to-end', () => {
     );
     assert.equal(r.status, 400);
     assert.ok(r.body.error?.toLowerCase().includes('no api key'), `Expected 'no api key' error, got: ${r.body.error}`);
+  });
+
+  it('POST /relay — rejects provider account-management paths', async () => {
+    mock.clearRequests();
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/files',
+      { purpose: 'fine-tune' },
+      {
+        'x-relay-token': relayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 403);
+    assert.ok(
+      r.body.error?.toLowerCase().includes('only inference endpoints'),
+      `Expected inference-only error, got: ${JSON.stringify(r.body)}`,
+    );
+    assert.equal(mock.requests.length, 0, 'blocked path must not reach the upstream provider');
   });
 
   // ── 8. Key deletion ──────────────────────────────────────────────────────
