@@ -16,12 +16,15 @@ const crypto = require('crypto');
 
 // ── Setup ──────────────────────────────────────────────────────────────────
 
-const ENCRYPTION_SECRET = 'benchmarkbenchmarkbenchmarkbenchmark32x';
+// Generate fresh random credentials for each benchmark run.
+// These are never persisted and are not related to any production deployment.
+const ENCRYPTION_SECRET = crypto.randomBytes(32).toString('hex');
+const ENCRYPTION_SALT   = crypto.randomBytes(16).toString('hex');
 const RUNS = 10000;
 const WARMUP = 500;
 
 // Derive encryption key (this is cached at startup in prod; shown here for completeness)
-const ENCRYPTION_KEY = crypto.scryptSync(ENCRYPTION_SECRET, 'byok-relay-salt', 32);
+const ENCRYPTION_KEY = crypto.scryptSync(ENCRYPTION_SECRET, ENCRYPTION_SALT, 32);
 
 // ── DB setup ───────────────────────────────────────────────────────────────
 
