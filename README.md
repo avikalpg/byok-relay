@@ -2076,7 +2076,7 @@ The **token** (not the key) lives in the browser. The API key stays server-side,
 | Open source | ✅ Apache 2.0 | ❌ | ✅ |
 | Model routing / fallbacks | ❌ | ✅ | ✅ |
 
-¹ OpenRouter supports workspace provider keys and end-user OAuth/PKCE — users connect an OpenRouter account. byok-relay connects users' existing provider accounts (OpenAI, Anthropic, etc.) directly inside your product, with no OpenRouter account or gateway account required.
+¹ OpenRouter supports workspace provider keys and end-user OAuth/PKCE — users connect an OpenRouter account. byok-relay connects users' existing provider API accounts, API keys, or credits (OpenAI, Anthropic, etc.) directly inside your product, with no OpenRouter account, gateway account, or gateway balance required.
 
 Use OpenRouter or LiteLLM when you're paying for your users' AI and want routing + analytics. Use byok-relay when you want **users to bring their own keys**.
 
