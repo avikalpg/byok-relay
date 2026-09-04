@@ -23,6 +23,9 @@ chmod 600 "$HEADER_FILE"
 trap 'rm -f -- "$HEADER_FILE"' EXIT
 printf 'Authorization: Bearer %s\n' "$GH_PAT" > "$HEADER_FILE"
 
+# github_api — wrapper around curl that injects the shared Authorization header
+# and enforces connect/max-time limits for every GitHub API request.
+# Usage: github_api <url>
 github_api() {
   curl --fail --silent --show-error \
     --connect-timeout 10 \
