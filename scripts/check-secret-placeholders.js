@@ -27,12 +27,20 @@ const scannedExtensions = new Set([
 // Dotenv-style files without a conventional extension.
 // .env.example is intentionally excluded — it is a documentation template that
 // must contain placeholder text and is never deployed with real secrets.
-const scannedBasenames = new Set(['.env', '.env.test', '.env.ci']);
+// All other .env.* variants (.env.production, .env.local, .env.staging, etc.)
+// are scanned because they are real runtime config files.
+function isScannedDotenvBasename(base) {
+  if (base === '.env.example') return false;
+  if (base === '.env') return true;
+  if (base.startsWith('.env.')) return true;
+  return false;
+}
 
 // Files that intentionally contain placeholder patterns for documentation or
 // self-testing — exempt from the check.
+// Note: the guard script itself is NOT exempted; its regex sources do not
+// produce 32+-character assignment matches so it safely passes its own check.
 const safeFixtureFiles = new Set([
-  'scripts/check-secret-placeholders.js',
   'scripts/check-secret-placeholders.fixtures.js',
 ]);
 
@@ -57,7 +65,8 @@ const secretAssignmentPatterns = [
   /\b(?:ENCRYPTION_SECRET|TOKEN_HMAC_SECRET)\b\s*:\s+([A-Za-z0-9_./+=:@-]{32,})/g,
 
   // Dotenv bare value: KEY=value at line start (with optional leading "export ")
-  /^(?:export\s+)?(?:ENCRYPTION_SECRET|TOKEN_HMAC_SECRET)\s*=\s*([A-Za-z0-9_./+=:@-]{32,})\s*$/gm,
+  // Allows an optional trailing inline comment (e.g. ENCRYPTION_SECRET=value # generated)
+  /^(?:export\s+)?(?:ENCRYPTION_SECRET|TOKEN_HMAC_SECRET)\s*=\s*([A-Za-z0-9_./+=:@-]{32,})\s*(?:#.*)?$/gm,
 ];
 
 for (const relativePath of trackedFiles) {
@@ -66,7 +75,7 @@ for (const relativePath of trackedFiles) {
 
   const ext = path.extname(relativePath);
   const base = path.basename(relativePath);
-  if (!scannedExtensions.has(ext) && !scannedBasenames.has(base)) continue;
+  if (!scannedExtensions.has(ext) && !isScannedDotenvBasename(base)) continue;
 
   const absolutePath = path.join(repoRoot, relativePath);
   const text = fs.readFileSync(absolutePath, 'utf8');
