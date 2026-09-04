@@ -10,6 +10,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "test": "node --test test/e2e/relay.test.js",
+    "check:secrets": "node scripts/check-secret-placeholders.js",
     "token-migration-status": "node scripts/token-migration-status.js"
   },
   "keywords": [

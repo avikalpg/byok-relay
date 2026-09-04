@@ -28,6 +28,10 @@ const fs     = require('node:fs');
 const Database = require('better-sqlite3');
 const crypto = require('node:crypto');
 
+function randomTestSecret (label) {
+  return `${label}-${crypto.randomBytes(24).toString('hex')}`;
+}
+
 const { createMockProvider } = require('./mock-provider');
 const { isPathAllowed } = require('../../src/providers');
 
@@ -73,7 +77,7 @@ it('startup migration preserves keys belonging to legacy-token users', () => {
     env: {
       ...process.env,
       DB_PATH: dbPath,
-      ENCRYPTION_SECRET: 'migration-test-secret-at-least-32-characters',
+      ENCRYPTION_SECRET: randomTestSecret('migration'),
     },
     encoding: 'utf8',
   });
@@ -96,8 +100,8 @@ it('startup migration preserves keys belonging to legacy-token users', () => {
 it('dedicated HMAC key accepts legacy tokens and upgrades their stored hashes', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-hmac-rotation-'));
   const dbPath = path.join(tmpDir, 'relay.db');
-  const legacySecret = 'legacy-encryption-secret-at-least-32-characters';
-  const currentSecret = 'dedicated-token-secret-at-least-32-characters';
+  const legacySecret = randomTestSecret('legacy-encryption');
+  const currentSecret = randomTestSecret('dedicated-token');
   const token = 'existing-user-plaintext-relay-token';
   const legacyHash = crypto.createHmac('sha256', legacySecret).update(token).digest('hex');
   const currentHash = crypto.createHmac('sha256', currentSecret).update(token).digest('hex');
@@ -191,8 +195,8 @@ it('HMAC migration progress reports conservative legacy and current counts', () 
     env: {
       ...process.env,
       DB_PATH: dbPath,
-      ENCRYPTION_SECRET: 'progress-test-secret-at-least-32-characters',
-      TOKEN_HMAC_SECRET: 'progress-token-secret-at-least-32-characters',
+      ENCRYPTION_SECRET: randomTestSecret('progress-encryption'),
+      TOKEN_HMAC_SECRET: randomTestSecret('progress-token'),
     },
     encoding: 'utf8',
   });
@@ -433,7 +437,7 @@ describe('byok-relay — example product end-to-end', () => {
         env: {
           ...process.env,
           PORT:              String(relayPort),
-          ENCRYPTION_SECRET: 'e2e-test-secret-at-least-32-characters-long',
+          ENCRYPTION_SECRET: randomTestSecret('e2e-encryption'),
           DB_PATH:           tmpDb,
           ALLOWED_ORIGINS:   '*',
           REQUEST_BODY_LIMIT_BYTES: '4096',
@@ -923,7 +927,7 @@ describe('byok-relay — example product end-to-end', () => {
         env: {
           ...process.env,
           PORT: String(malformedLimitPort),
-          ENCRYPTION_SECRET: 'malformed-limit-test-secret-at-least-32-characters',
+          ENCRYPTION_SECRET: randomTestSecret('malformed-limit'),
           DB_PATH: malformedLimitDb,
           ALLOWED_ORIGINS: '*',
           REQUEST_BODY_LIMIT_BYTES: '10mb',
@@ -989,7 +993,7 @@ describe('byok-relay — example product end-to-end', () => {
         env: {
           ...process.env,
           PORT: String(restrictedPort),
-          ENCRYPTION_SECRET: 'restricted-model-test-secret-at-least-32-chars',
+          ENCRYPTION_SECRET: randomTestSecret('restricted-model'),
           DB_PATH: restrictedDb,
           ALLOWED_ORIGINS: '*',
           ALLOWED_MODELS: 'gpt-4o*,google/gemini-2.0-flash',
