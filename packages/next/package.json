@@ -1,0 +1,56 @@
+{
+  "name": "@byok-relay/next",
+  "version": "1.0.0",
+  "description": "Next.js App Router route handler factory, middleware, React hooks, and ByokRelayClient for BYOK AI relay",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/next.test.js"
+  },
+  "keywords": [
+    "next",
+    "nextjs",
+    "next.js",
+    "app-router",
+    "route-handler",
+    "middleware",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "react",
+    "hooks",
+    "server-actions",
+    "edge-runtime",
+    "frontend",
+    "no-backend"
+  ],
+  "peerDependencies": {
+    "next": ">=13.0.0",
+    "react": ">=17.0.0"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/next"
+  },
+  "homepage": "https://byokrelay.com"
+}

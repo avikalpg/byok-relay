@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * byok-relay CPU overhead benchmark.
- * 
+ *
  * Isolates the relay's internal processing overhead:
  *   - SQLite user lookup by HMAC token hash
  *   - AES-256-GCM key decryption
  *   - Request body re-serialization
- * 
+ *
  * This is the "pure relay overhead" - independent of any network hop.
  * The real-world overhead = this CPU cost + relay-to-provider network distance.
  */

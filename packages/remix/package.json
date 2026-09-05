@@ -1,0 +1,52 @@
+{
+  "name": "@byok-relay/remix",
+  "version": "1.0.0",
+  "description": "Remix v2 / React Router v7 integration for BYOK AI relay — loader/action factories, React hooks, plain-JS client",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/remix.test.js"
+  },
+  "keywords": [
+    "remix",
+    "react-router",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "loader",
+    "action",
+    "ssr",
+    "full-stack",
+    "react-hooks",
+    "frontend"
+  ],
+  "peerDependencies": {
+    "@remix-run/node": ">=2.0.0",
+    "react": ">=17.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@remix-run/node": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/remix"
+  },
+  "homepage": "https://byokrelay.com"
+}

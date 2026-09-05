@@ -1,0 +1,48 @@
+{
+  "name": "@byok-relay/react",
+  "version": "1.0.0",
+  "description": "React hooks for byok-relay — drop-in BYOK AI in any React app",
+  "keywords": [
+    "byok",
+    "ai",
+    "react",
+    "hooks",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "frontend",
+    "lovable",
+    "bolt",
+    "no-backend",
+    "api-key",
+    "self-hosted"
+  ],
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/hooks.test.js"
+  },
+  "peerDependencies": {
+    "react": ">=17.0.0"
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/react"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "MIT",
+  "author": "avikalpg"
+}

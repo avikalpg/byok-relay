@@ -1,0 +1,413 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "byok-relay",
+    "description": "byok-relay is a lightweight, self-hostable relay server that lets your users bring their own AI provider API keys. Your frontend never touches an API key at build time — users enter their own key once, it is stored encrypted server-side, and every AI request goes through the relay with their key injected automatically.\n\n**How it works:**\n1. Register — call `POST /users`, get a relay token back.\n2. Store a key — user enters their provider key; call `POST /keys/{provider}`. Key is AES-256-GCM encrypted at rest.\n3. Relay — call `POST /relay/{provider}/{path}` instead of the AI provider directly. byok-relay injects the key.\n\n**Supported providers:** anthropic, openai, google, groq, openrouter, mistral, elevenlabs, huggingface, deepgram, openai-compatible\n\n**Rate limits:** 100 req/min per IP globally; 20 AI requests/min per token; 10 registrations/hour per IP.\n\nSource: https://github.com/avikalpg/byok-relay",
+    "version": "1.0.1",
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://github.com/avikalpg/byok-relay/blob/main/LICENSE"
+    },
+    "contact": {
+      "name": "byok-relay on GitHub",
+      "url": "https://github.com/avikalpg/byok-relay"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://relay.byokrelay.com",
+      "description": "Managed relay (prototypes/demos — self-host for production)"
+    },
+    {
+      "url": "http://localhost:3000",
+      "description": "Local self-hosted instance"
+    }
+  ],
+  "tags": [
+    { "name": "Auth",  "description": "Register users and obtain relay tokens" },
+    { "name": "Keys",  "description": "Store, retrieve, and delete encrypted AI provider keys" },
+    { "name": "Relay", "description": "Forward AI provider requests using stored keys" },
+    { "name": "Meta",  "description": "Health and discovery endpoints" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["Meta"],
+        "operationId": "getHealth",
+        "summary": "Health check",
+        "description": "Returns relay status, version, and the list of supported providers. Use as a liveness probe.",
+        "responses": {
+          "200": {
+            "description": "Relay is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok", "version", "providers"],
+                  "properties": {
+                    "ok":        { "type": "boolean", "example": true },
+                    "version":   { "type": "string",  "example": "1.0.1" },
+                    "providers": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "example": ["anthropic","openai","google","groq","openrouter","mistral","elevenlabs","huggingface","deepgram","openai-compatible"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["Meta"],
+        "operationId": "getOpenapiJson",
+        "summary": "OpenAPI spec (JSON)",
+        "description": "Returns this OpenAPI 3.0 specification as JSON. Import into Postman, Insomnia, or any OpenAPI-aware tool. AI coding agents can fetch this to understand the full API surface.",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0 specification",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/openapi.yaml": {
+      "get": {
+        "tags": ["Meta"],
+        "operationId": "getOpenapiYaml",
+        "summary": "OpenAPI spec (YAML)",
+        "description": "Returns this OpenAPI 3.0 specification as YAML.",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0 specification",
+            "content": { "text/yaml": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/users": {
+      "post": {
+        "tags": ["Auth"],
+        "operationId": "registerUser",
+        "summary": "Register a new user",
+        "description": "Creates a user record for an app_id and returns a relay token. Store the token in secure, client-managed storage appropriate for your app; it is the credential for all key and relay operations.\n\nIf the operator has set APP_SECRET, supply `Authorization: Bearer <APP_SECRET>`. Otherwise registration is open (dev mode).\n\nRate limit: 10 registrations/hour per IP.",
+        "security": [{ "AppSecret": [] }, {}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["app_id"],
+                "properties": {
+                  "app_id": {
+                    "type": "string",
+                    "description": "Unique identifier for your application (e.g. your domain or app name)",
+                    "example": "my-lovable-app"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registration successful",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TokenResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/keys": {
+      "get": {
+        "tags": ["Keys"],
+        "operationId": "listKeys",
+        "summary": "List stored providers",
+        "description": "Returns the providers for which the user has a stored API key. Key values are never returned.",
+        "security": [{ "RelayToken": [] }],
+        "responses": {
+          "200": {
+            "description": "List of providers with stored keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["providers"],
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "example": ["anthropic","openai"]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/keys/{provider}": {
+      "post": {
+        "tags": ["Keys"],
+        "operationId": "storeKey",
+        "summary": "Store or update an API key",
+        "description": "Encrypts and stores the user's API key for the given provider (AES-256-GCM). Overwrites any existing key for the same provider.",
+        "security": [{ "RelayToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/provider" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["key"],
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "minLength": 10,
+                    "description": "The AI provider API key to encrypt and store",
+                    "example": "sk-ant-api03-..."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Key stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok":       { "type": "boolean", "example": true },
+                    "provider": { "type": "string",  "example": "anthropic" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "delete": {
+        "tags": ["Keys"],
+        "operationId": "deleteKey",
+        "summary": "Delete a stored API key",
+        "description": "Permanently removes the stored API key for the given provider.",
+        "security": [{ "RelayToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/provider" }],
+        "responses": {
+          "200": {
+            "description": "Key deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean", "example": true } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/relay/{provider}/{path}": {
+      "post": {
+        "tags": ["Relay"],
+        "operationId": "relayRequest",
+        "summary": "Forward a request to an AI provider",
+        "description": "Forwards the request body to the AI provider using the user's stored API key. The relay injects the key — your frontend never sees it.\n\n**Path routing:** `{path}` is forwarded verbatim to the provider base URL.\n- Anthropic: `POST /relay/anthropic/v1/messages`\n- OpenAI: `POST /relay/openai/v1/chat/completions`\n- Google Gemini: `POST /relay/google/v1beta/models/gemini-2.0-flash:generateContent`\n\n**Streaming:** set `stream: true` in the request body to receive a Server-Sent Events (SSE) stream piped directly from the provider.\n\n**openai-compatible:** pass `x-relay-base-url` header with the target base URL (SSRF-validated, HTTPS only).\n\nRate limit: 20 AI requests/min per relay token.",
+        "security": [{ "RelayToken": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/provider" },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "allowReserved": true,
+            "schema": { "type": "string" },
+            "description": "Provider-specific path (e.g. v1/messages, v1/chat/completions)",
+            "example": "v1/messages"
+          },
+          {
+            "name": "anthropic-version",
+            "in": "header",
+            "schema": { "type": "string", "default": "2023-06-01" },
+            "description": "Anthropic API version (required for anthropic provider)"
+          },
+          {
+            "name": "x-relay-base-url",
+            "in": "header",
+            "schema": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "description": "Base URL for openai-compatible provider (SSRF-validated; HTTPS to non-private IPs only)"
+          },
+          {
+            "name": "x-relay-referer",
+            "in": "header",
+            "schema": { "type": "string" },
+            "description": "HTTP Referer passed to OpenRouter for ranking"
+          },
+          {
+            "name": "x-title",
+            "in": "header",
+            "schema": { "type": "string" },
+            "description": "App title passed to OpenRouter"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Provider-specific request body. Include stream:true for SSE streaming.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Provider-specific request payload"
+              },
+              "examples": {
+                "anthropic_chat": {
+                  "summary": "Anthropic Messages API",
+                  "value": {
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 256,
+                    "messages": [{ "role": "user", "content": "Hello!" }]
+                  }
+                },
+                "openai_chat": {
+                  "summary": "OpenAI Chat Completions",
+                  "value": {
+                    "model": "gpt-4o-mini",
+                    "messages": [{ "role": "user", "content": "Hello!" }]
+                  }
+                },
+                "streaming": {
+                  "summary": "Streaming request (any provider)",
+                  "value": {
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 256,
+                    "stream": true,
+                    "messages": [{ "role": "user", "content": "Hello!" }]
+                  }
+                }
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "Raw binary request body for supported providers that accept non-JSON payloads, such as Deepgram speech-to-text audio uploads."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Provider response forwarded. Content-Type mirrors upstream (JSON for completions, text/event-stream for SSE, audio/* for TTS).",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "description": "Provider-specific completion response" }
+              },
+              "text/event-stream": {
+                "schema": { "type": "string", "description": "SSE stream; one JSON delta per data: line, terminated by data: [DONE]" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": {
+            "description": "Failed to reach AI provider",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": { "error": "Failed to reach AI provider" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "RelayToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-relay-token",
+        "description": "Relay token from POST /users. Identifies the user's encrypted key store."
+      },
+      "AppSecret": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Operator APP_SECRET. Required on POST /users when configured."
+      }
+    },
+    "parameters": {
+      "provider": {
+        "name": "provider",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": ["anthropic","openai","google","groq","openrouter","mistral","elevenlabs","huggingface","deepgram","openai-compatible"]
+        },
+        "description": "AI provider name",
+        "example": "anthropic"
+      }
+    },
+    "schemas": {
+      "TokenResponse": {
+        "type": "object",
+        "required": ["token"],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "Relay token — store it securely and treat it like a password.",
+            "example": "abc123..."
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "description": "Human-readable error message" }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Bad request — missing or invalid parameters",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Unauthorized": {
+        "description": "Unauthorized — missing or invalid relay token or app secret",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "RateLimited": {
+        "description": "Too many requests — rate limit exceeded",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "Too many requests, please slow down." }
+          }
+        }
+      }
+    }
+  }
+}

@@ -358,6 +358,7 @@ const PROVIDERS = {
       '/v1/chat/completions',
       '/v1/completions',
       '/v1/embeddings',
+      '/v1/moderations',
       '/v1/responses',
     ],
     buildHeaders: (apiKey) => ({
@@ -505,6 +506,7 @@ const PROVIDERS = {
       '/v1/chat/completions',
       '/v1/completions',
       '/v1/embeddings',
+      '/v1/moderations',
       '/v1/messages',
       '/v1/responses',
       '/api/v1/chat/completions',

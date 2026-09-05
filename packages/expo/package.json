@@ -1,0 +1,60 @@
+{
+  "name": "@byok-relay/expo",
+  "version": "1.0.0",
+  "description": "React Native / Expo hooks and client for byok-relay — BYOK AI in mobile apps with AsyncStorage persistence",
+  "keywords": [
+    "byok",
+    "ai",
+    "expo",
+    "react-native",
+    "mobile",
+    "hooks",
+    "async-storage",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "no-backend",
+    "api-key",
+    "self-hosted",
+    "hermes",
+    "streaming",
+    "sse"
+  ],
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/hooks.test.js"
+  },
+  "peerDependencies": {
+    "react": ">=16.8.0",
+    "@react-native-async-storage/async-storage": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "@react-native-async-storage/async-storage": {
+      "optional": true
+    }
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/expo"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "MIT",
+  "author": "avikalpg"
+}

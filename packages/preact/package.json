@@ -1,0 +1,45 @@
+{
+  "name": "@byok-relay/preact",
+  "version": "1.0.0",
+  "description": "Preact hooks for BYOK AI — useByokRelay, useChat, useStreamingChat, useRelayHealth",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/hooks.test.js"
+  },
+  "keywords": [
+    "preact",
+    "hooks",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "astro",
+    "vite",
+    "frontend"
+  ],
+  "peerDependencies": {
+    "preact": ">=10.0.0"
+  },
+  "peerDependenciesMeta": {
+    "preact": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/preact"
+  },
+  "homepage": "https://byokrelay.com"
+}

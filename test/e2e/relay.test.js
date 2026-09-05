@@ -29,6 +29,14 @@ const Database = require('better-sqlite3');
 const crypto = require('node:crypto');
 
 const { createMockProvider } = require('./mock-provider');
+const { isPathAllowed } = require('../../src/providers');
+
+it('allows OpenAI moderation requests as inference paths', () => {
+  assert.equal(isPathAllowed('openai', '/v1/moderations'), true);
+  assert.equal(isPathAllowed('openai-compatible', '/v1/moderations'), true);
+  assert.equal(isPathAllowed('openai', '/v1/moderations/../files'), false);
+  assert.equal(isPathAllowed('openai-compatible', '/v1/moderations/../files'), false);
+});
 
 it('startup migration preserves keys belonging to legacy-token users', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-migration-'));
@@ -1061,6 +1069,26 @@ describe('byok-relay — example product end-to-end', () => {
     );
     assert.equal(r.status, 400);
     assert.ok(r.body.error?.toLowerCase().includes('no api key'), `Expected 'no api key' error, got: ${r.body.error}`);
+  });
+
+  it('POST /relay — rejects provider account-management paths', async () => {
+    mock.clearRequests();
+
+    const r = await request(
+      relayPort, 'POST', '/relay/openai-compatible/v1/files',
+      { purpose: 'fine-tune' },
+      {
+        'x-relay-token': relayToken,
+        ...e2eRelayHeaders(),
+      },
+    );
+
+    assert.equal(r.status, 403);
+    assert.ok(
+      r.body.error?.toLowerCase().includes('only inference endpoints'),
+      `Expected inference-only error, got: ${JSON.stringify(r.body)}`,
+    );
+    assert.equal(mock.requests.length, 0, 'blocked path must not reach the upstream provider');
   });
 
   // ── 8. Key deletion ──────────────────────────────────────────────────────

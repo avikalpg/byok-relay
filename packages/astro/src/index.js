@@ -1,0 +1,798 @@
+/**
+ * @byok-relay/astro
+ * Astro integration for BYOK AI relay.
+ *
+ * Three distinct concerns:
+ *
+ *   1. Server-side middleware (defineMiddleware / onRequest)
+ *      Proxies /api/relay/* requests to the upstream relay, keeping RELAY_URL
+ *      private in env vars and never exposed to the client.
+ *
+ *   2. API route factory (createRelayApiRoute)
+ *      Returns an Astro API route handler (`APIRoute`) that proxies relay calls
+ *      server-to-server so the real relay URL never ships to the browser.
+ *
+ *   3. Client-side ByokRelayClient class
+ *      Plain-JS class (no framework hooks) for use in Astro <script> blocks,
+ *      View Transitions, and hybrid-rendered pages.
+ *
+ * Server-side helpers use the Node `fetch` global (Astro requires Node 18+).
+ * Client-side ByokRelayClient uses browser fetch.
+ */
+
+'use strict';
+
+/* ========================================================================== */
+/* Constants                                                                   */
+/* ========================================================================== */
+
+const DEFAULT_RELAY_URL = 'https://relay.byokrelay.com';
+const DEFAULT_RELAY_PATH_PREFIX = '/api/relay';
+const DEFAULT_PROXY_TIMEOUT_MS = 30_000;
+const DEFAULT_APP_SIGNATURE_TOLERANCE_MS = 5 * 60 * 1000;
+const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
+const _appSignatureNonces = new Map();
+
+/* ========================================================================== */
+/* Utility — SSR-safe storage                                                  */
+/* ========================================================================== */
+
+function _isClient () {
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch (_) {
+    return false;
+  }
+}
+
+function _timeoutSignal (timeoutMs) {
+  if (!timeoutMs || typeof AbortController === 'undefined') {
+    return { signal: undefined, cancel: () => {} };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  return {
+    signal: controller.signal,
+    cancel: () => clearTimeout(timer),
+  };
+}
+
+function _isTimeoutError (err) {
+  return err?.name === 'TimeoutError' || err?.name === 'AbortError';
+}
+
+function _safeGet (key) {
+  if (!_isClient()) return null;
+  try { return window.localStorage.getItem(key); } catch (_) { return null; }
+}
+
+function _safeSet (key, val) {
+  if (!_isClient()) return;
+  try { window.localStorage.setItem(key, val); } catch (_) {}
+}
+
+function _safeRemove (key) {
+  if (!_isClient()) return;
+  try { window.localStorage.removeItem(key); } catch (_) {}
+}
+
+function _normalizeAppSecrets (appSecrets) {
+  if (!appSecrets) return null;
+  if (appSecrets instanceof Map) return appSecrets;
+  if (typeof appSecrets === 'object') return new Map(Object.entries(appSecrets));
+  return null;
+}
+
+function _normalizeAllowedApps (allowedApps) {
+  if (!allowedApps) return null;
+  if (allowedApps instanceof Set) return new Set(allowedApps);
+  if (typeof allowedApps === 'string') {
+    const apps = allowedApps.split(',').map((app) => app.trim()).filter(Boolean);
+    return apps.length ? new Set(apps) : null;
+  }
+  if (typeof allowedApps[Symbol.iterator] === 'function') return new Set(allowedApps);
+  return null;
+}
+
+function _normalizePositiveMs (value, fallback) {
+  if (value == null) return fallback;
+  const normalized = Number(value);
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : fallback;
+}
+
+function _jsonError (message, status) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function _appSignaturePayload ({ request, url, appId, timestamp, bodyDigest, nonce }) {
+  return [
+    request.method.toUpperCase(),
+    url.pathname,
+    url.search || '',
+    String(timestamp),
+    appId,
+    bodyDigest || '',
+    nonce || '',
+  ].join('\n');
+}
+
+async function _sha256Hex (value) {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle) throw new Error('Web Crypto SHA-256 is unavailable');
+  const bytes = value instanceof ArrayBuffer ? value : new TextEncoder().encode(String(value));
+  const digest = await cryptoApi.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function _hmacSha256Hex (secret, payload) {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle) throw new Error('Web Crypto HMAC is unavailable');
+  const encoder = new TextEncoder();
+  const key = await cryptoApi.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await cryptoApi.subtle.sign('HMAC', key, encoder.encode(payload));
+  return Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function _normalizeSignature (signature) {
+  return String(signature || '').trim().replace(/^sha256=/i, '').toLowerCase();
+}
+
+function _constantTimeEqual (left, right) {
+  const a = _normalizeSignature(left);
+  const b = _normalizeSignature(right);
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function _verifyAppAccess ({ request, url, allowedApps, appSecrets, verifyApp, appSignatureToleranceMs }) {
+  const verificationConfigured = Boolean(allowedApps || appSecrets || verifyApp);
+  if (!verificationConfigured) return null;
+
+  const appId = request.headers.get('x-app-id') || url.searchParams.get('app_id');
+  if (!appId) return _jsonError('Forbidden app_id', 403);
+  if (allowedApps && !allowedApps.has(appId)) return _jsonError('Forbidden app_id', 403);
+
+  if (verifyApp) {
+    try {
+      const result = await verifyApp({ request, url, appId });
+      if (result === true || result === appId) return null;
+    } catch (_) {
+      return _jsonError('App verification failed', 500);
+    }
+    return _jsonError('Forbidden app_id', 403);
+  }
+
+  const secret = appSecrets?.get(appId);
+  if (!secret) return _jsonError('App verification is not configured', 500);
+
+  const timestamp = request.headers.get('x-app-timestamp');
+  const signature = request.headers.get('x-app-signature');
+  const nonce = request.headers.get('x-app-nonce');
+  const timestampMs = Number(timestamp);
+  if (!timestamp || !signature || !nonce || !Number.isFinite(timestampMs)) {
+    return _jsonError('Forbidden app_id', 403);
+  }
+  if (Math.abs(Date.now() - timestampMs) > appSignatureToleranceMs) {
+    return _jsonError('Forbidden app_id', 403);
+  }
+
+  const now = Date.now();
+  for (const [key, expiresAt] of _appSignatureNonces.entries()) {
+    if (expiresAt <= now) _appSignatureNonces.delete(key);
+  }
+  const nonceKey = `${appId}:${nonce}`;
+  if (_appSignatureNonces.has(nonceKey)) return _jsonError('Forbidden app_id', 403);
+
+  let bodyDigest = '';
+  if (!BODYLESS_METHODS.has(request.method.toUpperCase())) {
+    try {
+      bodyDigest = await _sha256Hex(await request.clone().arrayBuffer());
+    } catch (_) {
+      return _jsonError('App verification failed', 500);
+    }
+  }
+
+  let expected;
+  try {
+    expected = await _hmacSha256Hex(secret, _appSignaturePayload({ request, url, appId, timestamp, bodyDigest, nonce }));
+  } catch (_) {
+    return _jsonError('App verification failed', 500);
+  }
+  if (!_constantTimeEqual(signature, expected)) return _jsonError('Forbidden app_id', 403);
+  _appSignatureNonces.set(nonceKey, now + appSignatureToleranceMs);
+  return null;
+}
+
+/* ========================================================================== */
+/* 1. Astro middleware factory                                                 */
+/* ========================================================================== */
+
+/**
+ * Creates an Astro middleware (onRequest handler) that transparently proxies
+ * requests whose URL starts with `pathPrefix` to the upstream relay.
+ *
+ * Usage in `src/middleware.ts`:
+ *
+ *   import { sequence } from 'astro:middleware';
+ *   import { createByokRelayMiddleware } from '@byok-relay/astro';
+ *
+ *   export const onRequest = sequence(
+ *     createByokRelayMiddleware({
+ *       relayUrl: import.meta.env.RELAY_URL,     // server-only env var
+ *       pathPrefix: '/api/relay',
+ *     }),
+ *   );
+ *
+ * @param {object} opts
+ * @param {string} [opts.relayUrl]       Upstream relay base URL (server-only env var). Default: managed relay.
+ * @param {string} [opts.pathPrefix]     URL prefix to intercept. Default: '/api/relay'.
+ * @param {Iterable<string>|string} [opts.allowedApps] Optional app IDs allowed through the proxy.
+ * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
+ * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
+ * @returns Astro `onRequest` middleware function.
+ */
+function createByokRelayMiddleware (opts = {}) {
+  const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
+  const pathPrefix = opts.pathPrefix || DEFAULT_RELAY_PATH_PREFIX;
+  const allowedApps = _normalizeAllowedApps(opts.allowedApps);
+  const appSecrets = _normalizeAppSecrets(opts.appSecrets);
+  const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
+  const appSignatureToleranceMs = _normalizePositiveMs(opts.appSignatureToleranceMs, DEFAULT_APP_SIGNATURE_TOLERANCE_MS);
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
+
+  return async function byokRelayMiddleware (context, next) {
+    const { request } = context;
+    const url = new URL(request.url);
+
+    if (!url.pathname.startsWith(pathPrefix)) {
+      return next();
+    }
+
+    // Strip the path prefix to get the relay sub-path
+    const subPath = url.pathname.slice(pathPrefix.length) || '/';
+    const upstreamUrl = relayUrl + subPath + url.search;
+
+    const appAccessError = await _verifyAppAccess({
+      request,
+      url,
+      allowedApps,
+      appSecrets,
+      verifyApp,
+      appSignatureToleranceMs,
+    });
+    if (appAccessError) return appAccessError;
+
+    // Forward headers, minus hop-by-hop
+    const forwardHeaders = new Headers();
+    const hopByHop = new Set([
+      'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+      'te', 'trailers', 'transfer-encoding', 'upgrade', 'host',
+    ]);
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp', 'x-app-nonce']);
+    for (const [k, v] of request.headers.entries()) {
+      const headerName = k.toLowerCase();
+      if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
+        forwardHeaders.set(k, v);
+      }
+    }
+
+    const timeout = _timeoutSignal(timeoutMs);
+    const init = {
+      method: request.method,
+      headers: forwardHeaders,
+      redirect: 'follow',
+      signal: timeout.signal,
+    };
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      init.body = request.body;
+      init.duplex = 'half'; // required for Node fetch with streaming body
+    }
+
+    try {
+      const upstreamResp = await fetch(upstreamUrl, init);
+      timeout.cancel();
+
+      // Stream response body back to client
+      const respHeaders = new Headers();
+      for (const [k, v] of upstreamResp.headers.entries()) {
+        if (!hopByHop.has(k.toLowerCase())) {
+          respHeaders.set(k, v);
+        }
+      }
+      return new Response(upstreamResp.body, {
+        status: upstreamResp.status,
+        statusText: upstreamResp.statusText,
+        headers: respHeaders,
+      });
+    } catch (err) {
+      timeout.cancel();
+      const timedOut = _isTimeoutError(err);
+      return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
+        status: timedOut ? 504 : 502,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  };
+}
+
+/* ========================================================================== */
+/* 2. Astro API route factory                                                  */
+/* ========================================================================== */
+
+/**
+ * Creates an Astro API route handler that proxies all relay calls server-side.
+ *
+ * Usage in `src/pages/api/relay/[...path].ts`:
+ *
+ *   import { createRelayApiRoute } from '@byok-relay/astro';
+ *   export const { GET, POST, DELETE, PUT, PATCH, OPTIONS } = createRelayApiRoute({
+ *     relayUrl: import.meta.env.RELAY_URL,
+ *   });
+ *   export const prerender = false;
+ *
+ * All HTTP methods are forwarded. The client never sees the real RELAY_URL.
+ *
+ * @param {object} opts
+ * @param {string} [opts.relayUrl]       Upstream relay URL (server-side env var). Default: managed relay.
+ * @param {Iterable<string>|string} [opts.allowedApps] Optional app IDs allowed through the proxy.
+ * @param {Record<string,string>|Map<string,string>} [opts.appSecrets] Server-only HMAC secrets keyed by app ID.
+ * @param {Function} [opts.verifyApp] Optional server-side callback that verifies the app ID against trusted state.
+ * @returns Object with GET, POST, PUT, PATCH, DELETE, OPTIONS Astro APIRoute handlers.
+ */
+function createRelayApiRoute (opts = {}) {
+  const relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
+  const allowedApps = _normalizeAllowedApps(opts.allowedApps);
+  const appSecrets = _normalizeAppSecrets(opts.appSecrets);
+  const verifyApp = typeof opts.verifyApp === 'function' ? opts.verifyApp : null;
+  const appSignatureToleranceMs = _normalizePositiveMs(opts.appSignatureToleranceMs, DEFAULT_APP_SIGNATURE_TOLERANCE_MS);
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PROXY_TIMEOUT_MS;
+
+  async function handler ({ request, params }) {
+    // Reconstruct sub-path from catch-all param
+    const subPath = params.path ? '/' + params.path : '/';
+    const reqUrl = new URL(request.url);
+    const upstreamUrl = relayUrl + subPath + reqUrl.search;
+
+    const appAccessError = await _verifyAppAccess({
+      request,
+      url: reqUrl,
+      allowedApps,
+      appSecrets,
+      verifyApp,
+      appSignatureToleranceMs,
+    });
+    if (appAccessError) return appAccessError;
+
+    const hopByHop = new Set([
+      'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+      'te', 'trailers', 'transfer-encoding', 'upgrade', 'host',
+    ]);
+
+    const forwardHeaders = new Headers();
+    const proxyOnly = new Set(['x-app-signature', 'x-app-timestamp', 'x-app-nonce']);
+    for (const [k, v] of request.headers.entries()) {
+      const headerName = k.toLowerCase();
+      if (!hopByHop.has(headerName) && !proxyOnly.has(headerName)) {
+        forwardHeaders.set(k, v);
+      }
+    }
+
+    const timeout = _timeoutSignal(timeoutMs);
+    const init = {
+      method: request.method,
+      headers: forwardHeaders,
+      redirect: 'follow',
+      signal: timeout.signal,
+    };
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      init.body = request.body;
+      init.duplex = 'half';
+    }
+
+    try {
+      const upstream = await fetch(upstreamUrl, init);
+      timeout.cancel();
+      const respHeaders = new Headers();
+      for (const [k, v] of upstream.headers.entries()) {
+        if (!hopByHop.has(k.toLowerCase())) {
+          respHeaders.set(k, v);
+        }
+      }
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: respHeaders,
+      });
+    } catch (err) {
+      timeout.cancel();
+      const timedOut = _isTimeoutError(err);
+      return new Response(JSON.stringify({ error: timedOut ? 'Relay proxy timeout' : 'Relay proxy error', details: err.message }), {
+        status: timedOut ? 504 : 502,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  return { GET: handler, POST: handler, PUT: handler, PATCH: handler, DELETE: handler, OPTIONS: handler };
+}
+
+/* ========================================================================== */
+/* 3. Client-side ByokRelayClient class                                       */
+/* ========================================================================== */
+
+/**
+ * Plain-JS client for use in Astro <script> blocks, View Transitions,
+ * or any environment without a framework hook system.
+ *
+ * Works with both:
+ *   - Direct relay URL:  new ByokRelayClient({ relayUrl: 'https://relay.byokrelay.com', appId: 'my-app' })
+ *   - Server proxy URL:  new ByokRelayClient({ relayUrl: '/api/relay', appId: 'my-app' })
+ *
+ * Example in an Astro page:
+ *
+ *   <script>
+ *     import { ByokRelayClient } from '@byok-relay/astro/client';
+ *
+ *     const relay = new ByokRelayClient({ relayUrl: '/api/relay', appId: 'my-app' });
+ *     await relay.ensureToken();
+ *     await relay.storeKey('openai', userApiKey);
+ *     const reply = await relay.chat({ provider: 'openai', model: 'gpt-4o', messages });
+ *   </script>
+ */
+class ByokRelayClient {
+  /**
+   * @param {object} opts
+   * @param {string} opts.relayUrl   Relay base URL. Can be a server proxy path like '/api/relay'.
+   * @param {string} opts.appId     Application identifier.
+   * @param {string} [opts.storageKey]  localStorage key for the relay token. Default: 'byok_relay_token'.
+   */
+  constructor (opts = {}) {
+    this._relayUrl = (opts.relayUrl || DEFAULT_RELAY_URL).replace(/\/$/, '');
+    this._appId = opts.appId || 'astro-app';
+    this._storageKey = opts.storageKey || 'byok_relay_token';
+    this._token = _safeGet(this._storageKey) || null;
+    this._registering = null;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Token management                                                         */
+  /* ---------------------------------------------------------------------- */
+
+  /** Current relay token or null. */
+  get token () { return this._token; }
+
+  /**
+   * Register and store a relay token.
+   * @returns {Promise<string>} The new relay token.
+   */
+  async register () {
+    const resp = await fetch(`${this._relayUrl}/users`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: this._appId }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Registration failed: ${resp.status}`);
+    }
+    const data = await resp.json();
+    this._token = data.token;
+    _safeSet(this._storageKey, this._token);
+    return this._token;
+  }
+
+  /**
+   * Return existing token or register a new one.
+   * @returns {Promise<string>}
+   */
+  async ensureToken () {
+    if (this._token) return this._token;
+    if (!this._registering) {
+      this._registering = this.register().finally(() => {
+        this._registering = null;
+      });
+    }
+    return this._registering;
+  }
+
+  /**
+   * Clear the stored token (logout).
+   */
+  logout () {
+    this._token = null;
+    _safeRemove(this._storageKey);
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Key management                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Store a provider API key for the current user.
+   * @param {string} provider  Provider name (e.g. 'openai', 'anthropic').
+   * @param {string} apiKey    The user's API key.
+   */
+  async storeKey (provider, apiKey) {
+    await this.ensureToken();
+    const resp = await fetch(`${this._relayUrl}/keys/${provider}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this._token}`,
+      },
+      body: JSON.stringify({ key: apiKey }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `storeKey failed: ${resp.status}`);
+    }
+    return resp.json();
+  }
+
+  /**
+   * List all stored provider keys (returns names only, not values).
+   * @returns {Promise<string[]>} Provider names.
+   */
+  async listKeys () {
+    await this.ensureToken();
+    const resp = await fetch(`${this._relayUrl}/keys`, {
+      headers: { Authorization: `Bearer ${this._token}` },
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `listKeys failed: ${resp.status}`);
+    }
+    const data = await resp.json();
+    return data.providers || [];
+  }
+
+  /**
+   * Delete a stored provider key.
+   * @param {string} provider
+   */
+  async deleteKey (provider) {
+    await this.ensureToken();
+    const resp = await fetch(`${this._relayUrl}/keys/${provider}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${this._token}` },
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `deleteKey failed: ${resp.status}`);
+    }
+    return resp.json();
+  }
+
+  /**
+   * Rotate a stored provider key (validate new key with provider before swapping).
+   * @param {string} provider
+   * @param {string} newApiKey
+   */
+  async rotateKey (provider, newApiKey) {
+    await this.ensureToken();
+    const resp = await fetch(`${this._relayUrl}/keys/${provider}/rotate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this._token}`,
+      },
+      body: JSON.stringify({ key: newApiKey }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `rotateKey failed: ${resp.status}`);
+    }
+    return resp.json();
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Relay — chat                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Send a non-streaming chat request.
+   *
+   * @param {object} opts
+   * @param {string} opts.provider      Provider name (e.g. 'openai', 'anthropic', 'groq').
+   * @param {string} opts.model         Model name.
+   * @param {Array}  opts.messages      Chat messages array.
+   * @param {string} [opts.systemPrompt]
+   * @param {object} [opts.extraParams] Extra body params forwarded to the provider.
+   * @returns {Promise<string>} The assistant's reply text.
+   */
+  async chat (opts = {}) {
+    await this.ensureToken();
+    const { provider, model, messages = [], systemPrompt, extraParams = {} } = opts;
+
+    const msgs = systemPrompt
+      ? [{ role: 'system', content: systemPrompt }, ...messages]
+      : messages;
+
+    const body = { model, messages: msgs, ...extraParams };
+
+    const endpoint = provider
+      ? `${this._relayUrl}/relay/${provider}/chat/completions`
+      : `${this._relayUrl}/relay`;
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this._token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `chat failed: ${resp.status}`);
+    }
+    const data = await resp.json();
+    if (provider === 'anthropic') {
+      return data.content?.[0]?.text || '';
+    }
+    return data.choices?.[0]?.message?.content || '';
+  }
+
+  /**
+   * Send a streaming chat request. Calls `onChunk(text)` for each SSE delta.
+   *
+   * @param {object} opts
+   * @param {string}   opts.provider
+   * @param {string}   opts.model
+   * @param {Array}    opts.messages
+   * @param {string}   [opts.systemPrompt]
+   * @param {Function} opts.onChunk      Called with each text delta string.
+   * @param {Function} [opts.onDone]     Called with full accumulated text when stream ends.
+   * @param {object}   [opts.extraParams]
+   * @returns {Promise<string>} Full accumulated response text.
+   */
+  async streamChat (opts = {}) {
+    await this.ensureToken();
+    const { provider, model, messages = [], systemPrompt, onChunk, onDone, extraParams = {} } = opts;
+
+    const msgs = systemPrompt
+      ? [{ role: 'system', content: systemPrompt }, ...messages]
+      : messages;
+
+    const endpoint = provider
+      ? `${this._relayUrl}/relay/${provider}/chat/completions`
+      : `${this._relayUrl}/relay`;
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this._token}`,
+      },
+      body: JSON.stringify({ model, messages: msgs, stream: true, ...extraParams }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `streamChat failed: ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let accumulated = '';
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete last line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(payload);
+          let delta = '';
+          if (parsed.choices) {
+            delta = parsed.choices[0]?.delta?.content || '';
+          } else if (parsed.type === 'content_block_delta') {
+            delta = parsed.delta?.text || '';
+          }
+          if (delta) {
+            accumulated += delta;
+            if (typeof onChunk === 'function') onChunk(delta);
+          }
+        } catch (_) { /* incomplete JSON frame — skip */ }
+      }
+    }
+
+    if (typeof onDone === 'function') onDone(accumulated);
+    return accumulated;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Health & stats                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Check relay health.
+   * @param {boolean} [deep] If true, also pings the upstream AI provider.
+   */
+  async health (deep = false) {
+    const url = `${this._relayUrl}/health${deep ? '?deep=1' : ''}`;
+    const resp = await fetch(url);
+    return resp.json();
+  }
+
+  /**
+   * Get usage stats for the current token.
+   * @param {string} [appId] Operator app_id for aggregate stats (requires APP_SECRET).
+   */
+  async stats (appId) {
+    await this.ensureToken();
+    const url = appId
+      ? `${this._relayUrl}/stats/${appId}`
+      : `${this._relayUrl}/stats`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${this._token}` },
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `stats failed: ${resp.status}`);
+    }
+    return resp.json();
+  }
+
+  /**
+   * List available models.
+   */
+  async getModels () {
+    const resp = await fetch(`${this._relayUrl}/models`);
+    return resp.json();
+  }
+
+  /**
+   * Delete the current user account and all stored keys.
+   */
+  async deleteAccount () {
+    await this.ensureToken();
+    const resp = await fetch(`${this._relayUrl}/users`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${this._token}` },
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `deleteAccount failed: ${resp.status}`);
+    }
+    this.logout();
+    return resp.json();
+  }
+}
+
+/* ========================================================================== */
+/* Exports                                                                     */
+/* ========================================================================== */
+
+module.exports = {
+  createByokRelayMiddleware,
+  createRelayApiRoute,
+  ByokRelayClient,
+  DEFAULT_RELAY_URL,
+  DEFAULT_RELAY_PATH_PREFIX,
+};

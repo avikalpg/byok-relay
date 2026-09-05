@@ -1,0 +1,53 @@
+{
+  "name": "@byok-relay/svelte",
+  "version": "1.0.0",
+  "description": "Svelte stores for byok-relay — drop-in BYOK AI in any Svelte or SvelteKit app",
+  "keywords": [
+    "byok",
+    "ai",
+    "svelte",
+    "sveltekit",
+    "stores",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "frontend",
+    "lovable",
+    "bolt",
+    "no-backend",
+    "api-key",
+    "self-hosted"
+  ],
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/stores.test.js"
+  },
+  "peerDependencies": {
+    "svelte": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "svelte": {
+      "optional": true
+    }
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/svelte"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "MIT",
+  "author": "avikalpg"
+}
