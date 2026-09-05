@@ -167,16 +167,38 @@ async function claudeChat(relayUrl, token, messages) {
 }
 ```
 
+## Provider-specific API key guidance
+
+Use the correct link and wording for each provider. **Important:** API accounts and API credits are separate from consumer subscriptions (ChatGPT Plus, Claude Pro, Gemini Advanced, Grok Premium). A user who pays for a consumer subscription still needs to create a separate API account and add billing credits to get an API key.
+
+| Provider | Get API key | Key format | Note |
+|---|---|---|---|
+| OpenAI | https://platform.openai.com/api-keys | `sk-...` (≥40 chars) | Separate from ChatGPT Plus. Requires billing credits. |
+| Anthropic | https://console.anthropic.com/settings/keys | `sk-ant-api03-...` | Separate from Claude Pro. Requires billing credits. |
+| Google Gemini | https://aistudio.google.com/app/apikey | `AIza...` (39 chars) | Free tier available. Separate from Gemini Advanced. |
+| Groq | https://console.groq.com/keys | `gsk_...` | Free tier available. Fast inference. |
+| Mistral | https://console.mistral.ai/api-keys | `...` (32 hex chars) | Separate billing from Mistral subscription. |
+| OpenRouter | https://openrouter.ai/settings/keys | `sk-or-v1-...` | Routes to 200+ models. One key for many providers. |
+
+**User-facing copy to include near the input:** "Your API key is encrypted and stored on the relay. We never log, expose, or transmit your key to third parties. Inference costs go directly to your provider account, not to us."
+
+**Subscription disambiguation copy (show when appropriate):** "Note: Your [ChatGPT Plus / Claude Pro / Gemini Advanced / Grok Premium] subscription does not include API access. Create a separate account at [link] and add billing credits to get an API key."
+
 ## Generating the API key input UI
 
 When integrating byok-relay, always generate a styled API key input component that matches the app's existing design system. This is a required part of the integration — the relay is useless without a UI for users to enter their keys.
 
+**Never prefill the input with a stored key value.** The relay never returns stored key material. If a key is already stored, show a masked placeholder (e.g. `sk-...••••••••`) or a "Key already saved" badge — never the actual key.
+
 **What to generate:**
 - A settings panel or modal with a password-type `<input>` for the API key
 - A provider selector (dropdown or radio buttons) if the app supports multiple providers
-- A "Save key" button that calls `storeApiKey()` and shows feedback (success / error)
+- A "Connect" / "Save key" button that calls `storeApiKey()` and shows feedback
 - A "Key saved ✓" indicator when a key is already stored (call `GET /keys` to check)
-- A "Remove key" action for key deletion
+- A "Rotate key" action for in-place key replacement without downtime
+- A "Remove key" / "Disconnect" action for key deletion
+- Accessible labels and `aria-describedby` for status messages
+- Paste-friendly: allow paste, do not strip characters, do not show key in clear text after save
 
 **Design system detection — use the one already in the project:**
 - Tailwind CSS → use `bg-gray-50`, `border`, `rounded-lg`, `px-4 py-2`, etc.
@@ -184,42 +206,175 @@ When integrating byok-relay, always generate a styled API key input component th
 - MUI → use `<TextField>`, `<Button variant="contained">`, `<Paper>`
 - Plain CSS / no framework → write minimal scoped styles inline
 
+**Headless Connect AI component:** When `@byok-relay/connect` (issue #103) is available in the project's dependencies, prefer it over a hand-rolled component. It provides accessible, tested flows for all providers out of the box. Fall back to the pattern below only if it is not installed.
+
 **Minimal example (plain HTML / Tailwind):**
 ```html
-<div class="rounded-lg border bg-gray-50 p-4 space-y-3">
-  <h3 class="font-medium text-sm text-gray-700">Your API key</h3>
+<div class="rounded-lg border bg-gray-50 p-4 space-y-3" role="region" aria-label="API key settings">
+  <h3 class="font-medium text-sm text-gray-700">Connect your API key</h3>
+  <p class="text-xs text-gray-500">
+    Your key is encrypted at rest and never returned or logged.
+    Inference costs go directly to your provider account.
+    <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="underline">Get an OpenAI key ↗</a>
+  </p>
   <div class="flex gap-2">
     <input
       id="api-key-input"
       type="password"
       placeholder="sk-..."
+      autocomplete="off"
+      aria-label="API key"
+      aria-describedby="key-status"
       class="flex-1 rounded border px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
     />
     <button
+      id="save-btn"
       onclick="handleSaveKey()"
-      class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+      class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
     >
-      Save
+      Connect
     </button>
   </div>
-  <p id="key-status" class="text-xs text-gray-500 hidden"></p>
+  <p id="key-status" class="text-xs text-gray-500 hidden" aria-live="polite"></p>
+  <div id="key-actions" class="hidden flex gap-2 pt-1">
+    <button onclick="handleRotateKey()" class="text-xs text-blue-600 hover:underline">Rotate key</button>
+    <button onclick="handleRemoveKey()" class="text-xs text-red-500 hover:underline">Disconnect</button>
+    <button onclick="handleTestKey()" class="text-xs text-gray-500 hover:underline">Test connection</button>
+  </div>
 </div>
 
 <script>
 async function handleSaveKey() {
-  const key = document.getElementById('api-key-input').value.trim();
-  const status = document.getElementById('key-status');
+  const input = document.getElementById('api-key-input');
+  const key = input.value.trim();
   if (!key) return;
-  const token = await getRelayToken(RELAY_URL, 'my-app');
+  setStatus('validating', 'Validating key…');
+  const token = await getRelayToken(RELAY_URL, APP_ID);
   const ok = await storeApiKey(RELAY_URL, token, 'openai', key);
-  status.textContent = ok ? '✓ Key saved — your requests will now use your own API credits.' : '✗ Failed to save key. Check the format and try again.';
-  status.className = ok ? 'text-xs text-green-600' : 'text-xs text-red-600';
-  status.classList.remove('hidden');
+  input.value = ''; // clear after save — never store in DOM
+  if (ok) {
+    setStatus('connected', '✓ Connected — your requests use your own API credits.');
+    document.getElementById('key-actions').classList.remove('hidden');
+  } else {
+    setStatus('invalid', '✗ Failed. Check the key format and try again.');
+  }
+}
+async function handleRotateKey() {
+  const key = prompt('Enter the new API key to replace the current one:');
+  if (!key) return;
+  setStatus('rotating', 'Rotating key…');
+  const token = await getRelayToken(RELAY_URL, APP_ID);
+  const res = await fetch(`${RELAY_URL}/keys/openai/rotate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
+    body: JSON.stringify({ key })
+  });
+  const data = await res.json();
+  setStatus(data.ok ? 'connected' : 'invalid',
+    data.ok ? '✓ Key rotated — live with zero downtime.' : '✗ Rotation failed. Old key is unchanged.');
+}
+async function handleRemoveKey() {
+  if (!confirm('Remove your API key? You will need to reconnect to use AI features.')) return;
+  setStatus('disconnecting', 'Removing key…');
+  const token = await getRelayToken(RELAY_URL, APP_ID);
+  await fetch(`${RELAY_URL}/keys/openai`, { method: 'DELETE', headers: { 'x-relay-token': token } });
+  setStatus('disconnected', 'Key removed. Connect a new key to resume.');
+  document.getElementById('key-actions').classList.add('hidden');
+}
+async function handleTestKey() {
+  setStatus('validating', 'Sending test request…');
+  try {
+    const token = await getRelayToken(RELAY_URL, APP_ID);
+    const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
+      body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 })
+    });
+    setStatus(res.ok ? 'connected' : 'invalid',
+      res.ok ? '✓ Test request succeeded.' : `✗ Test failed (${res.status}). Check your key and billing.`);
+  } catch { setStatus('invalid', '✗ Test failed. Check network and relay URL.'); }
+}
+function setStatus(state, msg) {
+  const el = document.getElementById('key-status');
+  const colors = { connected:'text-green-600', invalid:'text-red-600',
+    validating:'text-blue-500', rotating:'text-blue-500',
+    disconnected:'text-gray-500', disconnecting:'text-gray-400' };
+  el.textContent = msg;
+  el.className = `text-xs ${colors[state] || 'text-gray-500'}`;
+  el.classList.remove('hidden');
 }
 </script>
 ```
 
 Always place this component on a settings page, in a modal triggered by a "Connect API key" button, or in the app's onboarding flow.
+
+## UX connection states
+
+Track and display the correct state at all times. Never leave the user guessing.
+
+| State | Display | User action |
+|---|---|---|
+| `unconnected` | Empty input, "Connect" CTA prominent | Paste key and click Connect |
+| `validating` | Spinner / "Validating…" | None — wait |
+| `connected` | Badge "✓ Connected", key actions visible | Rotate, test, or disconnect |
+| `invalid` | Error "Key format invalid" or "Key rejected by provider" | Re-enter correct key |
+| `expired` | Warning "Your key has expired or been revoked" | Rotate or enter new key |
+| `rate_limited` | Warning "Too many requests — slow down" | Retry later or upgrade plan |
+| `rotating` | Spinner / "Rotating…" | None — wait |
+| `disconnected` | "No key connected" + Connect CTA | Connect a new key |
+
+**Do not surface raw HTTP status codes to users.** Map relay responses to human-readable states. A 401/403 from the relay → `invalid`; a 429 → `rate_limited`; a network error → show "Could not reach relay — check your connection."
+
+## Individual and organization-admin flows
+
+**Individual / personal key flow:** Each user connects their own provider API key. The relay token is scoped to that user. Keys are personal and must not be shared.
+
+**Organization / company-managed key flow:** A company admin connects one shared provider key under a dedicated relay token. The app backend distributes the relay token (never the provider key) to team members. The admin uses the "Rotate key" action when cycling credentials. **Do not share relay tokens across team members directly in the client** — a relay token grants full access to all stored keys for that token. Implement a server-side token-per-member model if per-user granularity is needed.
+
+For the admin UI, add:
+- A clear "Admin key" label and a note that this key covers the whole team
+- A "Last rotated" timestamp pulled from `GET /keys` metadata
+- Confirmation step before deletion (team loses AI access immediately)
+
+## Key lifecycle: rotation, deletion, and recovery
+
+**Rotation (`POST /keys/:provider/rotate`):**
+- Validates the new key format and pings the provider before swapping — zero downtime
+- Old key is untouched on any failure
+- Show "Rotating…" state; confirm success or failure clearly
+- Recommended cadence: every 90 days or on any suspected compromise
+
+**Deletion (`DELETE /keys/:provider`):**
+- Immediate effect — all in-flight requests using that key will fail
+- Prompt the user to confirm before deleting
+- After deletion, set UI state to `disconnected` and hide key actions
+
+**Account erasure (`DELETE /users`):**
+- Deletes all stored keys and the relay token (GDPR Art. 17)
+- Include in account-deletion or data-export flows
+- Irreversible — warn the user explicitly
+
+**Recovery if key is compromised:**
+1. Rotate the relay key immediately via `POST /keys/:provider/rotate`
+2. Revoke the old provider key at the provider's console (not just delete from relay)
+3. If the relay token itself is compromised: call `POST /tokens/revoke`, then re-register
+
+## Integration verification checklist
+
+Before declaring the integration complete, confirm every item:
+
+- [ ] Provider key is never logged, returned, or stored in `localStorage`/`sessionStorage` in plain text
+- [ ] Input field uses `type="password"` and clears after save
+- [ ] Stored key presence shown as masked badge — not the actual key value
+- [ ] All UX states render correctly (connected, invalid, rate_limited, expired, rotating, disconnected)
+- [ ] "Get an API key" link present and points to the correct provider console
+- [ ] Subscription disambiguation copy shown when the provider has a separate consumer product
+- [ ] Security copy present: encryption, billing ownership, what is stored
+- [ ] Rotate and Disconnect actions available when a key is connected
+- [ ] Test-connection button calls the relay and surfaces result
+- [ ] Organization flow: relay tokens are not shared client-side across team members
+- [ ] Smoke test passed (see Verify your setup below)
+- [ ] No provider key persists in client-side state after page reload (open DevTools → Application → Storage and verify)
 
 ## Verify your setup
 
