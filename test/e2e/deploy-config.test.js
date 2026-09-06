@@ -335,6 +335,7 @@ describe('.github/workflows/deploy.yml — deterministic OCI deployment', () => 
     assert.match(deployWorkflow, /git ls-tree -r --name-only origin\/main/);
     assert.match(deployWorkflow, /runtime_path_conflicts \.env/);
     assert.match(deployWorkflow, /DB_PATH_VALUE=.*data\/relay\.db/);
+    assert.ok(deployWorkflow.includes('$DB_PATH_IN_CHECKOUT-journal'));
     assert.ok(deployWorkflow.includes('$DB_PATH_IN_CHECKOUT-wal'));
     assert.ok(deployWorkflow.includes('$DB_PATH_IN_CHECKOUT-shm'));
     assert.match(deployWorkflow, /Refusing hard reset: origin\/main conflicts with runtime path/);

@@ -71,7 +71,7 @@ jobs:
               exit 1
             fi
             if [ -n "$DB_PATH_IN_CHECKOUT" ]; then
-              for RUNTIME_PATH in "$DB_PATH_IN_CHECKOUT" "$DB_PATH_IN_CHECKOUT-wal" "$DB_PATH_IN_CHECKOUT-shm"; do
+              for RUNTIME_PATH in "$DB_PATH_IN_CHECKOUT" "$DB_PATH_IN_CHECKOUT-journal" "$DB_PATH_IN_CHECKOUT-wal" "$DB_PATH_IN_CHECKOUT-shm"; do
                 if runtime_path_conflicts "$RUNTIME_PATH"; then
                   echo "Refusing hard reset: origin/main conflicts with runtime path $RUNTIME_PATH" >&2
                   exit 1
