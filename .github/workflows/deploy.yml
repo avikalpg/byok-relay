@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-oci
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: SSH deploy to OCI instance
@@ -20,7 +27,77 @@ jobs:
             set -e
             export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
             cd ~/byok-relay
-            git pull origin main
+            git fetch --prune origin main
+            # This checkout is deployment-only. Preserve unexpected tracked drift
+            # for inspection, then deploy the exact commit currently on main.
+            if ! git diff --quiet HEAD || ! git diff --cached --quiet HEAD; then
+              mkdir -p "$HOME/byok-relay-backups"
+              DRIFT_DIR=$(mktemp -d "$HOME/byok-relay-backups/worktree-drift-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+              git status --short > "$DRIFT_DIR/status.txt"
+              git diff --binary HEAD > "$DRIFT_DIR/tracked.patch"
+              echo "Preserved unexpected worktree drift in $DRIFT_DIR"
+            fi
+
+            # A hard reset can remove an untracked runtime file when the target
+            # commit starts tracking that path (or one of its parents/children).
+            # Abort rather than risk deleting .env or the live SQLite database.
+            TARGET_PATHS=$(mktemp)
+            SERVICE_STOPPED=0
+            cleanup() {
+              STATUS=$?
+              rm -f "$TARGET_PATHS"
+              if [ "$SERVICE_STOPPED" -eq 1 ]; then
+                sudo systemctl restart byok-relay || {
+                  echo "Failed to restart byok-relay during cleanup" >&2
+                  [ "$STATUS" -eq 0 ] && STATUS=1
+                }
+              fi
+              exit "$STATUS"
+            }
+            trap cleanup EXIT
+            git ls-tree -r --name-only origin/main > "$TARGET_PATHS"
+            runtime_path_conflicts() {
+              RUNTIME_PATH="$1"
+              [ -e "$RUNTIME_PATH" ] || return 1
+              while IFS= read -r TRACKED_PATH; do
+                case "$TRACKED_PATH" in
+                  "$RUNTIME_PATH"|"$RUNTIME_PATH"/*) return 0 ;;
+                esac
+                case "$RUNTIME_PATH" in
+                  "$TRACKED_PATH"/*) return 0 ;;
+                esac
+              done < "$TARGET_PATHS"
+              return 1
+            }
+
+            DB_PATH_VALUE=$(sed -n 's/^[[:space:]]*DB_PATH[[:space:]]*=[[:space:]]*//p' .env | tail -n 1)
+            DB_PATH_VALUE=$(printf '%s' "${DB_PATH_VALUE:-data/relay.db}" | sed 's/^["'"'"']//; s/["'"'"'][[:space:]]*$//')
+            DB_PATH_ABS=$(realpath -m -- "$DB_PATH_VALUE")
+            case "$DB_PATH_ABS" in
+              "$PWD"/*) DB_PATH_IN_CHECKOUT=${DB_PATH_ABS#"$PWD"/} ;;
+              *) DB_PATH_IN_CHECKOUT="" ;;
+            esac
+
+            # Stop the service before checking the live SQLite paths. It must
+            # remain stopped through the reset so no journal or sidecar can be
+            # created between the guard and the destructive operation. The EXIT
+            # trap restarts it if any later command fails.
+            sudo systemctl stop byok-relay
+            SERVICE_STOPPED=1
+
+            if runtime_path_conflicts .env; then
+              echo "Refusing hard reset: origin/main conflicts with runtime path .env" >&2
+              exit 1
+            fi
+            if [ -n "$DB_PATH_IN_CHECKOUT" ]; then
+              for RUNTIME_PATH in "$DB_PATH_IN_CHECKOUT" "$DB_PATH_IN_CHECKOUT-journal" "$DB_PATH_IN_CHECKOUT-wal" "$DB_PATH_IN_CHECKOUT-shm"; do
+                if runtime_path_conflicts "$RUNTIME_PATH"; then
+                  echo "Refusing hard reset: origin/main conflicts with runtime path $RUNTIME_PATH" >&2
+                  exit 1
+                fi
+              done
+            fi
+            git reset --hard origin/main
             npm ci --omit=dev
             # Inject deployment attestation env vars into .env
             COMMIT=$(git rev-parse HEAD)
@@ -37,6 +114,7 @@ jobs:
               echo "BUILD_TIME=${BUILD_TS}" >> .env
             fi
             sudo systemctl restart byok-relay
+            SERVICE_STOPPED=0
             sleep 3
             curl -sf http://localhost:3000/health || (echo "Health check failed" && exit 1)
             # Verify commit is reflected in /version response
