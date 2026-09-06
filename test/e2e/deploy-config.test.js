@@ -38,6 +38,7 @@ function readRoot(relPath) {
 const replit = readRoot('.replit');
 const replitNix = readRoot('replit.nix');
 const railwayToml = readRoot('railway.toml');
+const deployWorkflow = readRoot('.github/workflows/deploy.yml');
 const readme = readRoot('README.md');
 const submission = readRoot('submissions/railway-template.md');
 const indexSrc = readRoot('src/index.js');
@@ -306,6 +307,37 @@ describe('submissions/railway-template.md — Railway marketplace submission not
     for (const endpoint of ['/health', '/users', '/providers', '/stats']) {
       assert.ok(submission.includes(endpoint), `expected curl example for ${endpoint}`);
     }
+  });
+});
+
+describe('.github/workflows/deploy.yml — deterministic OCI deployment', () => {
+  it('serializes deployments to the singleton OCI host', () => {
+    assert.match(
+      deployWorkflow,
+      /concurrency:\s*\n\s+group:\s*deploy-oci\s*\n\s+cancel-in-progress:\s*false/,
+    );
+  });
+
+  it('fetches main and hard-resets to the fetched remote ref instead of merging', () => {
+    const fetchIndex = deployWorkflow.indexOf('git fetch --prune origin main');
+    const resetIndex = deployWorkflow.indexOf('git reset --hard origin/main');
+    assert.ok(fetchIndex >= 0, 'expected an explicit fetch of origin/main');
+    assert.ok(resetIndex > fetchIndex, 'expected reset to origin/main after fetch');
+    assert.ok(!deployWorkflow.includes('git pull origin main'));
+  });
+
+  it('uses a unique directory when preserving tracked drift', () => {
+    assert.match(deployWorkflow, /DRIFT_DIR=\$\(mktemp -d .*worktree-drift-/);
+    assert.match(deployWorkflow, /git diff --binary HEAD > "\$DRIFT_DIR\/tracked\.patch"/);
+  });
+
+  it('aborts when the target tree conflicts with runtime state', () => {
+    assert.match(deployWorkflow, /git ls-tree -r --name-only origin\/main/);
+    assert.match(deployWorkflow, /runtime_path_conflicts \.env/);
+    assert.match(deployWorkflow, /DB_PATH_VALUE=.*data\/relay\.db/);
+    assert.ok(deployWorkflow.includes('$DB_PATH_IN_CHECKOUT-wal'));
+    assert.ok(deployWorkflow.includes('$DB_PATH_IN_CHECKOUT-shm'));
+    assert.match(deployWorkflow, /Refusing hard reset: origin\/main conflicts with runtime path/);
   });
 });
 
