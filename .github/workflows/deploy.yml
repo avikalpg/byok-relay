@@ -42,7 +42,19 @@ jobs:
             # commit starts tracking that path (or one of its parents/children).
             # Abort rather than risk deleting .env or the live SQLite database.
             TARGET_PATHS=$(mktemp)
-            trap 'rm -f "$TARGET_PATHS"' EXIT
+            SERVICE_STOPPED=0
+            cleanup() {
+              STATUS=$?
+              rm -f "$TARGET_PATHS"
+              if [ "$SERVICE_STOPPED" -eq 1 ]; then
+                sudo systemctl restart byok-relay || {
+                  echo "Failed to restart byok-relay during cleanup" >&2
+                  [ "$STATUS" -eq 0 ] && STATUS=1
+                }
+              fi
+              exit "$STATUS"
+            }
+            trap cleanup EXIT
             git ls-tree -r --name-only origin/main > "$TARGET_PATHS"
             runtime_path_conflicts() {
               RUNTIME_PATH="$1"
@@ -65,6 +77,13 @@ jobs:
               "$PWD"/*) DB_PATH_IN_CHECKOUT=${DB_PATH_ABS#"$PWD"/} ;;
               *) DB_PATH_IN_CHECKOUT="" ;;
             esac
+
+            # Stop the service before checking the live SQLite paths. It must
+            # remain stopped through the reset so no journal or sidecar can be
+            # created between the guard and the destructive operation. The EXIT
+            # trap restarts it if any later command fails.
+            sudo systemctl stop byok-relay
+            SERVICE_STOPPED=1
 
             if runtime_path_conflicts .env; then
               echo "Refusing hard reset: origin/main conflicts with runtime path .env" >&2
@@ -95,6 +114,7 @@ jobs:
               echo "BUILD_TIME=${BUILD_TS}" >> .env
             fi
             sudo systemctl restart byok-relay
+            SERVICE_STOPPED=0
             sleep 3
             curl -sf http://localhost:3000/health || (echo "Health check failed" && exit 1)
             # Verify commit is reflected in /version response

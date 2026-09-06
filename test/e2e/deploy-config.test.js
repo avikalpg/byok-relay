@@ -333,6 +333,14 @@ describe('.github/workflows/deploy.yml — deterministic OCI deployment', () => 
 
   it('aborts when the target tree conflicts with runtime state', () => {
     assert.match(deployWorkflow, /git ls-tree -r --name-only origin\/main/);
+    const stopIndex = deployWorkflow.indexOf('sudo systemctl stop byok-relay');
+    const runtimeCheckIndex = deployWorkflow.indexOf('if runtime_path_conflicts .env');
+    const resetIndex = deployWorkflow.indexOf('git reset --hard origin/main');
+    assert.ok(stopIndex >= 0, 'expected byok-relay to stop before runtime-path checks');
+    assert.ok(stopIndex < runtimeCheckIndex, 'expected service stop before runtime-path checks');
+    assert.ok(stopIndex < resetIndex, 'expected service to remain stopped through the reset');
+    assert.match(deployWorkflow, /trap cleanup EXIT/);
+    assert.match(deployWorkflow, /sudo systemctl restart byok-relay \|\|/);
     assert.match(deployWorkflow, /runtime_path_conflicts \.env/);
     assert.match(deployWorkflow, /DB_PATH_VALUE=.*data\/relay\.db/);
     assert.ok(deployWorkflow.includes('$DB_PATH_IN_CHECKOUT-journal'));
