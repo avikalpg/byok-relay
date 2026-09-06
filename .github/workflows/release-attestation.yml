@@ -1,0 +1,88 @@
+name: Release Attestation
+
+# Runs on every v* tag push (e.g. v1.2.3).
+# Computes SHA-256 hashes for all files that could affect relay behaviour,
+# writes them to attestation.json, and attaches it to the GitHub Release.
+#
+# Users of the managed relay (relay.byokrelay.com) can:
+#   1. Hit GET /version — note the { commit, version } values.
+#   2. Download attestation.json from the matching release on GitHub.
+#   3. Clone the repo at that commit and run `node scripts/verify-attestation.js`
+#      to confirm the running code matches the published hashes.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  attest:
+    name: Build attestation manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to upload release assets
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+
+      - name: Compute SHA-256 hashes for attested files
+        id: hashes
+        run: |
+          COMMIT=$(git rev-parse HEAD)
+          TAG=${GITHUB_REF_NAME}
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # Files whose integrity covers all relay behaviour
+          ATTESTED_FILES=(
+            src/index.js
+            src/db.js
+            src/providers.js
+            package.json
+            package-lock.json
+          )
+
+          echo "Computing SHA-256 hashes..."
+          HASH_JSON="{"
+          for f in "${ATTESTED_FILES[@]}"; do
+            HASH=$(sha256sum "$f" | awk '{print $1}')
+            echo "  $f  $HASH"
+            HASH_JSON+="\"$f\":\"$HASH\","
+          done
+          # Remove trailing comma and close object
+          HASH_JSON="${HASH_JSON%,}}"
+
+          cat > attestation.json <<EOF
+          {
+            "schema": "byok-relay-attestation/v1",
+            "version": "$TAG",
+            "commit": "$COMMIT",
+            "buildTime": "$BUILD_TIME",
+            "repoUrl": "https://github.com/avikalpg/byok-relay",
+            "releaseUrl": "https://github.com/avikalpg/byok-relay/releases/tag/$TAG",
+            "attestedFiles": $HASH_JSON,
+            "verifyInstructions": [
+              "1. Hit GET /version on the relay and note the 'commit' value.",
+              "2. Download this attestation.json from the matching GitHub Release.",
+              "3. Clone the repo: git clone https://github.com/avikalpg/byok-relay && git checkout <commit>",
+              "4. Run: node scripts/verify-attestation.js attestation.json",
+              "   Expected output: all file hashes PASS."
+            ]
+          }
+          EOF
+
+          # Pretty-print with python3 (always available on ubuntu runners)
+          python3 -m json.tool attestation.json > attestation-pretty.json
+          mv attestation-pretty.json attestation.json
+          cat attestation.json
+
+      - name: Upload attestation.json to GitHub Release
+        uses: softprops/action-gh-release@e7a8f85e1c67a31e6ed99a94b41bd0b71bbee6b8 # v2.0.9
+        with:
+          files: attestation.json
+          fail_on_unmatched_files: true

@@ -37,3 +37,6 @@ jobs:
           # this value is just a safety default so the process won't fail if
           # the env propagates to the parent before spawn isolates it.
           ENCRYPTION_SECRET: ci-placeholder-not-used-by-tests
+
+      - name: Run Expo package tests
+        run: npm --workspace @byok-relay/expo test

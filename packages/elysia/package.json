@@ -1,0 +1,48 @@
+{
+  "name": "@byok-relay/elysia",
+  "version": "1.0.0",
+  "description": "Elysia plugin and route factory for BYOK AI relay — proxy AI provider requests server-side while users bring their own API keys",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/elysia.test.js"
+  },
+  "keywords": [
+    "elysia",
+    "bun",
+    "byok",
+    "ai-gateway",
+    "llm",
+    "openai",
+    "anthropic",
+    "relay",
+    "byok-relay",
+    "plugin",
+    "frontend",
+    "no-backend",
+    "self-hosted",
+    "sse",
+    "streaming"
+  ],
+  "peerDependencies": {
+    "elysia": ">=1.0.0 <2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "elysia": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/elysia"
+  },
+  "homepage": "https://byokrelay.com"
+}
