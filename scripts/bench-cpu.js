@@ -57,7 +57,7 @@ function encryptKey(plaintext) {
 }
 
 function decryptKey(encryptedHex, ivHex, authTagHex) {
-  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, Buffer.from(ivHex, 'hex'));
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, Buffer.from(ivHex, 'hex'), { authTagLength: 16 });
   decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
   return Buffer.concat([decipher.update(Buffer.from(encryptedHex, 'hex')), decipher.final()]).toString('utf8');
 }
