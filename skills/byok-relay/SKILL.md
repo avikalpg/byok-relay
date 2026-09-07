@@ -144,7 +144,22 @@ async function chat(relayUrl, token, messages) {
       stream: true
     })
   });
-  return res; // SSE stream — handle with EventSource or ReadableStream
+  // SSE stream — consume via res.body (ReadableStream)
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value);
+    // Each chunk may contain one or more SSE lines: "data: {...}"
+    for (const line of chunk.split('\n')) {
+      if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+        const json = JSON.parse(line.slice(6));
+        process.stdout.write(json.choices?.[0]?.delta?.content ?? '');
+      }
+    }
+  }
+  return; // streaming complete
 }
 
 // Anthropic via relay
