@@ -38,6 +38,50 @@ Or without Docker: `npm install && npm start` (requires Node 18+). [Full quickst
 
 > **Trust model:** The managed relay holds the `ENCRYPTION_SECRET`. All request bodies (prompts, conversation history) transit through it in plaintext on the way to AI providers. It is suitable for **prototypes, demos, and development** — not production apps with paying users or sensitive data. For production: [self-host](#setup). See [SECURITY.md](SECURITY.md#data-residency-managed-relay) for full data residency details.
 
+## Connect AI UI (`@byok-relay/connect`)
+
+Headless state machine for the provider key connection flow — framework-neutral, works with any UI library:
+
+```bash
+npm install @byok-relay/connect
+```
+
+```js
+import { createConnectController } from '@byok-relay/connect';
+
+const ctrl = createConnectController({ token }); // relay token from POST /users
+
+ctrl.subscribe(({ state, provider, connectedProviders, error, providers }) => {
+  // render your UI based on state:
+  // idle → entering_key → connecting → connected
+  //                                  ↓ invalid / expired / rate_limited
+  // connected → rotating → connected
+  // connected → disconnecting → idle
+});
+
+await ctrl.refresh();              // load already-connected providers
+ctrl.selectProvider('openai');     // move to entering_key
+await ctrl.connect('sk-…');        // format-check + live relay validation
+await ctrl.rotate('sk-new-…');    // atomic key rotation
+await ctrl.disconnect();           // delete stored key
+```
+
+React wrapper:
+
+```jsx
+import { useConnectAI } from '@byok-relay/connect/react';
+
+function ConnectAIPanel({ token }) {
+  const { state, provider, connectedProviders, providers, error, actions } =
+    useConnectAI({ token });
+  // render based on state …
+}
+```
+
+Security: raw keys live in memory only until the relay POST resolves — never stored in `localStorage` or controller state. See [`packages/connect`](./packages/connect/README.md) for full API docs.
+
+---
+
 ## React hooks
 
 For React apps (Lovable, Bolt.new, Vite, Next.js, Remix), install the hooks package:
