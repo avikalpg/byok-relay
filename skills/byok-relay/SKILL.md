@@ -131,7 +131,8 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
 
 ```javascript
 // OpenAI via relay
-async function chat(relayUrl, token, messages) {
+// onDelta is a browser-safe callback — e.g. (text) => { div.textContent += text; }
+async function chat(relayUrl, token, messages, onDelta = () => {}) {
   const res = await fetch(`${relayUrl}/relay/openai/v1/chat/completions`, {
     method: 'POST',
     headers: {
@@ -144,22 +145,37 @@ async function chat(relayUrl, token, messages) {
       stream: true
     })
   });
-  // SSE stream — consume via res.body (ReadableStream)
+  // SSE stream — buffered across chunk boundaries (ReadableStream, browser-safe)
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = '';
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    const chunk = decoder.decode(value);
-    // Each chunk may contain one or more SSE lines: "data: {...}"
-    for (const line of chunk.split('\n')) {
-      if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-        const json = JSON.parse(line.slice(6));
-        process.stdout.write(json.choices?.[0]?.delta?.content ?? '');
+    // { stream: true } handles multi-byte UTF-8 characters split across chunks
+    buffer += decoder.decode(value, { stream: true });
+    // Process complete lines only; keep any trailing partial line in the buffer
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // last element may be an incomplete line
+    for (const line of lines) {
+      if (line.startsWith('data: ') && line.trimEnd() !== 'data: [DONE]') {
+        try {
+          const json = JSON.parse(line.slice(6));
+          const delta = json.choices?.[0]?.delta?.content ?? '';
+          if (delta) onDelta(delta);
+        } catch { /* ignore malformed SSE lines */ }
       }
     }
   }
-  return; // streaming complete
+  // Flush the TextDecoder and process any remaining buffered content
+  buffer += decoder.decode();
+  if (buffer.startsWith('data: ') && buffer.trimEnd() !== 'data: [DONE]') {
+    try {
+      const json = JSON.parse(buffer.slice(6));
+      const delta = json.choices?.[0]?.delta?.content ?? '';
+      if (delta) onDelta(delta);
+    } catch { /* partial or empty final line — ignore */ }
+  }
 }
 
 // Anthropic via relay
