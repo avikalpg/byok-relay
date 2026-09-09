@@ -437,6 +437,24 @@ console.log('\ncustom providers');
     assert('disconnected by explicit id', ctrl.getSnapshot().state === STATES.IDLE);
   }
 
+  console.log('\ndisconnect — relay returns non-2xx (key not deleted)');
+  {
+    const ctrl = makeCtrl();
+    ctrl.selectProvider('openai');
+    enqueueFetch({ status: 200, body: { ok: true } });
+    enqueueFetch({ status: 200, body: { providers: ['openai'] } });
+    await ctrl.connect('sk-testkey12345678901234567890abcdefghijklmnopqrst');
+
+    // Relay returns 500 — key is NOT deleted
+    enqueueFetch({ status: 500, body: { error: 'Internal Server Error' } });
+    await ctrl.disconnect();
+
+    const snap = ctrl.getSnapshot();
+    assert('500 disconnect → ERROR state',           snap.state === STATES.ERROR);
+    assert('error code DISCONNECT_FAILED',           snap.error?.code === 'DISCONNECT_FAILED');
+    assert('provider retained on disconnect failure', snap.provider === 'openai');
+  }
+
   console.log('\ndisconnect — throws in wrong state');
   {
     const ctrl = makeCtrl(); // idle — no provider

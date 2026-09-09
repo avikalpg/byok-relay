@@ -51,14 +51,23 @@ const { createConnectController, DEFAULT_PROVIDERS, STATES } = require('./index'
  * }}
  */
 function useConnectAI({ relayUrl, token, providers, autoRefresh = true } = {}) {
-  const ctrlRef = useRef(null);
+  const ctrlRef  = useRef(null);
+  const keyRef   = useRef(null);
 
-  // Initialise or reinitialise the controller when token changes
-  if (!ctrlRef.current || ctrlRef.current.__token !== token) {
+  // Reinitialise the controller when any controller input changes.
+  // Keying on relayUrl + token covers the most common cases; providers
+  // identity is checked separately because arrays are referentially unstable.
+  const ctrlKey = `${token || ''}|${relayUrl || ''}`;
+  if (keyRef.current !== ctrlKey || ctrlRef.current?.__providers !== providers) {
+    // Cancel any in-flight operation on the outgoing controller.
+    if (ctrlRef.current) {
+      try { ctrlRef.current.cancel(); } catch { /* ignore if already idle */ }
+    }
+    keyRef.current = ctrlKey;
     if (token) {
       const ctrl = createConnectController({ relayUrl, token, providers });
-      ctrl.__token = token;
-      ctrlRef.current = ctrl;
+      ctrl.__providers = providers;
+      ctrlRef.current  = ctrl;
     } else {
       ctrlRef.current = null;
     }

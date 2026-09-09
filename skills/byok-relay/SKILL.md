@@ -130,8 +130,9 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
 ### Step 3: Make AI requests through the relay
 
 ```javascript
-// OpenAI via relay
-async function chat(relayUrl, token, messages) {
+// OpenAI via relay — browser-safe, buffered SSE parsing
+// onDelta is called for each streamed text chunk, e.g. (text) => { el.textContent += text; }
+async function chat(relayUrl, token, messages, onDelta = () => {}) {
   const res = await fetch(`${relayUrl}/relay/openai/v1/chat/completions`, {
     method: 'POST',
     headers: {
@@ -144,22 +145,41 @@ async function chat(relayUrl, token, messages) {
       stream: true
     })
   });
-  // SSE stream — consume via res.body (ReadableStream)
-  const reader = res.body.getReader();
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  // SSE stream — buffered across chunk boundaries (ReadableStream, browser-safe)
+  const reader  = res.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = '';
   while (true) {
     const { done, value } = await reader.read();
+    // { stream: true } handles multi-byte UTF-8 split across chunks
+    buffer += decoder.decode(value, { stream: !done });
     if (done) break;
-    const chunk = decoder.decode(value);
-    // Each chunk may contain one or more SSE lines: "data: {...}"
-    for (const line of chunk.split('\n')) {
-      if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-        const json = JSON.parse(line.slice(6));
-        process.stdout.write(json.choices?.[0]?.delta?.content ?? '');
+    // Split on SSE line boundaries; keep any incomplete line in the buffer
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // last element may be an incomplete line
+    for (const line of lines) {
+      const trimmed = line.replace(/\r$/, '');
+      if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+        try {
+          const json = JSON.parse(trimmed.slice(6));
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) onDelta(delta);
+        } catch { /* skip malformed SSE lines */ }
       }
     }
   }
-  return; // streaming complete
+  // Flush decoder and process any remaining buffered content
+  if (buffer.trim() && buffer.startsWith('data: ') && buffer !== 'data: [DONE]') {
+    try {
+      const json = JSON.parse(buffer.slice(6));
+      const delta = json.choices?.[0]?.delta?.content;
+      if (delta) onDelta(delta);
+    } catch { /* ignore */ }
+  }
 }
 
 // Anthropic via relay

@@ -12,7 +12,9 @@
  *   connected → disconnecting → idle
  *
  * Security requirements (per issue #103):
- *   - Raw provider keys exist in memory only as long as needed to submit
+ *   - Raw provider keys exist in memory only as long as needed to submit;
+ *     the key variable goes out of scope once the fetch resolves and is
+ *     never written to controller state, localStorage, or analytics.
  *   - No localStorage/sessionStorage persistence for provider keys
  *   - No analytics capture of input values
  *   - Relay token storage follows relay/app namespacing rules
@@ -152,16 +154,6 @@ async function relayFetch(relayUrl, path, { method = 'GET', token, body, signal 
   }
 
   return { ok: res.ok, status: res.status, data };
-}
-
-/**
- * Scrub a key string from memory by overwriting the value reference.
- * In JS we cannot zero-fill arbitrary strings, but we can at least drop
- * the reference so it becomes GC-eligible. Callers should not retain copies.
- */
-function scrubKey(keyRef) {
-  // eslint-disable-next-line no-param-reassign
-  keyRef = null; // eslint-disable-line no-unused-vars
 }
 
 // ─── ConnectController ────────────────────────────────────────────────────────
@@ -321,7 +313,6 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
           code:    'FORMAT_INVALID',
         },
       });
-      scrubKey(key);
       return;
     }
 
@@ -339,8 +330,6 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
         signal,
       });
 
-      // Drop the key reference immediately after the fetch resolves
-      scrubKey(key);
       _abortController = null;
 
       if (res.ok) {
@@ -393,7 +382,6 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
       });
     } catch (err) {
       _abortController = null;
-      scrubKey(key);
       if (err.name === 'AbortError') return; // cancelled — state unchanged
       _setState(STATES.ERROR, {
         error: {
@@ -433,7 +421,7 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
           code:    'FORMAT_INVALID',
         },
       });
-      scrubKey(newKey);
+
       return;
     }
 
@@ -451,7 +439,6 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
         signal,
       });
 
-      scrubKey(newKey);
       _abortController = null;
 
       if (res.ok) {
@@ -462,6 +449,7 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
 
       if (res.status === 401 || res.status === 403) {
         _setState(STATES.INVALID, {
+          provider: pid,
           error: {
             message: res.data?.error || 'New API key was rejected by the provider.',
             code:    'KEY_REJECTED',
@@ -472,6 +460,7 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
       }
 
       _setState(STATES.CONNECTED, {
+        provider: pid,
         error: {
           message: res.data?.error || `Rotation failed (HTTP ${res.status}). Old key is still active.`,
           code:    'ROTATE_FAILED',
@@ -480,7 +469,6 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
       });
     } catch (err) {
       _abortController = null;
-      scrubKey(newKey);
       if (err.name === 'AbortError') return;
       _setState(STATES.CONNECTED, {
         error: {
@@ -514,12 +502,24 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
     _setState(STATES.DISCONNECTING, { provider: pid, error: null });
 
     try {
-      await relayFetch(_relayUrl, `/keys/${pid}`, {
+      const res = await relayFetch(_relayUrl, `/keys/${pid}`, {
         method: 'DELETE',
         token:  _token,
         signal,
       });
       _abortController = null;
+
+      if (!res.ok) {
+        _setState(STATES.ERROR, {
+          provider: pid,
+          error: {
+            message: res.data?.error || `Failed to disconnect (HTTP ${res.status}). The key is still stored.`,
+            code:    'DISCONNECT_FAILED',
+            status:  res.status,
+          },
+        });
+        return;
+      }
 
       const connected = await _loadConnectedProviders();
       _setState(STATES.IDLE, { provider: null, error: null, connectedProviders: connected });
@@ -527,6 +527,7 @@ function createConnectController({ relayUrl = DEFAULT_RELAY_URL, token, provider
       _abortController = null;
       if (err.name === 'AbortError') return;
       _setState(STATES.ERROR, {
+        provider: pid,
         error: {
           message: 'Network error while disconnecting.',
           code:    'NETWORK_ERROR',
