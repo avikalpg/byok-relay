@@ -265,9 +265,17 @@ function requireAppSecret(req, res, next) {
 
 function requireToken(req, res, next) {
   const token = req.headers['x-relay-token'];
-  if (!token) return res.status(401).json({ error: 'x-relay-token header required' });
+  if (!token) {
+    return res.status(401)
+      .set('X-Byok-Relay-Error', 'missing-relay-token')
+      .json({ error: 'x-relay-token header required' });
+  }
   const user = getUserByToken(token);
-  if (!user) return res.status(401).json({ error: 'Invalid or expired token' });
+  if (!user) {
+    return res.status(401)
+      .set('X-Byok-Relay-Error', 'invalid-relay-token')
+      .json({ error: 'Invalid or expired token' });
+  }
   req.user = user;
   next();
 }

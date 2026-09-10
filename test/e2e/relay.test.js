@@ -548,16 +548,18 @@ describe('byok-relay — example product end-to-end', () => {
 
   // ── 4. Auth guard ────────────────────────────────────────────────────────
 
-  it('protected routes require x-relay-token', async () => {
+  it('protected routes identify a missing relay token with a relay-owned error header', async () => {
     const r = await request(relayPort, 'GET', '/keys');
     assert.equal(r.status, 401);
+    assert.equal(r.headers['x-byok-relay-error'], 'missing-relay-token');
   });
 
-  it('invalid relay token is rejected', async () => {
+  it('invalid relay token is rejected with a relay-owned error header', async () => {
     const r = await request(relayPort, 'GET', '/keys', undefined, {
       'x-relay-token': 'definitely-not-a-valid-token',
     });
     assert.equal(r.status, 401);
+    assert.equal(r.headers['x-byok-relay-error'], 'invalid-relay-token');
   });
 
   // ── 5. Relay — non-streaming ─────────────────────────────────────────────

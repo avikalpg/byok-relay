@@ -764,6 +764,15 @@
       },
       "Unauthorized": {
         "description": "Unauthorized \u2014 missing or invalid relay token or app secret",
+        "headers": {
+          "X-Byok-Relay-Error": {
+            "description": "Present on relay-token authentication failures. Use this relay-owned signal, rather than an upstream response body, to identify a missing or invalid relay token.",
+            "schema": {
+              "type": "string",
+              "enum": ["missing-relay-token", "invalid-relay-token"]
+            }
+          }
+        },
         "content": {
           "application/json": {
             "schema": {

@@ -297,19 +297,20 @@ async function initKeyState() {
 }
 document.addEventListener('DOMContentLoaded', initKeyState);
 
-// Map relay/provider responses to distinct UX states. The relay emits a
-// recognizable error when its token is missing, invalid, or expired; provider
-// responses are forwarded, so use both status and response text for 401/403.
+// Map relay/provider responses to distinct UX states. Only the relay-owned
+// X-Byok-Relay-Error header identifies relay authentication failures. Provider
+// responses are forwarded and may use similar words in their response bodies.
 async function responseState(res) {
-  let detail = '';
-  try { detail = JSON.stringify(await res.clone().json()).toLowerCase(); } catch { /* non-JSON error */ }
-  if ((res.status === 401 || res.status === 403) && /x-relay-token|relay token|invalid token|token.*(?:expired|revoked)/.test(detail)) {
+  const relayError = res.headers.get('x-byok-relay-error');
+  if (relayError === 'missing-relay-token' || relayError === 'invalid-relay-token') {
     return 'relay_auth';
   }
+  let detail = '';
+  try { detail = JSON.stringify(await res.clone().json()).toLowerCase(); } catch { /* plain-text error */ }
   if (res.status === 429) return 'rate_limited';
   if (/\b(expired|revoked)\b/.test(detail)) return 'expired';
   if (res.status === 401 || res.status === 403 || res.status === 422) return 'invalid'; // provider rejection
-  return 'invalid';
+  return 'server_error'; // 5xx and unknown failures are retryable, not bad keys
 }
 const statusMessages = {
   connected:    '✓ Connected — your requests use your own API credits.',
@@ -318,6 +319,7 @@ const statusMessages = {
   rate_limited: '⚠ Too many requests — slow down or try again shortly.',
   expired:      '⚠ Your key has expired or been revoked. Rotate or enter a new key.',
   network:      '✗ Could not reach the relay. Check your connection and relay URL.',
+  server_error: '⚠ Relay or provider is temporarily unavailable. Retry shortly.',
   rotating:     '↻ Rotating key…',
   disconnected: 'No key connected. Add a key to use AI features.',
   disconnecting:'Removing key…',
@@ -451,7 +453,7 @@ function setStatus(state, msg) {
     validating:'text-blue-500', rotating:'text-blue-500',
     rate_limited:'text-amber-600', expired:'text-amber-600',
     disconnected:'text-gray-500', disconnecting:'text-gray-400',
-    network:'text-red-600',
+    network:'text-red-600', server_error:'text-amber-600',
   };
   el.textContent = msg;
   el.className = `text-xs ${colors[state] || 'text-gray-500'}`;
@@ -475,10 +477,23 @@ Track and display the correct state at all times. Never leave the user guessing.
 | `relay_auth` | Error "Your relay session is invalid or expired" | Sign in again, then retry |
 | `expired` | Warning "Your key has expired or been revoked" | Rotate or enter new key |
 | `rate_limited` | Warning "Too many requests — slow down" | Retry later or upgrade plan |
+| `network` | Error "Could not reach relay — check your connection." | Check connection and relay URL, then retry |
+| `server_error` | Warning "Relay or provider is temporarily unavailable" | Retry shortly; do not ask for a new key |
 | `rotating` | Spinner / "Rotating…" | None — wait |
 | `disconnected` | "No key connected" + Connect CTA | Connect a new key |
 
-**Do not surface raw HTTP status codes to users.** Map relay responses to human-readable states. A relay-token 401/403 → `relay_auth`; provider-key rejection → `invalid`; a 429 → `rate_limited`; an expired/revoked-key response → `expired`; and a network error → `network` with "Could not reach relay — check your connection."
+**Do not surface raw HTTP status codes to users.** Map relay responses to human-readable states. The relay identifies a missing or invalid token with its `X-Byok-Relay-Error` response header, which maps to `relay_auth`. A provider-key rejection maps to `invalid`; a 429 to `rate_limited`; an expired/revoked provider-key response to `expired`; a network error to `network` with "Could not reach relay — check your connection."; and 5xx or unknown failures to retryable `server_error`.
+
+**Response-classification fixtures:** Cover these cases in the integration's client tests. The header is intentionally the only signal for relay authentication, so provider error text cannot misclassify a provider rejection.
+
+| Fixture | Expected state |
+|---|---|
+| `401` with `X-Byok-Relay-Error: invalid-relay-token` | `relay_auth` |
+| Provider `401` / `403` without that header | `invalid` |
+| Provider error body says expired or revoked | `expired` |
+| `429` | `rate_limited` |
+| `5xx` | `server_error` |
+| Plain-text or otherwise unrecognized error | `server_error` |
 
 ## Individual and organization-admin flows
 
