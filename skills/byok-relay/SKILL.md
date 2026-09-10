@@ -284,16 +284,24 @@ async function initKeyState() {
 }
 document.addEventListener('DOMContentLoaded', initKeyState);
 
-// Map relay/provider HTTP status codes to UX states
-function mapStatus(httpStatus, isRelayAuth) {
-  if (isRelayAuth) return 'invalid'; // 401/403 from relay (bad relay token) — treat as auth error
-  if (httpStatus === 401 || httpStatus === 403) return 'invalid';  // provider rejected the key
-  if (httpStatus === 429) return 'rate_limited';
+// Map relay/provider responses to distinct UX states. The relay emits a
+// recognizable error when its token is missing, invalid, or expired; provider
+// responses are forwarded, so use both status and response text for 401/403.
+async function responseState(res) {
+  let detail = '';
+  try { detail = JSON.stringify(await res.clone().json()).toLowerCase(); } catch { /* non-JSON error */ }
+  if (res.status === 429) return 'rate_limited';
+  if (/\b(expired|revoked)\b/.test(detail)) return 'expired';
+  if ((res.status === 401 || res.status === 403) && /x-relay-token|relay token|invalid token|token.*expired/.test(detail)) {
+    return 'relay_auth';
+  }
+  if (res.status === 401 || res.status === 403 || res.status === 422) return 'invalid'; // provider rejection
   return 'invalid';
 }
 const statusMessages = {
   connected:    '✓ Connected — your requests use your own API credits.',
   invalid:      '✗ Key rejected. Check the key format and ensure billing credits are available.',
+  relay_auth:   '✗ Your relay session is invalid or expired. Sign in again and retry.',
   rate_limited: '⚠ Too many requests — slow down or try again shortly.',
   expired:      '⚠ Your key has expired or been revoked. Rotate or enter a new key.',
   network:      '✗ Could not reach the relay. Check your connection and relay URL.',
@@ -320,12 +328,12 @@ async function handleSaveKey() {
       setStatus('connected', statusMessages.connected);
       document.getElementById('key-actions').classList.remove('hidden');
     } else {
-      const state = mapStatus(res.status, false);
+      const state = await responseState(res);
       setStatus(state, statusMessages[state]);
     }
   } catch {
     input.value = '';
-    setStatus('invalid', statusMessages.network);
+    setStatus('network', statusMessages.network);
   }
 }
 
@@ -363,12 +371,14 @@ async function confirmRotateKey() {
     if (res.ok) {
       setStatus('connected', '✓ Key rotated — live with zero downtime.');
     } else {
-      const state = mapStatus(res.status, false);
-      setStatus(state, `✗ Rotation failed (${res.status}). Old key is unchanged.`);
+      const state = await responseState(res);
+      setStatus(state, state === 'invalid'
+        ? `✗ Rotation failed. Old key is unchanged.`
+        : statusMessages[state]);
     }
   } catch {
     document.getElementById('rotate-key-input').value = '';
-    setStatus('invalid', statusMessages.network);
+    setStatus('network', statusMessages.network);
   }
 }
 
@@ -388,7 +398,7 @@ async function handleRemoveKey() {
       document.getElementById('key-actions').classList.remove('hidden');
     }
   } catch {
-    setStatus('invalid', statusMessages.network);
+    setStatus('network', statusMessages.network);
     document.getElementById('key-actions').classList.remove('hidden');
   }
 }
@@ -404,15 +414,12 @@ async function handleTestKey() {
     });
     if (res.ok) {
       setStatus('connected', '✓ Test request succeeded.');
-    } else if (res.status === 429) {
-      setStatus('rate_limited', statusMessages.rate_limited);
     } else {
-      // Distinguish relay-token failure (401 on /relay = relay auth) from provider rejection
-      const state = res.status === 401 ? 'invalid' : mapStatus(res.status, false);
-      setStatus(state, `✗ Test failed (${res.status}). Check your key and billing.`);
+      const state = await responseState(res);
+      setStatus(state, statusMessages[state]);
     }
   } catch {
-    setStatus('invalid', statusMessages.network);
+    setStatus('network', statusMessages.network);
   }
 }
 
@@ -444,12 +451,13 @@ Track and display the correct state at all times. Never leave the user guessing.
 | `validating` | Spinner / "Validating…" | None — wait |
 | `connected` | Badge "✓ Connected", key actions visible | Rotate, test, or disconnect |
 | `invalid` | Error "Key format invalid" or "Key rejected by provider" | Re-enter correct key |
+| `relay_auth` | Error "Your relay session is invalid or expired" | Sign in again, then retry |
 | `expired` | Warning "Your key has expired or been revoked" | Rotate or enter new key |
 | `rate_limited` | Warning "Too many requests — slow down" | Retry later or upgrade plan |
 | `rotating` | Spinner / "Rotating…" | None — wait |
 | `disconnected` | "No key connected" + Connect CTA | Connect a new key |
 
-**Do not surface raw HTTP status codes to users.** Map relay responses to human-readable states. A 401/403 from the relay → `invalid`; a 429 → `rate_limited`; a network error → show "Could not reach relay — check your connection."
+**Do not surface raw HTTP status codes to users.** Map relay responses to human-readable states. A relay-token 401/403 → `relay_auth`; provider-key rejection → `invalid`; a 429 → `rate_limited`; an expired/revoked-key response → `expired`; and a network error → `network` with "Could not reach relay — check your connection."
 
 ## Individual and organization-admin flows
 

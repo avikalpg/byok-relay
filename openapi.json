@@ -593,7 +593,7 @@
         },
         "responses": {
           "200": {
-            "description": "Rotation result (ok=true on success, ok=false if validation or provider ping failed)",
+            "description": "Rotation succeeded. The response reports whether an existing key was replaced or a new key was stored.",
             "content": {
               "application/json": {
                 "schema": {
@@ -621,6 +621,19 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "description": "Provider rejected the replacement key. The existing key remains unchanged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "New key was rejected by openai. Your existing key was not changed."
+                }
+              }
+            }
           }
         }
       }
