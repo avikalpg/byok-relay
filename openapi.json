@@ -216,6 +216,9 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "required": [
+                    "ok"
+                  ],
                   "properties": {
                     "ok": {
                       "type": "boolean",
@@ -598,6 +601,11 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "required": [
+                    "ok",
+                    "rotated",
+                    "provider"
+                  ],
                   "properties": {
                     "ok": {
                       "type": "boolean",
@@ -658,6 +666,9 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "required": [
+                    "ok"
+                  ],
                   "properties": {
                     "ok": {
                       "type": "boolean",

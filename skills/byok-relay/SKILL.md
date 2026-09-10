@@ -102,7 +102,8 @@ async function getRelayToken(relayUrl, appId) {
   const res = await fetch(`${relayUrl}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app_id: appId })
+    body: JSON.stringify({ app_id: appId }),
+    redirect: 'error'
   });
   const { token } = await res.json();
   localStorage.setItem(storageKey, token);
@@ -121,7 +122,8 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
       'Content-Type': 'application/json',
       'x-relay-token': token
     },
-    body: JSON.stringify({ key: apiKey })
+    body: JSON.stringify({ key: apiKey }),
+    redirect: 'error'
   });
   return res.ok;
 }
@@ -142,7 +144,8 @@ async function chat(relayUrl, token, messages) {
       model: 'gpt-4o-mini',
       messages,
       stream: true
-    })
+    }),
+    redirect: 'error'
   });
   return res; // SSE stream — handle with EventSource or ReadableStream
 }
@@ -161,7 +164,8 @@ async function claudeChat(relayUrl, token, messages) {
       max_tokens: 1024,
       messages,
       stream: true
-    })
+    }),
+    redirect: 'error'
   });
   return res;
 }
@@ -273,14 +277,23 @@ When integrating byok-relay, always generate a styled API key input component th
 async function initKeyState() {
   try {
     const token = await getRelayToken(RELAY_URL, APP_ID);
-    const res = await fetch(`${RELAY_URL}/keys`, { headers: { 'x-relay-token': token } });
-    if (!res.ok) return; // relay token or network problem — leave as unconnected
+    const res = await fetch(`${RELAY_URL}/keys`, {
+      headers: { 'x-relay-token': token },
+      redirect: 'error'
+    });
+    if (!res.ok) {
+      const state = await responseState(res);
+      setStatus(state, statusMessages[state]);
+      return;
+    }
     const data = await res.json();
     if (data.providers && data.providers.includes('openai')) {
       setStatus('connected', '✓ Connected — key already saved (sk-…••••••••).');
       document.getElementById('key-actions').classList.remove('hidden');
     }
-  } catch { /* Network unavailable on load — leave as unconnected */ }
+  } catch {
+    setStatus('network', statusMessages.network);
+  }
 }
 document.addEventListener('DOMContentLoaded', initKeyState);
 
@@ -290,11 +303,11 @@ document.addEventListener('DOMContentLoaded', initKeyState);
 async function responseState(res) {
   let detail = '';
   try { detail = JSON.stringify(await res.clone().json()).toLowerCase(); } catch { /* non-JSON error */ }
-  if (res.status === 429) return 'rate_limited';
-  if (/\b(expired|revoked)\b/.test(detail)) return 'expired';
-  if ((res.status === 401 || res.status === 403) && /x-relay-token|relay token|invalid token|token.*expired/.test(detail)) {
+  if ((res.status === 401 || res.status === 403) && /x-relay-token|relay token|invalid token|token.*(?:expired|revoked)/.test(detail)) {
     return 'relay_auth';
   }
+  if (res.status === 429) return 'rate_limited';
+  if (/\b(expired|revoked)\b/.test(detail)) return 'expired';
   if (res.status === 401 || res.status === 403 || res.status === 422) return 'invalid'; // provider rejection
   return 'invalid';
 }
@@ -321,7 +334,8 @@ async function handleSaveKey() {
     const res = await fetch(`${RELAY_URL}/keys/openai`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
-      body: JSON.stringify({ key })
+      body: JSON.stringify({ key }),
+      redirect: 'error'
     });
     input.value = ''; // clear after attempt — never leave key in DOM
     if (res.ok) {
@@ -363,7 +377,8 @@ async function confirmRotateKey() {
     const res = await fetch(`${RELAY_URL}/keys/openai/rotate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
-      body: JSON.stringify({ key })
+      body: JSON.stringify({ key }),
+      redirect: 'error'
     });
     input.value = ''; // clear regardless of outcome
     document.getElementById('rotate-panel').classList.add('hidden');
@@ -387,14 +402,19 @@ async function handleRemoveKey() {
   setStatus('disconnecting', statusMessages.disconnecting);
   try {
     const token = await getRelayToken(RELAY_URL, APP_ID);
-    const res = await fetch(`${RELAY_URL}/keys/openai`, { method: 'DELETE', headers: { 'x-relay-token': token } });
+    const res = await fetch(`${RELAY_URL}/keys/openai`, {
+      method: 'DELETE',
+      headers: { 'x-relay-token': token },
+      redirect: 'error'
+    });
     if (res.ok) {
       setStatus('disconnected', statusMessages.disconnected);
       document.getElementById('key-actions').classList.add('hidden');
       document.getElementById('connect-panel').classList.remove('hidden');
     } else {
-      // Deletion failed — keep UI in connected state and report the error
-      setStatus('invalid', `✗ Could not remove key (${res.status}). Key may still be stored.`);
+      // Deletion failed — keep UI in connected state and report a safe summary.
+      const state = await responseState(res);
+      setStatus(state, '✗ Could not remove key. Key may still be stored.');
       document.getElementById('key-actions').classList.remove('hidden');
     }
   } catch {
@@ -410,7 +430,8 @@ async function handleTestKey() {
     const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
-      body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 })
+      body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 }),
+      redirect: 'error'
     });
     if (res.ok) {
       setStatus('connected', '✓ Test request succeeded.');
@@ -489,7 +510,7 @@ For the admin UI, add:
 - Irreversible — warn the user explicitly
 
 **Recovery if key is compromised:**
-1. Rotate the relay key immediately via `POST /keys/:provider/rotate`
+1. Rotate the provider API key immediately via `POST /keys/:provider/rotate`
 2. Revoke the old provider key at the provider's console (not just delete from relay)
 3. If the relay token itself is compromised: call `POST /tokens/revoke`, then re-register
 
@@ -531,7 +552,8 @@ async function smokeTest() {
   const usersRes = await fetch(`${RELAY_URL}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app_id: APP_ID })
+    body: JSON.stringify({ app_id: APP_ID }),
+    redirect: 'error'
   });
   if (!usersRes.ok) throw new Error(`Registration failed: ${usersRes.status} ${usersRes.statusText}`);
   const { token } = await usersRes.json();
@@ -540,7 +562,8 @@ async function smokeTest() {
 
   // 3. List providers (should be empty before storing a key)
   const keysRes = await fetch(`${RELAY_URL}/keys`, {
-    headers: { 'x-relay-token': token }
+    headers: { 'x-relay-token': token },
+    redirect: 'error'
   });
   if (!keysRes.ok) throw new Error(`Keys list failed: ${keysRes.status} ${keysRes.statusText}`);
   const { providers } = await keysRes.json();
@@ -553,7 +576,8 @@ async function smokeTest() {
   // const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
   //   method: 'POST',
   //   headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
-  //   body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'ping' }] })
+  //   body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'ping' }] }),
+  //   redirect: 'error'
   // });
   // if (!res.ok) throw new Error(`Relay call failed: ${res.status} ${res.statusText}`);
   // const data = await res.json();
