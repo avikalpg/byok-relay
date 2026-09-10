@@ -20,6 +20,9 @@ const {
   logRequest,
   getStatsForUser,
   getStatsForApp,
+  updateCredentialHealth,
+  getCredentialHealthForUser,
+  getCredentialHealthForApp,
   dbHealthCheck,
 } = require('./db');
 const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
@@ -280,6 +283,7 @@ const BUILD_TIME = process.env.BUILD_TIME || new Date().toISOString();
 
 function logRelayRequest(req, details) {
   const { provider, model, status, latency_ms, streaming } = details;
+  const success = status >= 200 && status < 300;
 
   req.log.info({
     event: 'relay_request',
@@ -305,6 +309,12 @@ function logRelayRequest(req, details) {
     // Never let logging failure affect the response
     req.log.warn({ err: logErr }, 'request log write failed');
   }
+
+  try {
+    updateCredentialHealth({ user_id: req.user.id, provider, success });
+  } catch (healthErr) {
+    req.log.warn({ err: healthErr }, 'credential health update failed');
+  }
 }
 
 function logRelayError(req, details) {
@@ -328,6 +338,10 @@ function logRelayError(req, details) {
       status: 502,
       latency_ms,
     });
+  } catch (_) {}
+
+  try {
+    updateCredentialHealth({ user_id: req.user.id, provider, success: false });
   } catch (_) {}
 }
 
@@ -825,6 +839,79 @@ app.get('/stats/:app_id', requireAppSecret, (req, res) => {
   }
   const stats = getStatsForApp(req.params.app_id);
   res.json(stats);
+});
+
+/**
+ * GET /health/credentials
+ * Return per-provider credential health for the authenticated user.
+ * Shows last success/failure timestamps, consecutive failure count, and
+ * aggregate request/failure totals for each provider the user has stored.
+ *
+ * Only providers with a stored key are returned. Providers with no relay
+ * activity yet have null timestamps and status 'unknown'.
+ *
+ * Headers: x-relay-token
+ *
+ * Response:
+ *   {
+ *     credentials: [
+ *       {
+ *         provider: string,
+ *         status: 'healthy' | 'degraded' | 'unknown',
+ *         last_success_at: string | null,   // ISO-8601
+ *         last_failure_at: string | null,   // ISO-8601
+ *         consecutive_failures: number,
+ *         total_requests: number,
+ *         total_failures: number,
+ *         error_rate: number                // 0–1
+ *       }
+ *     ]
+ *   }
+ *
+ * Status semantics:
+ *   'healthy'  — has activity and fewer than 3 consecutive failures
+ *   'degraded' — 3 or more consecutive failures since last success
+ *   'unknown'  — key stored but no relay requests made yet
+ */
+app.get('/health/credentials', requireToken, (req, res) => {
+  const credentials = getCredentialHealthForUser(req.user.id);
+  res.json({ credentials });
+});
+
+/**
+ * GET /admin/credential-health
+ * Operator-level view of credential health aggregated across all users of an
+ * app_id. No individual user IDs are exposed.
+ *
+ * Query params: ?app_id=<app_id>  (required)
+ * Headers: Authorization: Bearer <APP_SECRET>  (required)
+ *
+ * Response:
+ *   {
+ *     app_id: string,
+ *     credentials: [
+ *       {
+ *         provider: string,
+ *         user_count: number,         // users with stored key for this provider
+ *         users_with_activity: number,
+ *         total_requests: number,
+ *         total_failures: number,
+ *         error_rate: number,
+ *         users_degraded: number      // users with consecutive_failures >= 3
+ *       }
+ *     ]
+ *   }
+ */
+app.get('/admin/credential-health', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'Admin endpoints require APP_SECRET to be configured.' });
+  }
+  const { app_id: appId } = req.query;
+  if (!appId || typeof appId !== 'string' || !appId.trim()) {
+    return res.status(400).json({ error: 'app_id query parameter is required.' });
+  }
+  const credentials = getCredentialHealthForApp(appId.trim());
+  res.json({ app_id: appId.trim(), credentials });
 });
 
 /**
