@@ -130,6 +130,7 @@ app.use(cors({
     'x-relay-e2e-base-url-token',
     'xi-api-key',
   ],
+  exposedHeaders: ['X-Byok-Relay-Error'],
   credentials: false,
 }));
 

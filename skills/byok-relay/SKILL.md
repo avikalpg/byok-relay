@@ -308,9 +308,10 @@ async function responseState(res) {
   let detail = '';
   try { detail = JSON.stringify(await res.clone().json()).toLowerCase(); } catch { /* plain-text error */ }
   if (res.status === 429) return 'rate_limited';
+  if (res.status >= 500 && res.status < 600) return 'server_error';
   if (/\b(expired|revoked)\b/.test(detail)) return 'expired';
   if (res.status === 401 || res.status === 403 || res.status === 422) return 'invalid'; // provider rejection
-  return 'server_error'; // 5xx and unknown failures are retryable, not bad keys
+  return 'server_error'; // unknown failures are retryable, not bad keys
 }
 const statusMessages = {
   connected:    '✓ Connected — your requests use your own API credits.',
