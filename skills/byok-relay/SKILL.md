@@ -310,7 +310,7 @@ async function responseState(res) {
   if (res.status === 429) return 'rate_limited';
   if (res.status >= 500 && res.status < 600) return 'server_error';
   if (/\b(expired|revoked)\b/.test(detail)) return 'expired';
-  if (res.status === 401 || res.status === 403 || res.status === 422) return 'invalid'; // provider rejection
+  if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 422) return 'invalid'; // provider rejection or key validation
   return 'server_error'; // unknown failures are retryable, not bad keys
 }
 const statusMessages = {
