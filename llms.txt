@@ -153,7 +153,7 @@ npm install @byok-relay/connect
 
 States: idle | selecting | entering_key | connecting | connected | invalid | expired | rate_limited | rotating | disconnecting | error
 
-Security: raw keys never stored in localStorage or controller state; cleared from memory after relay POST resolves.
+Security: raw keys are never stored in localStorage or controller state; package-owned references are cleared after the relay POST resolves. Consumers must clear their own UI state (such as uncontrolled form inputs).
 
 ```js
 import { createConnectController } from '@byok-relay/connect';

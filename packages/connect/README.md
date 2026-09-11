@@ -94,7 +94,16 @@ function ConnectAIPanel({ token }) {
 
   if (state === 'entering_key' || state === 'invalid') {
     return (
-      <form onSubmit={e => { e.preventDefault(); actions.connect((e.currentTarget.elements.namedItem('key') as HTMLInputElement).value); }}>
+      <form onSubmit={async e => {
+        e.preventDefault();
+        const form = e.currentTarget;
+        const key = (form.elements.namedItem('key') as HTMLInputElement).value;
+        try {
+          await actions.connect(key);
+        } finally {
+          form.reset();
+        }
+      }}>
         <input name="key" type="password" placeholder="Paste your API key…" autoComplete="off" />
         {error && <p style={{ color: 'red' }}>{error.message}</p>}
         <button type="submit">Connect</button>
