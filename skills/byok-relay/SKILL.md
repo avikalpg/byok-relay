@@ -102,7 +102,8 @@ async function getRelayToken(relayUrl, appId) {
   const res = await fetch(`${relayUrl}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app_id: appId })
+    body: JSON.stringify({ app_id: appId }),
+    redirect: 'error'
   });
   const { token } = await res.json();
   localStorage.setItem(storageKey, token);
@@ -121,7 +122,8 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
       'Content-Type': 'application/json',
       'x-relay-token': token
     },
-    body: JSON.stringify({ key: apiKey })
+    body: JSON.stringify({ key: apiKey }),
+    redirect: 'error'
   });
   return res.ok;
 }
@@ -130,9 +132,16 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
 ### Step 3: Make AI requests through the relay
 
 ```javascript
-// OpenAI via relay — streams deltas via onDelta callback (browser-safe)
-async function chat(relayUrl, token, messages, onDelta) {
-  const res = await fetch(`${relayUrl}/relay/openai/v1/chat/completions`, {
+// OpenAI via relay
+// onDelta is a browser-safe callback — e.g. (text) => { div.textContent += text; }
+async function chat(relayUrl, token, messages, onDelta = () => {}) {
+  const relay = new URL(relayUrl);
+  const isLocalhost = ['localhost', '127.0.0.1', '[::1]'].includes(relay.hostname);
+  if (relay.protocol !== 'https:' && !(relay.protocol === 'http:' && isLocalhost)) {
+    throw new Error('relayUrl must use HTTPS (except localhost during development)');
+  }
+
+  const res = await fetch(new URL('/relay/openai/v1/chat/completions', relay), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -142,45 +151,68 @@ async function chat(relayUrl, token, messages, onDelta) {
       model: 'gpt-4o-mini',
       messages,
       stream: true
-    })
+    }),
+    redirect: 'error'
   });
   if (!res.ok) {
     const err = await res.json().catch(() => null);
-    throw new Error((typeof err?.error === 'string' ? err.error : null) || `HTTP ${res.status}`);
+    throw new Error((typeof err?.error === 'string' ? err.error : null) || `chat failed: ${res.status}`);
   }
-  if (!res.body) throw new Error('No response body for streaming');
-  // SSE stream — consume via res.body (ReadableStream)
+  if (!res.body) throw new Error('chat: response body is null (ReadableStream not supported)');
+  const contentType = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  if (contentType !== 'text/event-stream') {
+    throw new Error(`chat: expected text/event-stream, got ${contentType ?? 'missing'}`);
+  }
+
+  let currentEvent = 'message';
+  function handleSseLine(line) {
+    const normalizedLine = line.replace(/\r$/, '');
+    if (normalizedLine.startsWith('event: ')) {
+      currentEvent = normalizedLine.slice(7).trim();
+      return;
+    }
+    if (!normalizedLine.startsWith('data: ')) return;
+
+    const data = normalizedLine.slice(6).trim();
+    if (data === '[DONE]') {
+      currentEvent = 'message';
+      return;
+    }
+
+    let json;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return; // Ignore malformed SSE data, but let callback errors propagate.
+    }
+    if (currentEvent === 'error') {
+      throw new Error(json.error || 'Relay stream error');
+    }
+    const delta = json.choices?.[0]?.delta?.content ?? '';
+    if (delta) onDelta(delta);
+    currentEvent = 'message';
+  }
+
+  // SSE stream — buffered across chunk boundaries (ReadableStream, browser-safe)
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let currentEvent = 'message';
   while (true) {
     const { done, value } = await reader.read();
-    if (done) {
-      buffer += decoder.decode(); // flush decoder UTF-8 state
-      break;
-    }
-    buffer += decoder.decode(value, { stream: true }); // preserve multibyte chars across reads
-    // Keep the last incomplete line in the buffer; parse only complete lines
+    if (done) break;
+    // { stream: true } handles multi-byte UTF-8 characters split across chunks
+    buffer += decoder.decode(value, { stream: true });
+    // Process complete lines only; keep any trailing partial line in the buffer
     const lines = buffer.split('\n');
-    buffer = lines.pop();
+    buffer = lines.pop(); // last element may be an incomplete line
     for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim();
-      } else if (line.startsWith('data: ')) {
-        if (line === 'data: [DONE]') { currentEvent = 'message'; continue; }
-        const payload = JSON.parse(line.slice(6));
-        if (currentEvent === 'error') {
-          throw new Error(payload.error || 'Relay stream error');
-        }
-        const delta = payload.choices?.[0]?.delta?.content ?? '';
-        if (delta) onDelta(delta);
-        currentEvent = 'message';
-      }
+      handleSseLine(line);
     }
   }
+  // Flush the TextDecoder and process any remaining buffered content
+  buffer += decoder.decode();
+  if (buffer) handleSseLine(buffer);
 }
-
 // Anthropic via relay
 async function claudeChat(relayUrl, token, messages) {
   const res = await fetch(`${relayUrl}/relay/anthropic/v1/messages`, {
@@ -195,22 +227,45 @@ async function claudeChat(relayUrl, token, messages) {
       max_tokens: 1024,
       messages,
       stream: true
-    })
+    }),
+    redirect: 'error'
   });
   return res;
 }
 ```
 
+## Provider-specific API key guidance
+
+Use the correct link and wording for each provider. **Important:** API accounts and API credits are separate from consumer subscriptions (ChatGPT Plus, Claude Pro, Gemini Advanced, Grok Premium). A user who pays for a consumer subscription still needs to create a separate API account and add billing credits to get an API key.
+
+| Provider | Get API key | Key format | Note |
+|---|---|---|---|
+| OpenAI | https://platform.openai.com/api-keys | `sk-...` (≥40 chars) | Separate from ChatGPT Plus. Requires billing credits. |
+| Anthropic | https://console.anthropic.com/settings/keys | `sk-ant-api03-...` | Separate from Claude Pro. Requires billing credits. |
+| Google Gemini | https://aistudio.google.com/app/apikey | `AIza...` (39 chars) | Free tier available. Separate from Gemini Advanced. |
+| Groq | https://console.groq.com/keys | `gsk_...` | Free tier available. Fast inference. |
+| Mistral | https://console.mistral.ai/api-keys | `...` (32 hex chars) | Separate billing from Mistral subscription. |
+| OpenRouter | https://openrouter.ai/settings/keys | `sk-or-v1-...` | Routes to 200+ models. One key for many providers. |
+
+**User-facing copy to include near the input:** "Your API key is encrypted and stored on the relay. We never log, expose, or transmit your key to third parties. Inference costs go directly to your provider account, not to us."
+
+**Subscription disambiguation copy (show when appropriate):** "Note: Your [ChatGPT Plus / Claude Pro / Gemini Advanced / Grok Premium] subscription does not include API access. Create a separate account at [link] and add billing credits to get an API key."
+
 ## Generating the API key input UI
 
 When integrating byok-relay, always generate a styled API key input component that matches the app's existing design system. This is a required part of the integration — the relay is useless without a UI for users to enter their keys.
 
+**Never prefill the input with a stored key value.** The relay never returns stored key material. If a key is already stored, show a masked placeholder (e.g. `sk-...••••••••`) or a "Key already saved" badge — never the actual key.
+
 **What to generate:**
 - A settings panel or modal with a password-type `<input>` for the API key
 - A provider selector (dropdown or radio buttons) if the app supports multiple providers
-- A "Save key" button that calls `storeApiKey()` and shows feedback (success / error)
+- A "Connect" / "Save key" button that calls `storeApiKey()` and shows feedback
 - A "Key saved ✓" indicator when a key is already stored (call `GET /keys` to check)
-- A "Remove key" action for key deletion
+- A "Rotate key" action for in-place key replacement without downtime
+- A "Remove key" / "Disconnect" action for key deletion
+- Accessible labels and `aria-describedby` for status messages
+- Paste-friendly: allow paste, do not strip characters, do not show key in clear text after save
 
 **Design system detection — use the one already in the project:**
 - Tailwind CSS → use `bg-gray-50`, `border`, `rounded-lg`, `px-4 py-2`, etc.
@@ -218,42 +273,342 @@ When integrating byok-relay, always generate a styled API key input component th
 - MUI → use `<TextField>`, `<Button variant="contained">`, `<Paper>`
 - Plain CSS / no framework → write minimal scoped styles inline
 
+**Headless Connect AI component:** When `@byok-relay/connect` (issue #103) is available in the project's dependencies, prefer it over a hand-rolled component. It provides accessible, tested flows for all providers out of the box. Fall back to the pattern below only if it is not installed.
+
 **Minimal example (plain HTML / Tailwind):**
 ```html
-<div class="rounded-lg border bg-gray-50 p-4 space-y-3">
-  <h3 class="font-medium text-sm text-gray-700">Your API key</h3>
-  <div class="flex gap-2">
+<div class="rounded-lg border bg-gray-50 p-4 space-y-3" role="region" aria-label="API key settings">
+  <h3 class="font-medium text-sm text-gray-700">Connect your API key</h3>
+  <p class="text-xs text-gray-500">
+    Your key is encrypted at rest and never returned or logged.
+    Inference costs go directly to your provider account.
+    <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="underline">Get an OpenAI key ↗</a>
+  </p>
+  <!-- Primary input: used for both initial connect and key rotation -->
+  <div id="connect-panel" class="flex gap-2">
     <input
       id="api-key-input"
       type="password"
       placeholder="sk-..."
+      autocomplete="off"
+      aria-label="API key"
+      aria-describedby="key-status"
       class="flex-1 rounded border px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
     />
     <button
+      id="save-btn"
       onclick="handleSaveKey()"
-      class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+      class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
     >
-      Save
+      Connect
     </button>
   </div>
-  <p id="key-status" class="text-xs text-gray-500 hidden"></p>
+  <!-- Rotation panel: shown in place of connect panel when rotating -->
+  <div id="rotate-panel" class="hidden flex gap-2">
+    <input
+      id="rotate-key-input"
+      type="password"
+      placeholder="New API key…"
+      autocomplete="off"
+      aria-label="New API key for rotation"
+      aria-describedby="key-status"
+      class="flex-1 rounded border px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+    />
+    <button
+      onclick="confirmRotateKey()"
+      class="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+    >
+      Confirm
+    </button>
+    <button
+      onclick="cancelRotate()"
+      class="rounded border px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100"
+    >
+      Cancel
+    </button>
+  </div>
+  <p id="key-status" class="text-xs text-gray-500 hidden" aria-live="polite"></p>
+  <div id="key-actions" class="hidden flex gap-2 pt-1">
+    <button onclick="handleRotateKey()" class="text-xs text-blue-600 hover:underline">Rotate key</button>
+    <button onclick="handleRemoveKey()" class="text-xs text-red-500 hover:underline">Disconnect</button>
+    <button onclick="handleTestKey()" class="text-xs text-gray-500 hover:underline">Test connection</button>
+  </div>
 </div>
 
 <script>
+// On load: check whether a key is already stored and restore connected state
+async function initKeyState() {
+  try {
+    const token = await getRelayToken(RELAY_URL, APP_ID);
+    const res = await fetch(`${RELAY_URL}/keys`, {
+      headers: { 'x-relay-token': token },
+      redirect: 'error'
+    });
+    if (!res.ok) {
+      const state = await responseState(res);
+      setStatus(state, statusMessages[state]);
+      return;
+    }
+    const data = await res.json();
+    if (data.providers && data.providers.includes('openai')) {
+      setStatus('connected', '✓ Connected — key already saved (sk-…••••••••).');
+      document.getElementById('key-actions').classList.remove('hidden');
+    }
+  } catch {
+    setStatus('network', statusMessages.network);
+  }
+}
+document.addEventListener('DOMContentLoaded', initKeyState);
+
+// Map relay/provider responses to distinct UX states. Only the relay-owned
+// X-Byok-Relay-Error header identifies relay authentication failures. Provider
+// responses are forwarded and may use similar words in their response bodies.
+async function responseState(res) {
+  const relayError = res.headers.get('x-byok-relay-error');
+  if (relayError === 'missing-relay-token' || relayError === 'invalid-relay-token') {
+    return 'relay_auth';
+  }
+  let detail = '';
+  try { detail = JSON.stringify(await res.clone().json()).toLowerCase(); } catch { /* plain-text error */ }
+  if (res.status === 429) return 'rate_limited';
+  if (res.status >= 500 && res.status < 600) return 'server_error';
+  if (/\b(expired|revoked)\b/.test(detail)) return 'expired';
+  if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 422) return 'invalid'; // provider rejection or key validation
+  return 'server_error'; // unknown failures are retryable, not bad keys
+}
+const statusMessages = {
+  connected:    '✓ Connected — your requests use your own API credits.',
+  invalid:      '✗ Key rejected. Check the key format and ensure billing credits are available.',
+  relay_auth:   '✗ Your relay session is invalid or expired. Sign in again and retry.',
+  rate_limited: '⚠ Too many requests — slow down or try again shortly.',
+  expired:      '⚠ Your key has expired or been revoked. Rotate or enter a new key.',
+  network:      '✗ Could not reach the relay. Check your connection and relay URL.',
+  server_error: '⚠ Relay or provider is temporarily unavailable. Retry shortly.',
+  rotating:     '↻ Rotating key…',
+  disconnected: 'No key connected. Add a key to use AI features.',
+  disconnecting:'Removing key…',
+  validating:   'Validating key…',
+};
+
 async function handleSaveKey() {
-  const key = document.getElementById('api-key-input').value.trim();
-  const status = document.getElementById('key-status');
+  const input = document.getElementById('api-key-input');
+  const key = input.value.trim();
   if (!key) return;
-  const token = await getRelayToken(RELAY_URL, 'my-app');
-  const ok = await storeApiKey(RELAY_URL, token, 'openai', key);
-  status.textContent = ok ? '✓ Key saved — your requests will now use your own API credits.' : '✗ Failed to save key. Check the format and try again.';
-  status.className = ok ? 'text-xs text-green-600' : 'text-xs text-red-600';
-  status.classList.remove('hidden');
+  setStatus('validating', statusMessages.validating);
+  try {
+    const token = await getRelayToken(RELAY_URL, APP_ID);
+    const res = await fetch(`${RELAY_URL}/keys/openai`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
+      body: JSON.stringify({ key }),
+      redirect: 'error'
+    });
+    input.value = ''; // clear after attempt — never leave key in DOM
+    if (res.ok) {
+      setStatus('connected', statusMessages.connected);
+      document.getElementById('key-actions').classList.remove('hidden');
+    } else {
+      const state = await responseState(res);
+      setStatus(state, statusMessages[state]);
+    }
+  } catch {
+    input.value = '';
+    setStatus('network', statusMessages.network);
+  }
+}
+
+// handleRotateKey: show the rotation panel with a password input instead of window.prompt()
+function handleRotateKey() {
+  document.getElementById('connect-panel').classList.add('hidden');
+  document.getElementById('key-actions').classList.add('hidden');
+  const rotatePanel = document.getElementById('rotate-panel');
+  rotatePanel.classList.remove('hidden');
+  document.getElementById('rotate-key-input').focus();
+  setStatus('rotating', 'Enter the new key and click Confirm.');
+}
+function cancelRotate() {
+  document.getElementById('rotate-key-input').value = '';
+  document.getElementById('rotate-panel').classList.add('hidden');
+  document.getElementById('connect-panel').classList.add('hidden'); // stays hidden — key still connected
+  document.getElementById('key-actions').classList.remove('hidden');
+  setStatus('connected', statusMessages.connected);
+}
+async function confirmRotateKey() {
+  const input = document.getElementById('rotate-key-input');
+  const key = input.value.trim();
+  if (!key) return;
+  setStatus('rotating', statusMessages.rotating);
+  try {
+    const token = await getRelayToken(RELAY_URL, APP_ID);
+    const res = await fetch(`${RELAY_URL}/keys/openai/rotate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
+      body: JSON.stringify({ key }),
+      redirect: 'error'
+    });
+    input.value = ''; // clear regardless of outcome
+    document.getElementById('rotate-panel').classList.add('hidden');
+    document.getElementById('key-actions').classList.remove('hidden');
+    if (res.ok) {
+      setStatus('connected', '✓ Key rotated — live with zero downtime.');
+    } else {
+      const state = await responseState(res);
+      setStatus(state, state === 'invalid'
+        ? `✗ Rotation failed. Old key is unchanged.`
+        : statusMessages[state]);
+    }
+  } catch {
+    document.getElementById('rotate-key-input').value = '';
+    setStatus('network', statusMessages.network);
+  }
+}
+
+async function handleRemoveKey() {
+  if (!confirm('Remove your API key? You will need to reconnect to use AI features.')) return;
+  setStatus('disconnecting', statusMessages.disconnecting);
+  try {
+    const token = await getRelayToken(RELAY_URL, APP_ID);
+    const res = await fetch(`${RELAY_URL}/keys/openai`, {
+      method: 'DELETE',
+      headers: { 'x-relay-token': token },
+      redirect: 'error'
+    });
+    if (res.ok) {
+      setStatus('disconnected', statusMessages.disconnected);
+      document.getElementById('key-actions').classList.add('hidden');
+      document.getElementById('connect-panel').classList.remove('hidden');
+    } else {
+      // Deletion failed — keep UI in connected state and report a safe summary.
+      const state = await responseState(res);
+      setStatus(state, '✗ Could not remove key. Key may still be stored.');
+      document.getElementById('key-actions').classList.remove('hidden');
+    }
+  } catch {
+    setStatus('network', statusMessages.network);
+    document.getElementById('key-actions').classList.remove('hidden');
+  }
+}
+
+async function handleTestKey() {
+  setStatus('validating', 'Sending test request…');
+  try {
+    const token = await getRelayToken(RELAY_URL, APP_ID);
+    const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
+      body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 }),
+      redirect: 'error'
+    });
+    if (res.ok) {
+      setStatus('connected', '✓ Test request succeeded.');
+    } else {
+      const state = await responseState(res);
+      setStatus(state, statusMessages[state]);
+    }
+  } catch {
+    setStatus('network', statusMessages.network);
+  }
+}
+
+function setStatus(state, msg) {
+  const el = document.getElementById('key-status');
+  const colors = {
+    connected:'text-green-600', invalid:'text-red-600',
+    validating:'text-blue-500', rotating:'text-blue-500',
+    rate_limited:'text-amber-600', expired:'text-amber-600',
+    disconnected:'text-gray-500', disconnecting:'text-gray-400',
+    network:'text-red-600', server_error:'text-amber-600',
+  };
+  el.textContent = msg;
+  el.className = `text-xs ${colors[state] || 'text-gray-500'}`;
+  el.classList.remove('hidden');
 }
 </script>
 ```
 
 Always place this component on a settings page, in a modal triggered by a "Connect API key" button, or in the app's onboarding flow.
+
+## UX connection states
+
+Track and display the correct state at all times. Never leave the user guessing.
+
+| State | Display | User action |
+|---|---|---|
+| `unconnected` | Empty input, "Connect" CTA prominent | Paste key and click Connect |
+| `validating` | Spinner / "Validating…" | None — wait |
+| `connected` | Badge "✓ Connected", key actions visible | Rotate, test, or disconnect |
+| `invalid` | Error "Key format invalid" or "Key rejected by provider" | Re-enter correct key |
+| `relay_auth` | Error "Your relay session is invalid or expired" | Sign in again, then retry |
+| `expired` | Warning "Your key has expired or been revoked" | Rotate or enter new key |
+| `rate_limited` | Warning "Too many requests — slow down" | Retry later or upgrade plan |
+| `network` | Error "Could not reach relay — check your connection." | Check connection and relay URL, then retry |
+| `server_error` | Warning "Relay or provider is temporarily unavailable" | Retry shortly; do not ask for a new key |
+| `rotating` | Spinner / "Rotating…" | None — wait |
+| `disconnected` | "No key connected" + Connect CTA | Connect a new key |
+
+**Do not surface raw HTTP status codes to users.** Map relay responses to human-readable states. The relay identifies a missing or invalid token with its `X-Byok-Relay-Error` response header, which maps to `relay_auth`. A provider-key rejection maps to `invalid`; a 429 to `rate_limited`; an expired/revoked provider-key response to `expired`; a network error to `network` with "Could not reach relay — check your connection."; and 5xx or unknown failures to retryable `server_error`.
+
+**Response-classification fixtures:** Cover these cases in the integration's client tests. The header is intentionally the only signal for relay authentication, so provider error text cannot misclassify a provider rejection.
+
+| Fixture | Expected state |
+|---|---|
+| `401` with `X-Byok-Relay-Error: invalid-relay-token` | `relay_auth` |
+| Provider `401` / `403` without that header | `invalid` |
+| Provider error body says expired or revoked | `expired` |
+| `429` | `rate_limited` |
+| `5xx` | `server_error` |
+| Plain-text or otherwise unrecognized error | `server_error` |
+
+## Individual and organization-admin flows
+
+**Individual / personal key flow:** Each user connects their own provider API key. The relay token is scoped to that user. Keys are personal and must not be shared.
+
+**Organization / company-managed key flow:** An org admin registers one relay token per team member via the app's backend (`POST /users` server-side), then stores the company's provider API key under each member's token. The shared token must not be distributed to client browsers — a relay token grants full access to all stored keys for that token. **Never pass a shared relay token to end-user clients.** Instead, have the app server proxy relay requests on behalf of the member (server-side `x-relay-token` header) and issue a session credential to the browser that has no relay privilege by itself.
+
+For the admin UI, add:
+- A clear "Team key" label and a note that this key covers the whole team
+- Confirmation step before deletion (team loses AI access immediately)
+- A last-updated display sourced from your app's own audit log (the relay's `GET /keys` returns only which providers are stored, not rotation timestamps)
+
+## Key lifecycle: rotation, deletion, and recovery
+
+**Rotation (`POST /keys/:provider/rotate`):**
+- Validates the new key format and pings the provider before swapping — zero downtime
+- Old key is untouched on any failure
+- Show "Rotating…" state; confirm success or failure clearly
+- Recommended cadence: every 90 days or on any suspected compromise
+
+**Deletion (`DELETE /keys/:provider`):**
+- Immediate effect — all in-flight requests using that key will fail
+- Prompt the user to confirm before deleting
+- After deletion, set UI state to `disconnected` and hide key actions
+
+**Account erasure (`DELETE /users`):**
+- Deletes all stored keys and the relay token (GDPR Art. 17)
+- Include in account-deletion or data-export flows
+- Irreversible — warn the user explicitly
+
+**Recovery if key is compromised:**
+1. Rotate the provider API key immediately via `POST /keys/:provider/rotate`
+2. Revoke the old provider key at the provider's console (not just delete from relay)
+3. If the relay token itself is compromised: call `POST /tokens/revoke`, then re-register
+
+## Integration verification checklist
+
+Before declaring the integration complete, confirm every item:
+
+- [ ] Provider key is never logged, returned, or stored in `localStorage`/`sessionStorage` in plain text
+- [ ] Input field uses `type="password"` and clears after save
+- [ ] Stored key presence shown as masked badge — not the actual key value
+- [ ] All UX states render correctly (connected, invalid, rate_limited, expired, rotating, disconnected)
+- [ ] "Get an API key" link present and points to the correct provider console
+- [ ] Subscription disambiguation copy shown when the provider has a separate consumer product
+- [ ] Security copy present: encryption, billing ownership, what is stored
+- [ ] Rotate and Disconnect actions available when a key is connected
+- [ ] Test-connection button calls the relay and surfaces result
+- [ ] Organization flow: relay tokens are not shared client-side across team members
+- [ ] Smoke test passed (see Verify your setup below)
+- [ ] No provider key persists in client-side state after page reload (open DevTools → Application → Storage and verify)
 
 ## Verify your setup
 
@@ -276,7 +631,8 @@ async function smokeTest() {
   const usersRes = await fetch(`${RELAY_URL}/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app_id: APP_ID })
+    body: JSON.stringify({ app_id: APP_ID }),
+    redirect: 'error'
   });
   if (!usersRes.ok) throw new Error(`Registration failed: ${usersRes.status} ${usersRes.statusText}`);
   const { token } = await usersRes.json();
@@ -285,7 +641,8 @@ async function smokeTest() {
 
   // 3. List providers (should be empty before storing a key)
   const keysRes = await fetch(`${RELAY_URL}/keys`, {
-    headers: { 'x-relay-token': token }
+    headers: { 'x-relay-token': token },
+    redirect: 'error'
   });
   if (!keysRes.ok) throw new Error(`Keys list failed: ${keysRes.status} ${keysRes.statusText}`);
   const { providers } = await keysRes.json();
@@ -298,7 +655,8 @@ async function smokeTest() {
   // const res = await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
   //   method: 'POST',
   //   headers: { 'Content-Type': 'application/json', 'x-relay-token': token },
-  //   body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'ping' }] })
+  //   body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'ping' }] }),
+  //   redirect: 'error'
   // });
   // if (!res.ok) throw new Error(`Relay call failed: ${res.status} ${res.statusText}`);
   // const data = await res.json();
