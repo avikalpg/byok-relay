@@ -133,8 +133,15 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
 
 ```javascript
 // OpenAI via relay
-async function chat(relayUrl, token, messages) {
-  const res = await fetch(`${relayUrl}/relay/openai/v1/chat/completions`, {
+// onDelta is a browser-safe callback — e.g. (text) => { div.textContent += text; }
+async function chat(relayUrl, token, messages, onDelta = () => {}) {
+  const relay = new URL(relayUrl);
+  const isLocalhost = ['localhost', '127.0.0.1', '[::1]'].includes(relay.hostname);
+  if (relay.protocol !== 'https:' && !(relay.protocol === 'http:' && isLocalhost)) {
+    throw new Error('relayUrl must use HTTPS (except localhost during development)');
+  }
+
+  const res = await fetch(new URL('/relay/openai/v1/chat/completions', relay), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -147,7 +154,49 @@ async function chat(relayUrl, token, messages) {
     }),
     redirect: 'error'
   });
-  return res; // SSE stream — handle with EventSource or ReadableStream
+  if (!res.ok) throw new Error(`chat failed: ${res.status}`);
+  if (!res.body) throw new Error('chat: response body is null (ReadableStream not supported)');
+  const contentType = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  if (contentType !== 'text/event-stream') {
+    throw new Error(`chat: expected text/event-stream, got ${contentType ?? 'missing'}`);
+  }
+
+  function handleSseLine(line) {
+    const normalizedLine = line.replace(/\r$/, '');
+    if (!normalizedLine.startsWith('data: ')) return;
+
+    const data = normalizedLine.slice(6).trim();
+    if (data === '[DONE]') return;
+
+    let json;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return; // Ignore malformed SSE data, but let callback errors propagate.
+    }
+    const delta = json.choices?.[0]?.delta?.content ?? '';
+    if (delta) onDelta(delta);
+  }
+
+  // SSE stream — buffered across chunk boundaries (ReadableStream, browser-safe)
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    // { stream: true } handles multi-byte UTF-8 characters split across chunks
+    buffer += decoder.decode(value, { stream: true });
+    // Process complete lines only; keep any trailing partial line in the buffer
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // last element may be an incomplete line
+    for (const line of lines) {
+      handleSseLine(line);
+    }
+  }
+  // Flush the TextDecoder and process any remaining buffered content
+  buffer += decoder.decode();
+  if (buffer) handleSseLine(buffer);
 }
 
 // Anthropic via relay
