@@ -1,0 +1,53 @@
+{
+  "name": "@byok-relay/connect",
+  "version": "1.0.0",
+  "description": "Headless Connect AI state machine for byok-relay — framework-neutral provider key connection flow",
+  "keywords": [
+    "byok",
+    "ai",
+    "connect",
+    "api-key",
+    "headless",
+    "state-machine",
+    "openai",
+    "anthropic",
+    "llm",
+    "relay",
+    "frontend",
+    "no-backend",
+    "self-hosted"
+  ],
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./react": "./src/react.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/connect.test.js"
+  },
+  "peerDependencies": {
+    "react": ">=17.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avikalpg/byok-relay.git",
+    "directory": "packages/connect"
+  },
+  "homepage": "https://byokrelay.com",
+  "bugs": {
+    "url": "https://github.com/avikalpg/byok-relay/issues"
+  },
+  "license": "MIT",
+  "author": "avikalpg"
+}
