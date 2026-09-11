@@ -130,8 +130,8 @@ async function storeApiKey(relayUrl, token, provider, apiKey) {
 ### Step 3: Make AI requests through the relay
 
 ```javascript
-// OpenAI via relay
-async function chat(relayUrl, token, messages) {
+// OpenAI via relay — streams deltas via onDelta callback (browser-safe)
+async function chat(relayUrl, token, messages, onDelta) {
   const res = await fetch(`${relayUrl}/relay/openai/v1/chat/completions`, {
     method: 'POST',
     headers: {
@@ -144,22 +144,41 @@ async function chat(relayUrl, token, messages) {
       stream: true
     })
   });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error((typeof err?.error === 'string' ? err.error : null) || `HTTP ${res.status}`);
+  }
+  if (!res.body) throw new Error('No response body for streaming');
   // SSE stream — consume via res.body (ReadableStream)
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent = 'message';
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value);
-    // Each chunk may contain one or more SSE lines: "data: {...}"
-    for (const line of chunk.split('\n')) {
-      if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-        const json = JSON.parse(line.slice(6));
-        process.stdout.write(json.choices?.[0]?.delta?.content ?? '');
+    if (done) {
+      buffer += decoder.decode(); // flush decoder UTF-8 state
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true }); // preserve multibyte chars across reads
+    // Keep the last incomplete line in the buffer; parse only complete lines
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (line.startsWith('event: ')) {
+        currentEvent = line.slice(7).trim();
+      } else if (line.startsWith('data: ')) {
+        if (line === 'data: [DONE]') { currentEvent = 'message'; continue; }
+        const payload = JSON.parse(line.slice(6));
+        if (currentEvent === 'error') {
+          throw new Error(payload.error || 'Relay stream error');
+        }
+        const delta = payload.choices?.[0]?.delta?.content ?? '';
+        if (delta) onDelta(delta);
+        currentEvent = 'message';
       }
     }
   }
-  return; // streaming complete
 }
 
 // Anthropic via relay

@@ -67,12 +67,16 @@ describe('GET /health/credentials', () => {
   let appSecret;
   let token;
   let mockProvider;
+  // E2E token that lets the relay route built-in providers to the local mock
+  // server without hitting the SSRF loopback block. Same pattern as relay.test.js.
+  let e2eToken;
 
   before(async () => {
     // Start mock provider
     mockProvider = createMockProvider();
     const mockPort = await mockProvider.start();
     mockProviderUrl = `http://127.0.0.1:${mockPort}`;
+    e2eToken = `e2e-cred-health-${process.pid}-${Date.now()}`;
 
     // Temp DB
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-cred-health-'));
@@ -87,11 +91,15 @@ describe('GET /health/credentials', () => {
       cwd: path.join(__dirname, '../..'),
       env: {
         ...process.env,
+        NODE_ENV: 'test',
         PORT: String(relayPort),
         ENCRYPTION_SECRET: encSecret,
         APP_SECRET: appSecret,
         DB_PATH: path.join(tmpDir, 'relay.db'),
         LOG_LEVEL: 'silent',
+        // Route all provider calls to the mock server during E2E tests
+        E2E_OPENAI_COMPATIBLE_BASE_URL: mockProviderUrl,
+        E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN: e2eToken,
       },
     });
 
@@ -169,7 +177,6 @@ describe('GET /health/credentials', () => {
       headers: {
         'Content-Type': 'application/json',
         'x-relay-token': token,
-        'x-relay-base-url': mockProviderUrl,
       },
       body: { key: 'sk-' + 'b'.repeat(48) },
     });
@@ -179,7 +186,8 @@ describe('GET /health/credentials', () => {
       headers: {
         'Content-Type': 'application/json',
         'x-relay-token': token,
-        'x-relay-base-url': mockProviderUrl,
+        'x-relay-base-url': 'https://example.com',
+        'x-relay-e2e-base-url-token': e2eToken,
       },
       body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }] },
     });
@@ -191,12 +199,10 @@ describe('GET /health/credentials', () => {
     const creds = res.body.credentials;
     const openai = creds.find(c => c.provider === 'openai');
     assert.ok(openai, 'openai credential should be present');
-    // Status is based on activity + failures; even if mock returns non-2xx, count increments
-    assert.ok(openai.total_requests >= 1, 'should have at least 1 request recorded');
-    assert.ok(['healthy', 'degraded', 'unknown'].includes(openai.status));
-    // last_success_at or last_failure_at should be populated
-    const hasTimestamp = openai.last_success_at !== null || openai.last_failure_at !== null;
-    assert.ok(hasTimestamp, 'at least one timestamp should be set after a relay request');
+    assert.equal(openai.status, 'healthy', 'status should be healthy after a successful call');
+    assert.equal(openai.total_failures, 0, 'should have 0 failures after a successful call');
+    assert.ok(openai.last_success_at !== null, 'last_success_at should be populated after a successful call');
+    assert.equal(openai.last_failure_at, null, 'last_failure_at should be null after a successful call');
   });
 
   it('increments consecutive_failures on repeated failures', async () => {
@@ -219,15 +225,16 @@ describe('GET /health/credentials', () => {
       body: { key: 'sk-' + 'z'.repeat(48) },
     });
 
-    // Make 3 relay calls that will fail (mock provider returns 401 for unknown paths)
+    // Make 3 relay calls that fail via forceJsonError (mock returns 429)
     for (let i = 0; i < 3; i++) {
       await req('POST', `${relayBase}/relay/openai/v1/chat/completions`, {
         headers: {
           'Content-Type': 'application/json',
           'x-relay-token': freshToken,
-          'x-relay-base-url': mockProviderUrl,
+          'x-relay-base-url': 'https://example.com',
+          'x-relay-e2e-base-url-token': e2eToken,
         },
-        body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }] },
+        body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], forceJsonError: true },
       });
     }
 
@@ -239,8 +246,28 @@ describe('GET /health/credentials', () => {
     const openai = creds.find(c => c.provider === 'openai');
     assert.ok(openai, 'openai should be present');
     assert.equal(openai.total_requests, 3, 'should have 3 total requests');
-    // After 3 failures with no successes, either degraded (if all failed) or health tracked correctly
-    assert.ok(openai.total_requests >= 3);
+    assert.equal(openai.total_failures, 3, 'should have 3 total failures');
+    assert.equal(openai.consecutive_failures, 3, 'should have 3 consecutive failures');
+    assert.equal(openai.status, 'degraded', 'status should be degraded after 3 consecutive failures');
+    assert.ok(openai.last_failure_at !== null, 'last_failure_at should be populated after failures');
+
+    // One successful call resets consecutive_failures
+    await req('POST', `${relayBase}/relay/openai/v1/chat/completions`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-relay-token': freshToken,
+        'x-relay-base-url': 'https://example.com',
+        'x-relay-e2e-base-url-token': e2eToken,
+      },
+      body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }] },
+    });
+    const afterSuccessRes = await req('GET', `${relayBase}/health/credentials`, {
+      headers: { 'x-relay-token': freshToken },
+    });
+    const afterCreds = afterSuccessRes.body.credentials;
+    const afterOpenai = afterCreds.find(c => c.provider === 'openai');
+    assert.equal(afterOpenai.consecutive_failures, 0, 'consecutive_failures resets to 0 after success');
+    assert.equal(afterOpenai.status, 'healthy', 'status returns to healthy after success');
   });
 
   it('returns 400 when app_id missing from /admin/credential-health', async () => {
@@ -266,11 +293,13 @@ describe('GET /health/credentials', () => {
     // openai should appear since at least one user stored an openai key
     const openaiEntry = res.body.credentials.find(c => c.provider === 'openai');
     assert.ok(openaiEntry, 'openai should appear in admin health');
-    assert.ok(typeof openaiEntry.user_count === 'number');
-    assert.ok(typeof openaiEntry.users_with_activity === 'number');
-    assert.ok(typeof openaiEntry.total_requests === 'number');
-    assert.ok(typeof openaiEntry.total_failures === 'number');
-    assert.ok(typeof openaiEntry.error_rate === 'number');
-    assert.ok(typeof openaiEntry.users_degraded === 'number');
+    // test-app has exactly one user who made one successful relay call in the 'records health' test.
+    // The failure tests use app_id 'test-app-failures', so they don't affect this aggregate.
+    assert.equal(openaiEntry.user_count, 1, 'one user in test-app has an openai key');
+    assert.equal(openaiEntry.users_with_activity, 1, 'one user has made relay calls');
+    assert.equal(openaiEntry.total_requests, 1, 'one total openai relay request for test-app');
+    assert.equal(openaiEntry.total_failures, 0, 'no failures for test-app openai');
+    assert.equal(openaiEntry.error_rate, 0, 'error rate is 0 with no failures');
+    assert.equal(openaiEntry.users_degraded, 0, 'no degraded users in test-app');
   });
 });

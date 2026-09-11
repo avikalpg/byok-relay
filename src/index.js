@@ -875,6 +875,7 @@ app.get('/stats/:app_id', requireAppSecret, (req, res) => {
  */
 app.get('/health/credentials', requireToken, (req, res) => {
   const credentials = getCredentialHealthForUser(req.user.id);
+  res.set('Cache-Control', 'no-store');
   res.json({ credentials });
 });
 
@@ -911,6 +912,7 @@ app.get('/admin/credential-health', requireAppSecret, (req, res) => {
     return res.status(400).json({ error: 'app_id query parameter is required.' });
   }
   const credentials = getCredentialHealthForApp(appId.trim());
+  res.set('Cache-Control', 'no-store');
   res.json({ app_id: appId.trim(), credentials });
 });
 
