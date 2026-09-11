@@ -197,21 +197,33 @@ async function chat(relayUrl, token, messages, onDelta = () => {}) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    // { stream: true } handles multi-byte UTF-8 characters split across chunks
-    buffer += decoder.decode(value, { stream: true });
-    // Process complete lines only; keep any trailing partial line in the buffer
-    const lines = buffer.split('\n');
-    buffer = lines.pop(); // last element may be an incomplete line
-    for (const line of lines) {
-      handleSseLine(line);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // { stream: true } handles multi-byte UTF-8 characters split across chunks
+      buffer += decoder.decode(value, { stream: true });
+      // Process complete lines only; keep any trailing partial line in the buffer
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // last element may be an incomplete line
+      for (const line of lines) {
+        handleSseLine(line);
+      }
     }
+    // Flush the TextDecoder and process any remaining buffered content
+    buffer += decoder.decode();
+    if (buffer) handleSseLine(buffer);
+  } catch (error) {
+    // Ensure upstream streaming work stops, but preserve the original error.
+    try {
+      await reader.cancel(error);
+    } catch {
+      // Cancellation is best-effort; the processing error remains authoritative.
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
-  // Flush the TextDecoder and process any remaining buffered content
-  buffer += decoder.decode();
-  if (buffer) handleSseLine(buffer);
 }
 // Anthropic via relay
 async function claudeChat(relayUrl, token, messages) {
