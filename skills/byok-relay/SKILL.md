@@ -156,6 +156,10 @@ async function chat(relayUrl, token, messages, onDelta = () => {}) {
   });
   if (!res.ok) throw new Error(`chat failed: ${res.status}`);
   if (!res.body) throw new Error('chat: response body is null (ReadableStream not supported)');
+  const contentType = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  if (contentType !== 'text/event-stream') {
+    throw new Error(`chat: expected text/event-stream, got ${contentType ?? 'missing'}`);
+  }
 
   function handleSseLine(line) {
     const normalizedLine = line.replace(/\r$/, '');
