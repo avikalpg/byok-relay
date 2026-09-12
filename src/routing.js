@@ -25,14 +25,17 @@
  * Entry must exist for the prefix to be recognised as valid.
  */
 const PROVIDER_DEFAULT_PATHS = {
-  openai:             '/v1/chat/completions',
-  anthropic:          '/v1/messages',
-  google:             null,                         // dynamic: /v1beta/models/{model}:(stream)GenerateContent
-  groq:               '/openai/v1/chat/completions',
-  openrouter:         '/api/v1/chat/completions',
-  mistral:            '/v1/chat/completions',
-  // 'openai-compatible' is intentionally omitted — it requires x-relay-base-url,
-  // which cannot be auto-resolved from a model name alone.
+  openai:              '/v1/chat/completions',
+  anthropic:           '/v1/messages',
+  google:              null,                         // dynamic: /v1beta/models/{model}:(stream)GenerateContent
+  groq:                '/openai/v1/chat/completions',
+  openrouter:          '/api/v1/chat/completions',
+  mistral:             '/v1/chat/completions',
+  // 'openai-compatible' uses x-relay-base-url for the base URL; the path is
+  // always /v1/chat/completions (OpenAI-compatible default). Callers MUST
+  // supply x-relay-base-url — that constraint is enforced in providers.js when
+  // the outbound request is made, not at routing time.
+  'openai-compatible': '/v1/chat/completions',
 };
 
 /**
@@ -128,9 +131,69 @@ function resolveModelRoute(model, streaming = false) {
   return null; // unrecognised model
 }
 
+/**
+ * HTTP status codes that are safe to retry with the next fallback candidate.
+ *
+ * 429 — rate-limited by provider (retry with a different credential/model)
+ * 500 — provider internal error (transient; retry is reasonable)
+ * 502 — bad gateway (upstream unreachable; try next provider)
+ * 503 — service unavailable (try next provider)
+ * 504 — gateway timeout (try next provider)
+ */
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * Returns true when an HTTP status code indicates the request can be retried
+ * with a different provider/model candidate.
+ *
+ * @param {number} status
+ * @returns {boolean}
+ */
+function isRetryableStatus(status) {
+  return RETRYABLE_STATUS_CODES.has(status);
+}
+
+/**
+ * Parse and resolve the `fallback_models` array from a POST /relay body.
+ *
+ * Each entry must be a string in the same format accepted by resolveModelRoute:
+ *   - "provider/model-name"  (explicit prefix)
+ *   - "model-name"           (pattern-matched)
+ *
+ * Entries that cannot be resolved or duplicate the primary candidate are
+ * silently skipped. The returned list is ordered: try index 0 first.
+ *
+ * @param {object} body         - Parsed request body from POST /relay
+ * @param {{ provider, modelName }} primaryRoute  - Already-resolved primary route
+ * @param {boolean} streaming   - Whether the request will stream
+ * @returns {Array<{ model: string, provider: string, path: string, modelName: string }>}
+ */
+function parseFallbackCandidates(body, primaryRoute, streaming) {
+  const rawFallbacks = body.fallback_models;
+  if (!Array.isArray(rawFallbacks) || rawFallbacks.length === 0) return [];
+
+  const seen = new Set([`${primaryRoute.provider}/${primaryRoute.modelName}`]);
+  const candidates = [];
+
+  for (const modelStr of rawFallbacks) {
+    if (typeof modelStr !== 'string' || !modelStr.trim()) continue;
+    const route = resolveModelRoute(modelStr.trim(), streaming);
+    if (!route) continue;
+    const key = `${route.provider}/${route.modelName}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ model: modelStr.trim(), ...route });
+  }
+
+  return candidates;
+}
+
 module.exports = {
   resolveModelRoute,
   PROVIDER_DEFAULT_PATHS,
   MODEL_PATTERNS,
   buildGooglePath,
+  RETRYABLE_STATUS_CODES,
+  isRetryableStatus,
+  parseFallbackCandidates,
 };
