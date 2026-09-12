@@ -80,6 +80,35 @@ function isModelAllowedForProvider(modelName, provider) {
   return isModelAllowed(`${provider}/${modelName}`);
 }
 
+const RETRYABLE_DRAIN_MAX_BYTES = 64 * 1024;
+const RETRYABLE_DRAIN_TIMEOUT_MS = 5_000;
+
+async function drainRetryableResponse(response, abortController) {
+  if (!response.body) return;
+
+  const body = response.body;
+  let bytesRead = 0;
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    abortController.abort();
+    body.destroy();
+  }, RETRYABLE_DRAIN_TIMEOUT_MS);
+
+  try {
+    for await (const chunk of body) {
+      bytesRead += chunk.length;
+      if (bytesRead >= RETRYABLE_DRAIN_MAX_BYTES) {
+        body.destroy();
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(timeoutHandle);
+    if (timedOut || bytesRead >= RETRYABLE_DRAIN_MAX_BYTES) body.destroy();
+  }
+}
+
 function extractModelFromProviderPath(provider, forwardPath) {
   if (provider !== 'google' || typeof forwardPath !== 'string') return undefined;
   const match = forwardPath.match(/^\/(?:v1beta|v1)\/models\/([^/:?]+)(?::(?:generateContent|streamGenerateContent))?(?:[/?]|$)/);
@@ -1072,7 +1101,7 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   let winnerKey = null;
   let lastRetryableStatus = null;
 
-  for (let i = 0; i < maxAttempts; i++) {
+  for (let i = 0; i < allCandidates.length && attempts < maxAttempts; i++) {
     const candidate = allCandidates[i];
     const candidateKey = getDecryptedKey(req.user.id, candidate.provider);
     if (!candidateKey) {
@@ -1080,7 +1109,7 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
       fallbackReason = `no_key:${candidate.provider}`;
       continue;
     }
-    if (!isModelAllowed(candidate.model)) {
+    if (!isModelAllowedForProvider(candidate.modelName, candidate.provider)) {
       fallbackReason = `not_allowed:${candidate.model}`;
       continue;
     }
@@ -1108,7 +1137,7 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
       clearTimeout(timeoutHandle);
       const isTimeout = err.name === 'AbortError';
       const isNetwork = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND'].includes(err.code);
-      if ((isTimeout || isNetwork) && i < maxAttempts - 1 && i < allCandidates.length - 1) {
+      if ((isTimeout || isNetwork) && attempts < maxAttempts && i < allCandidates.length - 1) {
         fallbackReason = isTimeout ? 'timeout' : `network_error:${err.code}`;
         lastRetryableStatus = null;
         continue;
@@ -1116,14 +1145,15 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
       // Non-retryable or last candidate — propagate
       throw err;
     }
-    clearTimeout(timeoutHandle);
 
     if (isRetryableStatus(providerResponse.status)) {
-      // Always drain the body so the underlying TCP connection can be reused.
-      try { await providerResponse.text(); } catch { /* ignore drain errors */ }
+      // Keep the request deadline active while draining a bounded amount of the
+      // response, then advance to the next candidate when one remains.
+      try { await drainRetryableResponse(providerResponse, attemptAbort); } catch { /* ignore drain errors */ }
+      clearTimeout(timeoutHandle);
       fallbackReason = String(providerResponse.status);
       lastRetryableStatus = providerResponse.status;
-      if (i < maxAttempts - 1 && i < allCandidates.length - 1) {
+      if (attempts < maxAttempts && i < allCandidates.length - 1) {
         // More candidates remain — advance to the next one.
         continue;
       }
@@ -1131,6 +1161,7 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
       // Leave winnerResponse null so the exhausted-candidates error path fires.
       break;
     }
+    clearTimeout(timeoutHandle);
 
     // Non-retryable status (success or hard error) — commit this response.
     winnerResponse = providerResponse;
