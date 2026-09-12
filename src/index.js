@@ -26,7 +26,7 @@ const {
   dbHealthCheck,
 } = require('./db');
 const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
-const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS } = require('./routing');
+const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS, isRetryableStatus, parseFallbackCandidates } = require('./routing');
 const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -78,6 +78,35 @@ function isModelAllowedForProvider(modelName, provider) {
   if (isModelAllowed(modelName)) return true;
   if (!provider || !modelName || typeof modelName !== 'string' || modelName.includes('/')) return false;
   return isModelAllowed(`${provider}/${modelName}`);
+}
+
+const RETRYABLE_DRAIN_MAX_BYTES = 64 * 1024;
+const RETRYABLE_DRAIN_TIMEOUT_MS = 5_000;
+
+async function drainRetryableResponse(response, abortController) {
+  if (!response.body) return;
+
+  const body = response.body;
+  let bytesRead = 0;
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    abortController.abort();
+    body.destroy();
+  }, RETRYABLE_DRAIN_TIMEOUT_MS);
+
+  try {
+    for await (const chunk of body) {
+      bytesRead += chunk.length;
+      if (bytesRead >= RETRYABLE_DRAIN_MAX_BYTES) {
+        body.destroy();
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(timeoutHandle);
+    if (timedOut || bytesRead >= RETRYABLE_DRAIN_MAX_BYTES) body.destroy();
+  }
 }
 
 function extractModelFromProviderPath(provider, forwardPath) {
@@ -381,8 +410,10 @@ async function forwardRelayRequest({
   extraHeaders,
   model,
   streamingRequested,
+  preObtainedResponse,
+  relayStartOverride,
 }) {
-  const relayStart = Date.now();
+  const relayStart = relayStartOverride ?? Date.now();
   const { logRelayRequestOnce, logRelayErrorOnce } = createRelayLogger(req);
   const upstreamAbortController = new AbortController();
   let providerResponse;
@@ -399,15 +430,20 @@ async function forwardRelayRequest({
   res.on('close', abortUpstreamBody);
 
   try {
-    providerResponse = await forwardRequest(
-      provider,
-      forwardPath,
-      req.method,
-      body,
-      apiKey,
-      extraHeaders,
-      { signal: upstreamAbortController.signal },
-    );
+    if (preObtainedResponse) {
+      // Fallback loop already obtained this response; skip the fetch.
+      providerResponse = preObtainedResponse;
+    } else {
+      providerResponse = await forwardRequest(
+        provider,
+        forwardPath,
+        req.method,
+        body,
+        apiKey,
+        extraHeaders,
+        { signal: upstreamAbortController.signal },
+      );
+    }
 
     res.status(providerResponse.status);
     const contentType = providerResponse.headers.get('content-type');
@@ -994,18 +1030,7 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
     });
   }
 
-  const apiKey = getDecryptedKey(req.user.id, provider);
-  if (!apiKey) {
-    return res.status(400).json({
-      error: `No API key stored for provider "${provider}". POST /keys/${provider} first.`,
-    });
-  }
-
-  // Strip provider prefix from model field before forwarding.
-  // "anthropic/claude-3-5-haiku" → "claude-3-5-haiku" for the upstream request.
-  const forwardBody = { ...req.body, model: modelName };
-
-  // Pass through provider-specific and relay headers
+  // Pass through provider-specific and relay headers (shared across all candidates)
   const extraHeaders = {};
   const passthroughHeaders = [
     'anthropic-version', 'x-relay-base-url', 'x-relay-referer', 'x-title',
@@ -1015,16 +1040,171 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
     if (req.headers[h]) extraHeaders[h] = req.headers[h];
   }
 
+  // ── Fallback candidate resolution ────────────────────────────────────────
+  // Optional `fallback_models` array in the request body lets callers define
+  // an ordered list of backup provider/model pairs to try when the primary
+  // request fails with a retryable error (429, 5xx, timeout, network error).
+  //
+  // The primary model is always tried first.  Each element of `fallback_models`
+  // is resolved with the same rules as the top-level `model` field.
+  //
+  // `max_attempts` caps the total number of provider calls (default: all
+  // candidates, hard cap: 5). Set to 1 to disable fallback even if
+  // `fallback_models` is present.
+  const rawMaxAttempts = req.body.max_attempts;
+  const fallbackCandidates = parseFallbackCandidates(req.body, route, streaming);
+  const allCandidates = [
+    { model, provider, path: forwardPath, modelName },
+    ...fallbackCandidates,
+  ];
+  const maxAttempts = (() => {
+    if (typeof rawMaxAttempts === 'number' && Number.isInteger(rawMaxAttempts) && rawMaxAttempts >= 1) {
+      return Math.min(rawMaxAttempts, allCandidates.length, 5);
+    }
+    return Math.min(allCandidates.length, 5);
+  })();
+
+  // Fast path: single candidate, no fallback logic needed.
+  if (allCandidates.length === 1 || maxAttempts === 1) {
+    const primary = allCandidates[0];
+    const primaryKey = getDecryptedKey(req.user.id, primary.provider);
+    if (!primaryKey) {
+      return res.status(400).json({
+        error: `No API key stored for provider "${primary.provider}". POST /keys/${primary.provider} first.`,
+      });
+    }
+    const primaryBody = { ...req.body, model: primary.modelName };
+    delete primaryBody.fallback_models;
+    delete primaryBody.max_attempts;
+    return forwardRelayRequest({
+      req,
+      res,
+      provider: primary.provider,
+      forwardPath: primary.path,
+      body: primaryBody,
+      apiKey: primaryKey,
+      extraHeaders,
+      model: primary.model,
+      streamingRequested: streaming,
+    });
+  }
+
+  // ── Multi-candidate fallback loop ─────────────────────────────────────────
+  // Try each candidate in order.  On a retryable error, drain the response
+  // body, record the reason, and advance to the next candidate.  On success
+  // or a non-retryable error, break and commit the response to the client.
+  const relayStart = Date.now();
+  let attempts = 0;
+  let fallbackReason = null;
+  let winnerResponse = null;
+  let winnerCandidate = null;
+  let winnerKey = null;
+  let lastRetryableStatus = null;
+
+  for (let i = 0; i < allCandidates.length && attempts < maxAttempts; i++) {
+    const candidate = allCandidates[i];
+    const candidateKey = getDecryptedKey(req.user.id, candidate.provider);
+    if (!candidateKey) {
+      // Skip candidates for which the user has no stored key
+      fallbackReason = `no_key:${candidate.provider}`;
+      continue;
+    }
+    if (!isModelAllowedForProvider(candidate.modelName, candidate.provider)) {
+      fallbackReason = `not_allowed:${candidate.model}`;
+      continue;
+    }
+
+    const candidateBody = { ...req.body, model: candidate.modelName };
+    delete candidateBody.fallback_models;
+    delete candidateBody.max_attempts;
+
+    const attemptAbort = new AbortController();
+    const timeoutHandle = setTimeout(() => attemptAbort.abort(), 30_000);
+    attempts++;
+
+    let providerResponse;
+    try {
+      providerResponse = await forwardRequest(
+        candidate.provider,
+        candidate.path,
+        req.method,
+        candidateBody,
+        candidateKey,
+        extraHeaders,
+        { signal: attemptAbort.signal },
+      );
+    } catch (err) {
+      clearTimeout(timeoutHandle);
+      const isTimeout = err.name === 'AbortError';
+      const isNetwork = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND'].includes(err.code);
+      if ((isTimeout || isNetwork) && attempts < maxAttempts && i < allCandidates.length - 1) {
+        fallbackReason = isTimeout ? 'timeout' : `network_error:${err.code}`;
+        lastRetryableStatus = null;
+        continue;
+      }
+      // Non-retryable or last candidate — propagate
+      throw err;
+    }
+
+    if (isRetryableStatus(providerResponse.status)) {
+      // Keep the request deadline active while draining a bounded amount of the
+      // response, then advance to the next candidate when one remains.
+      try { await drainRetryableResponse(providerResponse, attemptAbort); } catch { /* ignore drain errors */ }
+      clearTimeout(timeoutHandle);
+      fallbackReason = String(providerResponse.status);
+      lastRetryableStatus = providerResponse.status;
+      if (attempts < maxAttempts && i < allCandidates.length - 1) {
+        // More candidates remain — advance to the next one.
+        continue;
+      }
+      // This was the last candidate and it is still retryable.
+      // Leave winnerResponse null so the exhausted-candidates error path fires.
+      break;
+    }
+    clearTimeout(timeoutHandle);
+
+    // Non-retryable status (success or hard error) — commit this response.
+    winnerResponse = providerResponse;
+    winnerCandidate = candidate;
+    winnerKey = candidateKey;
+    break;
+  }
+
+  if (!winnerResponse) {
+    // All candidates were skipped (missing keys) or exhausted with retryable errors.
+    const status = lastRetryableStatus ?? 502;
+    return res.status(status).json({
+      error: 'All relay candidates exhausted.',
+      attempts,
+      fallback_reason: fallbackReason,
+    });
+  }
+
+  // Emit routing metadata headers so callers can observe which provider won.
+  if (attempts > 1 || winnerCandidate.model !== model) {
+    res.setHeader('X-Relay-Used-Model', winnerCandidate.model);
+  }
+  if (attempts > 1) {
+    res.setHeader('X-Relay-Attempts', String(attempts));
+  }
+  if (fallbackReason) {
+    res.setHeader('X-Relay-Fallback-Reason', fallbackReason);
+  }
+
   return forwardRelayRequest({
     req,
     res,
-    provider,
-    forwardPath,
-    body: forwardBody,
-    apiKey,
+    provider: winnerCandidate.provider,
+    forwardPath: winnerCandidate.path,
+    body: { ...req.body, model: winnerCandidate.modelName,
+      // strip relay-only fields so they are never forwarded upstream
+      fallback_models: undefined, max_attempts: undefined },
+    apiKey: winnerKey,
     extraHeaders,
-    model,
+    model: winnerCandidate.model,
     streamingRequested: streaming,
+    preObtainedResponse: winnerResponse,
+    relayStartOverride: relayStart,
   });
 });
 
