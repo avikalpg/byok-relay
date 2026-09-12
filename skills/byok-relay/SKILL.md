@@ -154,19 +154,30 @@ async function chat(relayUrl, token, messages, onDelta = () => {}) {
     }),
     redirect: 'error'
   });
-  if (!res.ok) throw new Error(`chat failed: ${res.status}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error((typeof err?.error === 'string' ? err.error : null) || `chat failed: ${res.status}`);
+  }
   if (!res.body) throw new Error('chat: response body is null (ReadableStream not supported)');
   const contentType = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
   if (contentType !== 'text/event-stream') {
     throw new Error(`chat: expected text/event-stream, got ${contentType ?? 'missing'}`);
   }
 
+  let currentEvent = 'message';
   function handleSseLine(line) {
     const normalizedLine = line.replace(/\r$/, '');
+    if (normalizedLine.startsWith('event: ')) {
+      currentEvent = normalizedLine.slice(7).trim();
+      return;
+    }
     if (!normalizedLine.startsWith('data: ')) return;
 
     const data = normalizedLine.slice(6).trim();
-    if (data === '[DONE]') return;
+    if (data === '[DONE]') {
+      currentEvent = 'message';
+      return;
+    }
 
     let json;
     try {
@@ -174,31 +185,46 @@ async function chat(relayUrl, token, messages, onDelta = () => {}) {
     } catch {
       return; // Ignore malformed SSE data, but let callback errors propagate.
     }
+    if (currentEvent === 'error') {
+      throw new Error(json.error || 'Relay stream error');
+    }
     const delta = json.choices?.[0]?.delta?.content ?? '';
     if (delta) onDelta(delta);
+    currentEvent = 'message';
   }
 
   // SSE stream — buffered across chunk boundaries (ReadableStream, browser-safe)
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    // { stream: true } handles multi-byte UTF-8 characters split across chunks
-    buffer += decoder.decode(value, { stream: true });
-    // Process complete lines only; keep any trailing partial line in the buffer
-    const lines = buffer.split('\n');
-    buffer = lines.pop(); // last element may be an incomplete line
-    for (const line of lines) {
-      handleSseLine(line);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // { stream: true } handles multi-byte UTF-8 characters split across chunks
+      buffer += decoder.decode(value, { stream: true });
+      // Process complete lines only; keep any trailing partial line in the buffer
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // last element may be an incomplete line
+      for (const line of lines) {
+        handleSseLine(line);
+      }
     }
+    // Flush the TextDecoder and process any remaining buffered content
+    buffer += decoder.decode();
+    if (buffer) handleSseLine(buffer);
+  } catch (error) {
+    // Ensure upstream streaming work stops, but preserve the original error.
+    try {
+      await reader.cancel(error);
+    } catch {
+      // Cancellation is best-effort; the processing error remains authoritative.
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
-  // Flush the TextDecoder and process any remaining buffered content
-  buffer += decoder.decode();
-  if (buffer) handleSseLine(buffer);
 }
-
 // Anthropic via relay
 async function claudeChat(relayUrl, token, messages) {
   const res = await fetch(`${relayUrl}/relay/anthropic/v1/messages`, {

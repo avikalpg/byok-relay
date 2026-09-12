@@ -67,6 +67,21 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_request_logs_user ON request_logs(user_id);
   CREATE INDEX IF NOT EXISTS idx_request_logs_app ON request_logs(app_id);
   CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);
+
+  CREATE TABLE IF NOT EXISTS credential_health (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    last_success_at INTEGER,
+    last_failure_at INTEGER,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    total_requests INTEGER NOT NULL DEFAULT 0,
+    total_failures INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(user_id, provider)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_credential_health_user ON credential_health(user_id);
 `);
 // NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
 // On a legacy DB the users table still has 'token', not 'token_hash', so
@@ -430,6 +445,163 @@ function rotateKey(userId, provider, newPlaintext) {
   return { rotated: hadKey };
 }
 
+// ── Credential health helpers ──────────────────────────────────────────────
+
+/**
+ * Record one relay outcome against a user's credential for a provider.
+ * Tracks success/failure timestamps and consecutive failure count.
+ * Called after every relay request (success or error).
+ *
+ * @param {object} params
+ * @param {string} params.user_id
+ * @param {string} params.provider
+ * @param {boolean} params.success  - true for 2xx, false for errors/non-2xx
+ */
+function updateCredentialHealth({ user_id, provider, success }) {
+  const now = Date.now();
+  const existing = db
+    .prepare('SELECT id, consecutive_failures, total_requests, total_failures FROM credential_health WHERE user_id = ? AND provider = ?')
+    .get(user_id, provider);
+
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO credential_health
+        (id, user_id, provider, last_success_at, last_failure_at, consecutive_failures, total_requests, total_failures, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      uuidv4(),
+      user_id,
+      provider,
+      success ? now : null,
+      success ? null : now,
+      success ? 0 : 1,
+      success ? 0 : 1,
+      now,
+    );
+    return;
+  }
+
+  if (success) {
+    db.prepare(`
+      UPDATE credential_health
+      SET last_success_at = ?,
+          consecutive_failures = 0,
+          total_requests = total_requests + 1,
+          updated_at = ?
+      WHERE user_id = ? AND provider = ?
+    `).run(now, now, user_id, provider);
+  } else {
+    db.prepare(`
+      UPDATE credential_health
+      SET last_failure_at = ?,
+          consecutive_failures = consecutive_failures + 1,
+          total_requests = total_requests + 1,
+          total_failures = total_failures + 1,
+          updated_at = ?
+      WHERE user_id = ? AND provider = ?
+    `).run(now, now, user_id, provider);
+  }
+}
+
+/**
+ * Return credential health for all providers stored by a user.
+ * Joined with the keys table so only providers with a stored key are returned.
+ * Providers with no relay activity yet have null timestamps and 0 counts.
+ *
+ * Each entry includes:
+ *   provider              - provider name
+ *   status                - 'healthy' | 'degraded' | 'unknown'
+ *   last_success_at       - ISO timestamp or null
+ *   last_failure_at       - ISO timestamp or null
+ *   consecutive_failures  - number of failures since last success
+ *   total_requests        - all-time relay requests for this credential
+ *   total_failures        - all-time relay failures for this credential
+ *   error_rate            - total_failures / total_requests (0 when no requests)
+ */
+function getCredentialHealthForUser(userId) {
+  // Join keys (providers with stored creds) LEFT JOIN health data
+  const rows = db.prepare(`
+    SELECT
+      k.provider,
+      h.last_success_at,
+      h.last_failure_at,
+      h.consecutive_failures,
+      h.total_requests,
+      h.total_failures
+    FROM keys k
+    LEFT JOIN credential_health h ON h.user_id = k.user_id AND h.provider = k.provider
+    WHERE k.user_id = ?
+    ORDER BY k.provider
+  `).all(userId);
+
+  return rows.map(r => {
+    const totalReqs = r.total_requests || 0;
+    const totalFails = r.total_failures || 0;
+    const consec = r.consecutive_failures || 0;
+
+    let status;
+    if (totalReqs === 0) {
+      status = 'unknown'; // no relay activity yet
+    } else if (consec >= 3) {
+      status = 'degraded';
+    } else {
+      status = 'healthy';
+    }
+
+    return {
+      provider: r.provider,
+      status,
+      last_success_at: r.last_success_at ? new Date(r.last_success_at).toISOString() : null,
+      last_failure_at: r.last_failure_at ? new Date(r.last_failure_at).toISOString() : null,
+      consecutive_failures: consec,
+      total_requests: totalReqs,
+      total_failures: totalFails,
+      error_rate: totalReqs > 0 ? +(totalFails / totalReqs).toFixed(4) : 0,
+    };
+  });
+}
+
+/**
+ * Return credential health aggregated by provider across all users of an app.
+ * Operator-level view: no user_id is exposed; counts are aggregated.
+ * Requires APP_SECRET — guarded at the route level.
+ *
+ * Returns per-provider:
+ *   provider              - provider name
+ *   user_count            - distinct users with stored keys for this provider
+ *   users_with_activity   - users who have at least one relay request
+ *   total_requests        - aggregate relay requests across all users
+ *   total_failures        - aggregate failures
+ *   error_rate            - aggregate error_rate
+ *   users_degraded        - count of users with consecutive_failures >= 3
+ */
+function getCredentialHealthForApp(appId) {
+  const rows = db.prepare(`
+    SELECT
+      k.provider,
+      COUNT(DISTINCT k.user_id) AS user_count,
+      COUNT(DISTINCT CASE WHEN h.total_requests > 0 THEN k.user_id END) AS users_with_activity,
+      COALESCE(SUM(h.total_requests), 0) AS total_requests,
+      COALESCE(SUM(h.total_failures), 0) AS total_failures,
+      COUNT(DISTINCT CASE WHEN h.consecutive_failures >= 3 THEN k.user_id END) AS users_degraded
+    FROM keys k
+    JOIN users u ON u.id = k.user_id AND u.app_id = ?
+    LEFT JOIN credential_health h ON h.user_id = k.user_id AND h.provider = k.provider
+    GROUP BY k.provider
+    ORDER BY k.provider
+  `).all(appId);
+
+  return rows.map(r => ({
+    provider: r.provider,
+    user_count: r.user_count,
+    users_with_activity: r.users_with_activity,
+    total_requests: r.total_requests,
+    total_failures: r.total_failures,
+    error_rate: r.total_requests > 0 ? +(r.total_failures / r.total_requests).toFixed(4) : 0,
+    users_degraded: r.users_degraded,
+  }));
+}
+
 // ── Request log helpers ─────────────────────────────────────────────────────
 
 /**
@@ -576,5 +748,8 @@ module.exports = {
   logRequest,
   getStatsForUser,
   getStatsForApp,
+  updateCredentialHealth,
+  getCredentialHealthForUser,
+  getCredentialHealthForApp,
   dbHealthCheck,
 };
