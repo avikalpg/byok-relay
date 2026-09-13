@@ -64,7 +64,8 @@ db.exec(`
     created_at INTEGER NOT NULL,
     input_tokens INTEGER,
     output_tokens INTEGER,
-    estimated_cost_usd REAL
+    estimated_cost_usd REAL,
+    user_agent TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_request_logs_user ON request_logs(user_id);
@@ -185,7 +186,7 @@ function _migrateAddExpiresAt() {
 
 _migrateAddExpiresAt();
 
-// ── Migration: add token-count and cost columns to request_logs ─────────────
+// ── Migrations: add request-log metadata columns ─────────────────────────────
 function _migrateAddCostTracking() {
   const cols = db.pragma('table_info(request_logs)').map(c => c.name);
   if (!cols.includes('input_tokens')) {
@@ -199,7 +200,15 @@ function _migrateAddCostTracking() {
   }
 }
 
+function _migrateAddUserAgent() {
+  const cols = db.pragma('table_info(request_logs)').map(c => c.name);
+  if (!cols.includes('user_agent')) {
+    db.exec('ALTER TABLE request_logs ADD COLUMN user_agent TEXT');
+  }
+}
+
 _migrateAddCostTracking();
+_migrateAddUserAgent();
 
 // Create the token_hash index AFTER migration so it works on both
 // fresh installs (table was just created with token_hash) and legacy
@@ -632,18 +641,22 @@ function getCredentialHealthForApp(appId) {
  * @param {string}  entry.app_id
  * @param {string}  entry.provider
  * @param {string}  [entry.model]
- * @param {number}  entry.status           - HTTP status returned to client
- * @param {number}  entry.latency_ms       - wall-clock ms for the upstream request
- * @param {number|null} [entry.input_tokens]       - prompt/input token count from provider
- * @param {number|null} [entry.output_tokens]      - completion/output token count from provider
- * @param {number|null} [entry.estimated_cost_usd] - estimated USD cost (null when pricing unknown)
+ * @param {number}  entry.status                         - HTTP status returned to client
+ * @param {number}  entry.latency_ms                     - wall-clock ms for the upstream request
+ * @param {number|null} [entry.input_tokens]             - prompt/input token count from provider
+ * @param {number|null} [entry.output_tokens]            - completion/output token count from provider
+ * @param {number|null} [entry.estimated_cost_usd]       - estimated USD cost (null when pricing unknown)
+ * @param {string}  [entry.user_agent]                   - User-Agent header from the relay client
  */
 function logRequest({ user_id, app_id, provider, model, status, latency_ms,
-                      input_tokens = null, output_tokens = null, estimated_cost_usd = null }) {
+                      input_tokens = null, output_tokens = null, estimated_cost_usd = null,
+                      user_agent = null }) {
+  // Truncate user_agent to 512 chars to avoid unbounded storage.
+  const ua = user_agent ? String(user_agent).slice(0, 512) : null;
   db.prepare(
-    'INSERT INTO request_logs (id, user_id, app_id, provider, model, status, latency_ms, created_at, input_tokens, output_tokens, estimated_cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO request_logs (id, user_id, app_id, provider, model, status, latency_ms, created_at, input_tokens, output_tokens, estimated_cost_usd, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(uuidv4(), user_id, app_id, provider, model || null, status, latency_ms, Date.now(),
-        input_tokens, output_tokens, estimated_cost_usd);
+        input_tokens, output_tokens, estimated_cost_usd, ua);
 }
 
 /**
@@ -705,6 +718,12 @@ function getStatsForUser(userId) {
      FROM request_logs WHERE user_id = ?`
   ).get(userId);
 
+  const topUserAgents = db.prepare(
+    `SELECT user_agent, COUNT(*) AS total FROM request_logs
+     WHERE user_id = ? AND user_agent IS NOT NULL
+     GROUP BY user_agent ORDER BY total DESC LIMIT 10`
+  ).all(userId).map(r => ({ user_agent: r.user_agent, total: r.total }));
+
   const lastRow = db.prepare('SELECT created_at FROM request_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(userId);
 
   return {
@@ -718,6 +737,7 @@ function getStatsForUser(userId) {
     total_input_tokens:  costRow.input_tokens  || 0,
     total_output_tokens: costRow.output_tokens || 0,
     estimated_cost_usd:  costRow.estimated_cost_usd != null ? +costRow.estimated_cost_usd.toFixed(8) : null,
+    top_user_agents: topUserAgents,
     last_request: lastRow ? new Date(lastRow.created_at).toISOString() : null,
   };
 }
@@ -773,6 +793,12 @@ function getStatsForApp(appId) {
      FROM request_logs WHERE app_id = ?`
   ).get(appId);
 
+  const topUserAgents = db.prepare(
+    `SELECT user_agent, COUNT(*) AS total FROM request_logs
+     WHERE app_id = ? AND user_agent IS NOT NULL
+     GROUP BY user_agent ORDER BY total DESC LIMIT 10`
+  ).all(appId).map(r => ({ user_agent: r.user_agent, total: r.total }));
+
   return {
     app_id: appId,
     user_count: userCount,
@@ -786,6 +812,7 @@ function getStatsForApp(appId) {
     total_input_tokens:  costRow.input_tokens  || 0,
     total_output_tokens: costRow.output_tokens || 0,
     estimated_cost_usd:  costRow.estimated_cost_usd != null ? +costRow.estimated_cost_usd.toFixed(8) : null,
+    top_user_agents: topUserAgents,
   };
 }
 
