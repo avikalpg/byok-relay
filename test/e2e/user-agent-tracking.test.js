@@ -192,13 +192,16 @@ describe('User-Agent tracking in request_logs and GET /stats', () => {
 
   it('User-Agent longer than 512 chars is truncated in stats (not stored beyond 512)', async () => {
     const longUA = 'X'.repeat(600) + ' byok-relay-client';
-    await relayCall(longUA);
+    const relayRes = await relayCall(longUA);
+    assert.ok(relayRes.status >= 200 && relayRes.status < 300, `relay call failed with ${relayRes.status}`);
 
     const statsRes = await req('GET', `${relayBase}/stats`, {
       headers: { 'x-relay-token': token },
     });
     assert.equal(statsRes.status, 200);
     const { top_user_agents } = statsRes.body;
+    const stored = top_user_agents.find(e => e.user_agent === longUA.slice(0, 512));
+    assert.ok(stored, 'expected the truncated User-Agent in top_user_agents');
     // The stored entry should be max 512 chars
     for (const e of top_user_agents) {
       assert.ok(e.user_agent.length <= 512, `UA stored at ${e.user_agent.length} chars exceeds 512`);

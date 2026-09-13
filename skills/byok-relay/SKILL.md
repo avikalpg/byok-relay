@@ -686,10 +686,10 @@ Run this before shipping the integration. If health check fails → relay URL is
 
 The relay logs the `User-Agent` header from every relay call and surfaces it in `GET /stats` under `top_user_agents`. This lets operators see which integrations (agents, SDKs, custom apps) are driving usage.
 
-**When building an integration with byok-relay, set a descriptive `User-Agent` header** on all relay requests so the operator can identify your integration in the stats dashboard:
+**For server-side integrations, set a descriptive `User-Agent` header** on all relay requests so the operator can identify your integration in the stats dashboard. Browser Fetch cannot set a custom `User-Agent`, so browser-only clients cannot produce the documented `byok-relay-client` suffix:
 
 ```javascript
-// Good: include your app/framework/version so it appears in stats
+// Server-side only: include your app/framework/version so it appears in stats
 const UA = 'MyApp/1.0 byok-relay-client';
 
 await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
