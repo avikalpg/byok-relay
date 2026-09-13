@@ -61,7 +61,10 @@ db.exec(`
     model TEXT,
     status INTEGER NOT NULL,
     latency_ms REAL NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    estimated_cost_usd REAL
   );
 
   CREATE INDEX IF NOT EXISTS idx_request_logs_user ON request_logs(user_id);
@@ -181,6 +184,22 @@ function _migrateAddExpiresAt() {
 }
 
 _migrateAddExpiresAt();
+
+// ── Migration: add token-count and cost columns to request_logs ─────────────
+function _migrateAddCostTracking() {
+  const cols = db.pragma('table_info(request_logs)').map(c => c.name);
+  if (!cols.includes('input_tokens')) {
+    db.exec('ALTER TABLE request_logs ADD COLUMN input_tokens INTEGER');
+  }
+  if (!cols.includes('output_tokens')) {
+    db.exec('ALTER TABLE request_logs ADD COLUMN output_tokens INTEGER');
+  }
+  if (!cols.includes('estimated_cost_usd')) {
+    db.exec('ALTER TABLE request_logs ADD COLUMN estimated_cost_usd REAL');
+  }
+}
+
+_migrateAddCostTracking();
 
 // Create the token_hash index AFTER migration so it works on both
 // fresh installs (table was just created with token_hash) and legacy
@@ -613,13 +632,18 @@ function getCredentialHealthForApp(appId) {
  * @param {string}  entry.app_id
  * @param {string}  entry.provider
  * @param {string}  [entry.model]
- * @param {number}  entry.status     - HTTP status returned to client
- * @param {number}  entry.latency_ms - wall-clock ms for the upstream request
+ * @param {number}  entry.status           - HTTP status returned to client
+ * @param {number}  entry.latency_ms       - wall-clock ms for the upstream request
+ * @param {number|null} [entry.input_tokens]       - prompt/input token count from provider
+ * @param {number|null} [entry.output_tokens]      - completion/output token count from provider
+ * @param {number|null} [entry.estimated_cost_usd] - estimated USD cost (null when pricing unknown)
  */
-function logRequest({ user_id, app_id, provider, model, status, latency_ms }) {
+function logRequest({ user_id, app_id, provider, model, status, latency_ms,
+                      input_tokens = null, output_tokens = null, estimated_cost_usd = null }) {
   db.prepare(
-    'INSERT INTO request_logs (id, user_id, app_id, provider, model, status, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(uuidv4(), user_id, app_id, provider, model || null, status, latency_ms, Date.now());
+    'INSERT INTO request_logs (id, user_id, app_id, provider, model, status, latency_ms, created_at, input_tokens, output_tokens, estimated_cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(uuidv4(), user_id, app_id, provider, model || null, status, latency_ms, Date.now(),
+        input_tokens, output_tokens, estimated_cost_usd);
 }
 
 /**
@@ -658,10 +682,28 @@ function getStatsForUser(userId) {
   }
 
   const topModels = db.prepare(
-    `SELECT model, COUNT(*) AS total FROM request_logs
+    `SELECT model,
+            COUNT(*) AS total,
+            SUM(COALESCE(input_tokens, 0))  AS input_tokens,
+            SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+            SUM(estimated_cost_usd)          AS estimated_cost_usd
+     FROM request_logs
      WHERE user_id = ? AND model IS NOT NULL
      GROUP BY model ORDER BY total DESC LIMIT 10`
-  ).all(userId).map(r => ({ model: r.model, total: r.total }));
+  ).all(userId).map(r => ({
+    model: r.model,
+    total: r.total,
+    input_tokens: r.input_tokens,
+    output_tokens: r.output_tokens,
+    estimated_cost_usd: r.estimated_cost_usd != null ? +r.estimated_cost_usd.toFixed(8) : null,
+  }));
+
+  const costRow = db.prepare(
+    `SELECT SUM(COALESCE(input_tokens, 0))  AS input_tokens,
+            SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+            SUM(estimated_cost_usd)          AS estimated_cost_usd
+     FROM request_logs WHERE user_id = ?`
+  ).get(userId);
 
   const lastRow = db.prepare('SELECT created_at FROM request_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(userId);
 
@@ -673,6 +715,9 @@ function getStatsForUser(userId) {
     error_rate: total > 0 ? +(errCount / total).toFixed(4) : 0,
     providers,
     top_models: topModels,
+    total_input_tokens:  costRow.input_tokens  || 0,
+    total_output_tokens: costRow.output_tokens || 0,
+    estimated_cost_usd:  costRow.estimated_cost_usd != null ? +costRow.estimated_cost_usd.toFixed(8) : null,
     last_request: lastRow ? new Date(lastRow.created_at).toISOString() : null,
   };
 }
@@ -705,10 +750,28 @@ function getStatsForApp(appId) {
   }
 
   const topModels = db.prepare(
-    `SELECT model, COUNT(*) AS total FROM request_logs
+    `SELECT model,
+            COUNT(*) AS total,
+            SUM(COALESCE(input_tokens, 0))  AS input_tokens,
+            SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+            SUM(estimated_cost_usd)          AS estimated_cost_usd
+     FROM request_logs
      WHERE app_id = ? AND model IS NOT NULL
      GROUP BY model ORDER BY total DESC LIMIT 10`
-  ).all(appId).map(r => ({ model: r.model, total: r.total }));
+  ).all(appId).map(r => ({
+    model: r.model,
+    total: r.total,
+    input_tokens: r.input_tokens,
+    output_tokens: r.output_tokens,
+    estimated_cost_usd: r.estimated_cost_usd != null ? +r.estimated_cost_usd.toFixed(8) : null,
+  }));
+
+  const costRow = db.prepare(
+    `SELECT SUM(COALESCE(input_tokens, 0))  AS input_tokens,
+            SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+            SUM(estimated_cost_usd)          AS estimated_cost_usd
+     FROM request_logs WHERE app_id = ?`
+  ).get(appId);
 
   return {
     app_id: appId,
@@ -720,6 +783,9 @@ function getStatsForApp(appId) {
     error_rate: total > 0 ? +(errCount / total).toFixed(4) : 0,
     providers,
     top_models: topModels,
+    total_input_tokens:  costRow.input_tokens  || 0,
+    total_output_tokens: costRow.output_tokens || 0,
+    estimated_cost_usd:  costRow.estimated_cost_usd != null ? +costRow.estimated_cost_usd.toFixed(8) : null,
   };
 }
 
