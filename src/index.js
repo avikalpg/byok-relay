@@ -342,6 +342,7 @@ function logRelayRequest(req, details) {
       model,
       status,
       latency_ms,
+      user_agent: req.headers['user-agent'],
     });
   } catch (logErr) {
     // Never let logging failure affect the response
@@ -375,6 +376,7 @@ function logRelayError(req, details) {
       model,
       status: 502,
       latency_ms,
+      user_agent: req.headers['user-agent'],
     });
   } catch (_) {}
 

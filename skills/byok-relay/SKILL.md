@@ -682,6 +682,29 @@ smokeTest().catch(console.error);
 
 Run this before shipping the integration. If health check fails → relay URL is wrong. If token is missing → check `app_id` and CORS. If a relay call errors → verify the key was stored correctly.
 
+## Integration telemetry — recommended User-Agent header
+
+The relay logs the `User-Agent` header from every relay call and surfaces it in `GET /stats` under `top_user_agents`. This lets operators see which integrations (agents, SDKs, custom apps) are driving usage.
+
+**When building an integration with byok-relay, set a descriptive `User-Agent` header** on all relay requests so the operator can identify your integration in the stats dashboard:
+
+```javascript
+// Good: include your app/framework/version so it appears in stats
+const UA = 'MyApp/1.0 byok-relay-client';
+
+await fetch(`${RELAY_URL}/relay/openai/v1/chat/completions`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'x-relay-token': token,
+    'User-Agent': UA,   // <-- add this
+  },
+  body: JSON.stringify({ model: 'gpt-4o-mini', messages }),
+});
+```
+
+Recommended format: `<AppName>/<version> byok-relay-client` (e.g. `MyChatApp/2.3 byok-relay-client`, `claude-code byok-relay-skill/1.0`). The `byok-relay-client` suffix makes it easy to filter agent-driven traffic from browser/curl requests in aggregate stats.
+
 ## Supported providers
 
 | Provider | Relay path | Notes |

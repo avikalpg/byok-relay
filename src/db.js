@@ -61,7 +61,8 @@ db.exec(`
     model TEXT,
     status INTEGER NOT NULL,
     latency_ms REAL NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    user_agent TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_request_logs_user ON request_logs(user_id);
@@ -181,6 +182,16 @@ function _migrateAddExpiresAt() {
 }
 
 _migrateAddExpiresAt();
+
+// ── Migration: add user_agent column to request_logs ─────────────────────────
+function _migrateAddUserAgent() {
+  const cols = db.pragma('table_info(request_logs)').map(c => c.name);
+  if (!cols.includes('user_agent')) {
+    db.exec('ALTER TABLE request_logs ADD COLUMN user_agent TEXT');
+  }
+}
+
+_migrateAddUserAgent();
 
 // Create the token_hash index AFTER migration so it works on both
 // fresh installs (table was just created with token_hash) and legacy
@@ -613,13 +624,16 @@ function getCredentialHealthForApp(appId) {
  * @param {string}  entry.app_id
  * @param {string}  entry.provider
  * @param {string}  [entry.model]
- * @param {number}  entry.status     - HTTP status returned to client
- * @param {number}  entry.latency_ms - wall-clock ms for the upstream request
+ * @param {number}  entry.status      - HTTP status returned to client
+ * @param {number}  entry.latency_ms  - wall-clock ms for the upstream request
+ * @param {string}  [entry.user_agent] - User-Agent header from the relay client
  */
-function logRequest({ user_id, app_id, provider, model, status, latency_ms }) {
+function logRequest({ user_id, app_id, provider, model, status, latency_ms, user_agent }) {
+  // Truncate user_agent to 512 chars to avoid unbounded storage.
+  const ua = user_agent ? String(user_agent).slice(0, 512) : null;
   db.prepare(
-    'INSERT INTO request_logs (id, user_id, app_id, provider, model, status, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(uuidv4(), user_id, app_id, provider, model || null, status, latency_ms, Date.now());
+    'INSERT INTO request_logs (id, user_id, app_id, provider, model, status, latency_ms, created_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(uuidv4(), user_id, app_id, provider, model || null, status, latency_ms, Date.now(), ua);
 }
 
 /**
@@ -663,6 +677,12 @@ function getStatsForUser(userId) {
      GROUP BY model ORDER BY total DESC LIMIT 10`
   ).all(userId).map(r => ({ model: r.model, total: r.total }));
 
+  const topUserAgents = db.prepare(
+    `SELECT user_agent, COUNT(*) AS total FROM request_logs
+     WHERE user_id = ? AND user_agent IS NOT NULL
+     GROUP BY user_agent ORDER BY total DESC LIMIT 10`
+  ).all(userId).map(r => ({ user_agent: r.user_agent, total: r.total }));
+
   const lastRow = db.prepare('SELECT created_at FROM request_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(userId);
 
   return {
@@ -673,6 +693,7 @@ function getStatsForUser(userId) {
     error_rate: total > 0 ? +(errCount / total).toFixed(4) : 0,
     providers,
     top_models: topModels,
+    top_user_agents: topUserAgents,
     last_request: lastRow ? new Date(lastRow.created_at).toISOString() : null,
   };
 }
@@ -710,6 +731,12 @@ function getStatsForApp(appId) {
      GROUP BY model ORDER BY total DESC LIMIT 10`
   ).all(appId).map(r => ({ model: r.model, total: r.total }));
 
+  const topUserAgents = db.prepare(
+    `SELECT user_agent, COUNT(*) AS total FROM request_logs
+     WHERE app_id = ? AND user_agent IS NOT NULL
+     GROUP BY user_agent ORDER BY total DESC LIMIT 10`
+  ).all(appId).map(r => ({ user_agent: r.user_agent, total: r.total }));
+
   return {
     app_id: appId,
     user_count: userCount,
@@ -720,6 +747,7 @@ function getStatsForApp(appId) {
     error_rate: total > 0 ? +(errCount / total).toFixed(4) : 0,
     providers,
     top_models: topModels,
+    top_user_agents: topUserAgents,
   };
 }
 
