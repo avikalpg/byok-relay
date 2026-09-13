@@ -75,6 +75,16 @@ describe('price-catalog — lookupCost', () => {
     assert.equal(pricing_known, true);
   });
 
+  it('returns unknown pricing for OpenRouter models before bare-name lookup', () => {
+    const result = lookupCost('openrouter', 'openrouter/gpt-4o-mini', 100, 50);
+    assert.deepEqual(result, { estimated_cost_usd: null, pricing_known: false });
+  });
+
+  it('returns unknown pricing for Groq llama-3.1-8b-instant', () => {
+    const result = lookupCost('groq', 'llama-3.1-8b-instant', 100, 50);
+    assert.deepEqual(result, { estimated_cost_usd: null, pricing_known: false });
+  });
+
   it('all CATALOG entries have positive per-token values (no silent negatives)', () => {
     for (const [key, p] of Object.entries(CATALOG)) {
       assert.ok(p.input_per_mtok  >= 0, `${key}: input_per_mtok must be >= 0`);

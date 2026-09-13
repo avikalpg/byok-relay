@@ -72,7 +72,6 @@ const CATALOG = {
 
   // ── Groq ─────────────────────────────────────────────────────────────────
   'groq/llama-3.1-70b-versatile':  { input_per_mtok: 0.59,  output_per_mtok: 0.79   },
-  'groq/llama-3.1-8b-instant':     { input_per_mtok: 0.05,  output_per_mtok: 0.08   },
   'groq/llama-3.2-90b-vision-preview': { input_per_mtok: 0.90, output_per_mtok: 0.90 },
   'groq/llama-3.2-11b-vision-preview': { input_per_mtok: 0.18, output_per_mtok: 0.18 },
   'groq/llama-3.2-3b-preview':     { input_per_mtok: 0.06,  output_per_mtok: 0.06   },
@@ -126,6 +125,9 @@ const BARE_MODEL_INDEX = (() => {
  */
 function lookupCost(provider, model, inputTokens, outputTokens) {
   if (!model || (inputTokens == null && outputTokens == null)) {
+    return { estimated_cost_usd: null, pricing_known: false };
+  }
+  if (provider === 'openrouter') {
     return { estimated_cost_usd: null, pricing_known: false };
   }
 
