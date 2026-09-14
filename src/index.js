@@ -24,10 +24,15 @@ const {
   getCredentialHealthForUser,
   getCredentialHealthForApp,
   dbHealthCheck,
+  setBudget,
+  getBudget,
+  checkBudget,
+  deleteBudget,
 } = require('./db');
 const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS, isRetryableStatus, parseFallbackCandidates } = require('./routing');
 const { lookupCost, extractTokenCounts } = require('./price-catalog');
+const { isPassthrough, toProviderRequest, fromProviderResponse, createProviderStreamTransform } = require('./normalize');
 const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -888,7 +893,12 @@ app.get('/keys', requireToken, (req, res) => {
  */
 app.get('/stats', requireToken, (req, res) => {
   const stats = getStatsForUser(req.user.id);
-  res.json(stats);
+  const budget = getBudget(req.user.id);
+  const budgetStatus = checkBudget(req.user.id);
+  res.json({
+    ...stats,
+    budget: budget ? { ...budget, status: budgetStatus } : null,
+  });
 });
 
 /**
@@ -905,6 +915,82 @@ app.get('/stats/:app_id', requireAppSecret, (req, res) => {
   }
   const stats = getStatsForApp(req.params.app_id);
   res.json(stats);
+});
+
+/**
+ * GET /users/budget
+ * Return the budget limits configured for the authenticated user.
+ * Headers: x-relay-token
+ * Response: { budget: { daily_limit_usd, weekly_limit_usd, monthly_limit_usd, lifetime_limit_usd, warn_threshold, updated_at } }
+ *           or { budget: null } if no budget is set.
+ */
+app.get('/users/budget', requireToken, (req, res) => {
+  const budget = getBudget(req.user.id);
+  res.json({ budget });
+});
+
+/**
+ * PUT /users/budget
+ * Set cost budget limits for the authenticated user.
+ * All fields are optional; omit a field to leave it unchanged.
+ * Pass null for any limit field to clear that limit.
+ * Headers: x-relay-token
+ * Body: { daily_limit_usd?, weekly_limit_usd?, monthly_limit_usd?, lifetime_limit_usd?, warn_threshold? }
+ * Response: { budget: { daily_limit_usd, weekly_limit_usd, monthly_limit_usd, lifetime_limit_usd, warn_threshold, updated_at } }
+ */
+app.put('/users/budget', requireToken, (req, res) => {
+  const { daily_limit_usd, weekly_limit_usd, monthly_limit_usd, lifetime_limit_usd, warn_threshold } = req.body || {};
+
+  const numOrNull = (val, field) => {
+    if (val === undefined) return undefined;
+    if (val === null) return null;
+    if (typeof val !== 'number' || val < 0 || !isFinite(val)) {
+      return { _error: `${field} must be a non-negative number or null` };
+    }
+    return val;
+  };
+
+  const daily    = numOrNull(daily_limit_usd,    'daily_limit_usd');
+  const weekly   = numOrNull(weekly_limit_usd,   'weekly_limit_usd');
+  const monthly  = numOrNull(monthly_limit_usd,  'monthly_limit_usd');
+  const lifetime = numOrNull(lifetime_limit_usd, 'lifetime_limit_usd');
+  const warnThr  = numOrNull(warn_threshold,      'warn_threshold');
+
+  for (const v of [daily, weekly, monthly, lifetime, warnThr]) {
+    if (v && typeof v === 'object' && v._error) return res.status(400).json({ error: v._error });
+  }
+  if (warnThr !== undefined && warnThr !== null && (warnThr < 0 || warnThr > 1)) {
+    return res.status(400).json({ error: 'warn_threshold must be between 0 and 1' });
+  }
+
+  const opts = {};
+  if (daily    !== undefined) opts.daily_limit_usd    = daily;
+  if (weekly   !== undefined) opts.weekly_limit_usd   = weekly;
+  if (monthly  !== undefined) opts.monthly_limit_usd  = monthly;
+  if (lifetime !== undefined) opts.lifetime_limit_usd = lifetime;
+  if (warnThr  !== undefined) opts.warn_threshold     = warnThr;
+
+  const row = setBudget(req.user.id, opts);
+  res.json({
+    budget: {
+      daily_limit_usd:    row.daily_limit_usd,
+      weekly_limit_usd:   row.weekly_limit_usd,
+      monthly_limit_usd:  row.monthly_limit_usd,
+      lifetime_limit_usd: row.lifetime_limit_usd,
+      warn_threshold:     row.warn_threshold,
+      updated_at:         new Date(row.updated_at).toISOString(),
+    },
+  });
+});
+
+/**
+ * DELETE /users/budget
+ * Remove all budget limits for the authenticated user.
+ * Headers: x-relay-token
+ */
+app.delete('/users/budget', requireToken, (req, res) => {
+  deleteBudget(req.user.id);
+  res.json({ ok: true });
 });
 
 /**
@@ -1049,6 +1135,21 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
       error: `Model "${model}" is not permitted on this relay.`,
       allowed_models: ALLOWED_MODELS_RAW,
     });
+  }
+
+
+  // ── Budget enforcement ────────────────────────────────────────────────────
+  const budgetCheck = checkBudget(req.user.id);
+  if (!budgetCheck.ok) {
+    return res.status(402).json({
+      error: budgetCheck.reason,
+      limit_type: budgetCheck.limit_type,
+      limit_usd: budgetCheck.limit_usd,
+      used_usd: budgetCheck.used_usd,
+    });
+  }
+  if (budgetCheck.warn) {
+    res.set('X-Byok-Budget-Warning', budgetCheck.reason);
   }
 
   // Pass through provider-specific and relay headers (shared across all candidates)
@@ -1227,6 +1328,216 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
     preObtainedResponse: winnerResponse,
     relayStartOverride: relayStart,
   });
+});
+
+/**
+ * POST /relay/v1/chat/completions
+ * Normalized chat completions endpoint — accepts OpenAI Chat Completions format
+ * and returns OpenAI format regardless of the underlying provider.
+ *
+ * This endpoint automatically translates the request to the provider's native
+ * format and the response back to OpenAI format, so callers can use a single
+ * integration for any supported provider.
+ *
+ * Pass-through providers (openai, groq, mistral, openrouter, openai-compatible)
+ * receive the request unchanged and their response is forwarded as-is.
+ * Translating providers (anthropic, google) get a full request + response
+ * translation including SSE streaming.
+ *
+ * Streaming: pass `stream: true` in the body; SSE is returned in OpenAI
+ * chunk format regardless of provider.
+ *
+ * Required header: x-relay-token
+ * Body: OpenAI Chat Completions format { model, messages, ... }
+ */
+app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, res) => {
+  const body = req.body || {};
+  const { model, stream: streamingRequested } = body;
+
+  if (!model) {
+    return res.status(400).json({
+      error:
+        'model field is required. Use "provider/model-name" (e.g. "anthropic/claude-3-5-haiku") or a recognised model name (e.g. "gpt-4o").',
+    });
+  }
+
+  const streaming = streamingRequested === true;
+  const route = resolveModelRoute(model, streaming);
+  if (!route) {
+    return res.status(400).json({
+      error: `Cannot route model "${model}". Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}.`,
+    });
+  }
+
+  const { provider, path: forwardPath, modelName } = route;
+
+  if (!isModelAllowed(model)) {
+    return res.status(403).json({
+      error: `Model "${model}" is not permitted on this relay.`,
+      allowed_models: ALLOWED_MODELS_RAW,
+    });
+  }
+
+
+  // ── Budget enforcement ────────────────────────────────────────────────────
+  const budgetCheck = checkBudget(req.user.id);
+  if (!budgetCheck.ok) {
+    return res.status(402).json({
+      error: budgetCheck.reason,
+      limit_type: budgetCheck.limit_type,
+      limit_usd: budgetCheck.limit_usd,
+      used_usd: budgetCheck.used_usd,
+    });
+  }
+  if (budgetCheck.warn) {
+    res.set('X-Byok-Budget-Warning', budgetCheck.reason);
+  }
+
+  const apiKey = getDecryptedKey(req.user.id, provider);
+  if (!apiKey) {
+    return res.status(400).json({
+      error: `No API key stored for provider "${provider}". POST /keys/${provider} first.`,
+    });
+  }
+
+  // Translate the OpenAI-format request body to the provider's native format.
+  // Strip relay-specific fields before translating.
+  const oaiBody = { ...body, model: modelName };
+  const providerBody = toProviderRequest(oaiBody, provider);
+
+  // Extra passthrough headers (e.g. anthropic-version)
+  const extraHeaders = {};
+  const passthroughHeaders = [
+    'anthropic-version',
+    'x-relay-base-url',
+    'x-relay-referer',
+    'x-title',
+    'http-referer',
+    'x-relay-e2e-base-url-token',
+  ];
+  for (const h of passthroughHeaders) {
+    if (req.headers[h]) extraHeaders[h] = req.headers[h];
+  }
+
+  const relayStart = Date.now();
+  const upstreamAbortController = new AbortController();
+  let providerResponse;
+
+  res.on('close', () => {
+    if (providerResponse?.body && !providerResponse.body.destroyed) {
+      providerResponse.body.destroy();
+    }
+  });
+
+  try {
+    const abortTimeout = setTimeout(() => upstreamAbortController.abort(), 30_000);
+    try {
+      providerResponse = await forwardRequest(
+        provider,
+        forwardPath,
+        'POST',
+        providerBody,
+        apiKey,
+        extraHeaders,
+        { signal: upstreamAbortController.signal },
+      );
+    } finally {
+      clearTimeout(abortTimeout);
+    }
+
+    const contentType = providerResponse.headers.get('content-type') || '';
+    const isStream =
+      contentType.toLowerCase().includes('text/event-stream') ||
+      (streaming && providerResponse.ok && !contentType.includes('application/json'));
+
+    if (isStream) {
+      res.status(providerResponse.status);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      // Add normalization header so clients know translation occurred
+      if (!isPassthrough(provider)) {
+        res.setHeader('X-Byok-Relay-Normalized', provider);
+      }
+
+      const transformer = createProviderStreamTransform(provider, model);
+      if (transformer) {
+        // Translating provider — pipe through the transform
+        providerResponse.body.on('error', (err) => {
+          req.log.warn({ err }, 'normalized stream error');
+          if (!res.writableEnded) {
+            res.write('data: {"error":"Stream interrupted"\n\n');
+            res.end();
+          }
+        });
+        transformer.on('error', (err) => {
+          req.log.warn({ err }, 'normalize transform error');
+          if (!res.writableEnded) res.end();
+        });
+        providerResponse.body.on('end', () => {
+          const latency_ms = Date.now() - relayStart;
+          logRelayRequest(req, { provider, model, status: providerResponse.status, latency_ms, streaming: true });
+        });
+        providerResponse.body.pipe(transformer).pipe(res);
+      } else {
+        // Pass-through provider — forward SSE directly
+        providerResponse.body.on('end', () => {
+          const latency_ms = Date.now() - relayStart;
+          logRelayRequest(req, { provider, model, status: providerResponse.status, latency_ms, streaming: true });
+        });
+        providerResponse.body.pipe(res);
+      }
+      return;
+    }
+
+    // Non-streaming response
+    let providerJson;
+    if (contentType.includes('application/json')) {
+      providerJson = await providerResponse.json();
+    } else {
+      const text = await providerResponse.text();
+      return res.status(providerResponse.status).send(text);
+    }
+
+    const latency_ms = Date.now() - relayStart;
+
+    if (!providerResponse.ok) {
+      // Forward provider error as-is (already normalized by provider error format)
+      logRelayRequest(req, { provider, model, status: providerResponse.status, latency_ms, streaming: false });
+      return res.status(providerResponse.status).json(providerJson);
+    }
+
+    // Translate response to OpenAI format
+    const oaiResponse = fromProviderResponse(providerJson, provider, model);
+
+    // Extract token counts for logging
+    const { input_tokens, output_tokens } = extractTokenCounts(oaiResponse);
+    const { estimated_cost_usd } = lookupCost(provider, model, input_tokens, output_tokens);
+
+    logRelayRequest(req, {
+      provider,
+      model,
+      status: providerResponse.status,
+      latency_ms,
+      streaming: false,
+      input_tokens,
+      output_tokens,
+      estimated_cost_usd,
+    });
+
+    if (!isPassthrough(provider)) {
+      res.setHeader('X-Byok-Relay-Normalized', provider);
+    }
+    res.status(providerResponse.status).json(oaiResponse);
+  } catch (err) {
+    const latency_ms = Date.now() - relayStart;
+    if (err.name === 'AbortError') {
+      req.log.warn({ provider, model, latency_ms }, 'normalized relay timeout');
+      return res.status(504).json({ error: 'Request to AI provider timed out.' });
+    }
+    req.log.error({ err, provider, model, latency_ms }, 'normalized relay error');
+    return res.status(502).json({ error: 'Failed to reach AI provider.' });
+  }
 });
 
 /**

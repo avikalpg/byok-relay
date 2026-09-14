@@ -571,25 +571,22 @@ async function forwardRequest(provider, path, method, body, apiKey, extraHeaders
   // For openai-compatible, the base URL comes from the request header.
   // Validate and normalise it to prevent SSRF attacks.
   if (provider === 'openai-compatible') {
-    const rawBaseUrl = safeExtraHeaders['x-relay-base-url'];
-    if (!rawBaseUrl) {
-      throw new RelayUrlValidationError('x-relay-base-url header is required for openai-compatible provider');
-    }
-    // validateAndNormaliseBaseUrl throws on any policy violation and returns
-    // url.origin (scheme + host + port), stripping any path the client embedded,
-    // plus a custom agent pinned to the DNS result that passed validation.
-    const validatedBaseUrl = await validateAndNormaliseBaseUrl(rawBaseUrl);
-    baseUrl = validatedBaseUrl.origin;
-    fetchOptions.agent = validatedBaseUrl.agent;
-    fetchOptions.redirect = 'manual';
-
-    // E2E tests need a loopback HTTPS mock provider, but production requests
-    // must reject hostnames such as localtest.me that resolve to loopback. Keep
-    // the public header validation path intact, then swap in the mock base URL
-    // only when the test runner supplies a one-off process-local token.
     if (e2eBaseUrl) {
+      // E2E tests supply the base URL via env/token instead of x-relay-base-url.
+      // Skip SSRF validation for loopback mock servers used in test suites.
       baseUrl = e2eBaseUrl;
-      delete fetchOptions.agent;
+    } else {
+      const rawBaseUrl = safeExtraHeaders['x-relay-base-url'];
+      if (!rawBaseUrl) {
+        throw new RelayUrlValidationError('x-relay-base-url header is required for openai-compatible provider');
+      }
+      // validateAndNormaliseBaseUrl throws on any policy violation and returns
+      // url.origin (scheme + host + port), stripping any path the client embedded,
+      // plus a custom agent pinned to the DNS result that passed validation.
+      const validatedBaseUrl = await validateAndNormaliseBaseUrl(rawBaseUrl);
+      baseUrl = validatedBaseUrl.origin;
+      fetchOptions.agent = validatedBaseUrl.agent;
+      fetchOptions.redirect = 'manual';
     }
   } else if (e2eBaseUrl) {
     // E2E tests may route built-in providers to the local mock server so

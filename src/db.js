@@ -86,6 +86,16 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_credential_health_user ON credential_health(user_id);
+
+  CREATE TABLE IF NOT EXISTS user_budgets (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    daily_limit_usd REAL,
+    weekly_limit_usd REAL,
+    monthly_limit_usd REAL,
+    lifetime_limit_usd REAL,
+    warn_threshold REAL NOT NULL DEFAULT 0.8,
+    updated_at INTEGER NOT NULL
+  );
 `);
 // NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
 // On a legacy DB the users table still has 'token', not 'token_hash', so
@@ -209,6 +219,26 @@ function _migrateAddUserAgent() {
 
 _migrateAddCostTracking();
 _migrateAddUserAgent();
+
+// ── Migration: create user_budgets table on existing DBs ─────────────────────
+function _migrateAddUserBudgets() {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='user_budgets'").get();
+  if (!tables) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_budgets (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        daily_limit_usd REAL,
+        weekly_limit_usd REAL,
+        monthly_limit_usd REAL,
+        lifetime_limit_usd REAL,
+        warn_threshold REAL NOT NULL DEFAULT 0.8,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+}
+
+_migrateAddUserBudgets();
 
 // Create the token_hash index AFTER migration so it works on both
 // fresh installs (table was just created with token_hash) and legacy
@@ -821,6 +851,151 @@ function getStatsForApp(appId) {
  * Runs a fast read-only query against both tables and returns basic counts.
  * Throws if the database is inaccessible or corrupt.
  */
+// ── Budget management ──────────────────────────────────────────────────────
+
+/**
+ * Set or update budget limits for a user.
+ * Pass null for any field to clear that limit.
+ * @param {string} userId
+ * @param {{ daily_limit_usd?, weekly_limit_usd?, monthly_limit_usd?, lifetime_limit_usd?, warn_threshold? }} opts
+ */
+function setBudget(userId, opts = {}) {
+  const now = Date.now();
+  const { daily_limit_usd = undefined, weekly_limit_usd = undefined,
+          monthly_limit_usd = undefined, lifetime_limit_usd = undefined,
+          warn_threshold = undefined } = opts;
+
+  // Upsert: create or replace the row
+  const existing = db.prepare('SELECT * FROM user_budgets WHERE user_id = ?').get(userId);
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO user_budgets (user_id, daily_limit_usd, weekly_limit_usd, monthly_limit_usd, lifetime_limit_usd, warn_threshold, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      userId,
+      daily_limit_usd !== undefined ? daily_limit_usd : null,
+      weekly_limit_usd !== undefined ? weekly_limit_usd : null,
+      monthly_limit_usd !== undefined ? monthly_limit_usd : null,
+      lifetime_limit_usd !== undefined ? lifetime_limit_usd : null,
+      warn_threshold !== undefined ? warn_threshold : 0.8,
+      now,
+    );
+  } else {
+    const updates = {};
+    if (daily_limit_usd !== undefined)   updates.daily_limit_usd   = daily_limit_usd;
+    if (weekly_limit_usd !== undefined)  updates.weekly_limit_usd  = weekly_limit_usd;
+    if (monthly_limit_usd !== undefined) updates.monthly_limit_usd = monthly_limit_usd;
+    if (lifetime_limit_usd !== undefined) updates.lifetime_limit_usd = lifetime_limit_usd;
+    if (warn_threshold !== undefined)    updates.warn_threshold    = warn_threshold;
+    updates.updated_at = now;
+
+    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+    const values = [...Object.values(updates), userId];
+    db.prepare(`UPDATE user_budgets SET ${setClauses} WHERE user_id = ?`).run(...values);
+  }
+
+  return db.prepare('SELECT * FROM user_budgets WHERE user_id = ?').get(userId);
+}
+
+/**
+ * Get budget limits for a user. Returns null if no budget is configured.
+ * @param {string} userId
+ * @returns {{ daily_limit_usd, weekly_limit_usd, monthly_limit_usd, lifetime_limit_usd, warn_threshold } | null}
+ */
+function getBudget(userId) {
+  const row = db.prepare('SELECT * FROM user_budgets WHERE user_id = ?').get(userId);
+  if (!row) return null;
+  return {
+    daily_limit_usd:    row.daily_limit_usd,
+    weekly_limit_usd:   row.weekly_limit_usd,
+    monthly_limit_usd:  row.monthly_limit_usd,
+    lifetime_limit_usd: row.lifetime_limit_usd,
+    warn_threshold:     row.warn_threshold,
+    updated_at:         new Date(row.updated_at).toISOString(),
+  };
+}
+
+/**
+ * Check whether a user has exceeded any configured cost budget.
+ * Returns { ok: true } if no limits are set or none are exceeded.
+ * Returns { ok: false, reason, limit_type, limit_usd, used_usd, warn } if over or near limit.
+ *
+ * Note: only limits for windows where at least some pricing is known are enforced.
+ * If estimated_cost_usd is null for every request in a window, that window is skipped.
+ *
+ * @param {string} userId
+ * @returns {{ ok: boolean, reason?: string, limit_type?: string, limit_usd?: number, used_usd?: number, warn?: boolean }}
+ */
+function checkBudget(userId) {
+  const budget = db.prepare('SELECT * FROM user_budgets WHERE user_id = ?').get(userId);
+  if (!budget) return { ok: true };
+
+  const now = Date.now();
+  const msDay   = 24 * 60 * 60 * 1000;
+  const msWeek  = 7  * msDay;
+  const msMonth = 30 * msDay;
+
+  const getUsed = (since) => {
+    const row = db.prepare(
+      `SELECT SUM(estimated_cost_usd) AS total FROM request_logs
+       WHERE user_id = ? AND created_at >= ? AND status >= 200 AND status < 300 AND estimated_cost_usd IS NOT NULL`
+    ).get(userId, since);
+    return row.total || 0;
+  };
+
+  const getLifetimeUsed = () => {
+    const row = db.prepare(
+      `SELECT SUM(estimated_cost_usd) AS total FROM request_logs
+       WHERE user_id = ? AND status >= 200 AND status < 300 AND estimated_cost_usd IS NOT NULL`
+    ).get(userId);
+    return row.total || 0;
+  };
+
+  const threshold = budget.warn_threshold != null ? budget.warn_threshold : 0.8;
+
+  const checks = [
+    { type: 'daily',    limit: budget.daily_limit_usd,    used: () => getUsed(now - msDay) },
+    { type: 'weekly',   limit: budget.weekly_limit_usd,   used: () => getUsed(now - msWeek) },
+    { type: 'monthly',  limit: budget.monthly_limit_usd,  used: () => getUsed(now - msMonth) },
+    { type: 'lifetime', limit: budget.lifetime_limit_usd, used: () => getLifetimeUsed() },
+  ];
+
+  for (const { type, limit, used: getUsedFn } of checks) {
+    if (limit == null) continue;
+    const usedUsd = getUsedFn();
+    if (usedUsd >= limit) {
+      return {
+        ok: false,
+        warn: false,
+        limit_type: type,
+        limit_usd: limit,
+        used_usd: +usedUsd.toFixed(8),
+        reason: `${type} cost budget exceeded: $${usedUsd.toFixed(6)} used of $${limit.toFixed(6)} limit`,
+      };
+    }
+    if (threshold > 0 && usedUsd >= limit * threshold) {
+      return {
+        ok: true,
+        warn: true,
+        limit_type: type,
+        limit_usd: limit,
+        used_usd: +usedUsd.toFixed(8),
+        reason: `${type} cost budget warning: $${usedUsd.toFixed(6)} used of $${limit.toFixed(6)} limit (${Math.round(threshold * 100)}% threshold)`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Delete all budget limits for a user.
+ * @param {string} userId
+ */
+function deleteBudget(userId) {
+  db.prepare('DELETE FROM user_budgets WHERE user_id = ?').run(userId);
+}
+
 function dbHealthCheck() {
   const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
   const keyCount  = db.prepare('SELECT COUNT(*) AS n FROM keys').get().n;
@@ -845,4 +1020,8 @@ module.exports = {
   getCredentialHealthForUser,
   getCredentialHealthForApp,
   dbHealthCheck,
+  setBudget,
+  getBudget,
+  checkBudget,
+  deleteBudget,
 };
