@@ -27,6 +27,7 @@ const {
 } = require('./db');
 const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS, isRetryableStatus, parseFallbackCandidates } = require('./routing');
+const { lookupCost, extractTokenCounts } = require('./price-catalog');
 const { logger, httpLogger } = require('./logger');
 
 // ── Startup validation ──────────────────────────────────────────────────────
@@ -320,7 +321,8 @@ const COMMIT_SHA = process.env.COMMIT_SHA || null;
 const BUILD_TIME = process.env.BUILD_TIME || new Date().toISOString();
 
 function logRelayRequest(req, details) {
-  const { provider, model, status, latency_ms, streaming } = details;
+  const { provider, model, status, latency_ms, streaming,
+          input_tokens = null, output_tokens = null, estimated_cost_usd = null } = details;
   const success = status >= 200 && status < 300;
 
   req.log.info({
@@ -332,6 +334,9 @@ function logRelayRequest(req, details) {
     status,
     latency_ms,
     streaming,
+    input_tokens,
+    output_tokens,
+    estimated_cost_usd,
   }, 'relay');
 
   try {
@@ -342,6 +347,9 @@ function logRelayRequest(req, details) {
       model,
       status,
       latency_ms,
+      input_tokens,
+      output_tokens,
+      estimated_cost_usd,
       user_agent: req.headers['user-agent'],
     });
   } catch (logErr) {
@@ -546,12 +554,23 @@ async function forwardRelayRequest({
       responseBody = await providerResponse.json();
     }
     const latency_ms = Date.now() - relayStart;
+
+    // Extract token counts from JSON response (non-streaming only).
+    // Streaming usage is not available here; those requests log null tokens.
+    let tokenDetails = { input_tokens: null, output_tokens: null, estimated_cost_usd: null };
+    if (typeof responseBody === 'object' && responseBody !== null) {
+      const { input_tokens, output_tokens } = extractTokenCounts(responseBody);
+      const { estimated_cost_usd } = lookupCost(provider, model, input_tokens, output_tokens);
+      tokenDetails = { input_tokens, output_tokens, estimated_cost_usd };
+    }
+
     logRelayRequestOnce({
       provider,
       model,
       status: providerResponse.status,
       latency_ms,
       streaming: false,
+      ...tokenDetails,
     });
 
     if (!contentTypeLower || !contentTypeLower.includes('application/json')) {
