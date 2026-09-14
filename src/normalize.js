@@ -144,9 +144,15 @@ function convertAssistantMessageToAnthropic(msg) {
   const blocks = [];
 
   // Text content
-  if (msg.content) {
-    const text = typeof msg.content === 'string' ? msg.content : msg.content;
-    blocks.push({ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text) });
+  if (msg.content !== undefined && msg.content !== null) {
+    const content = convertContentToAnthropic(msg.content, 'assistant');
+    if (typeof content === 'string') {
+      blocks.push({ type: 'text', text: content });
+    } else if (Array.isArray(content)) {
+      // Preserve each OpenAI content part as its corresponding Anthropic block.
+      // Serializing the whole array as text loses multimodal structure.
+      blocks.push(...content);
+    }
   }
 
   // Tool calls
@@ -342,9 +348,11 @@ class AnthropicToOAIStream extends Transform {
     this._created = Math.floor(Date.now() / 1000);
     this._model = requestedModel;
     this._inputTokens = 0;
-    // Map from content-block index → { type, id, name, partial_json }
+    // Map from Anthropic content-block index → OpenAI tool-call metadata.
     this._toolBlocks = {};
+    this._nextToolCallIndex = 0;
     this._firstChunk = true;
+    this._doneEmitted = false;
   }
 
   _transform(chunk, _encoding, callback) {
@@ -354,13 +362,26 @@ class AnthropicToOAIStream extends Transform {
   }
 
   _flush(callback) {
-    if (this._buffer.trim()) this._flushBuffer();
+    if (this._buffer.trim()) {
+      // Treat a final event without a terminating blank line as complete.
+      this._buffer += '\n\n';
+      this._flushBuffer();
+    }
+    // Providers occasionally close after message_delta without message_stop.
+    // OpenAI clients still require one terminal sentinel.
+    this._emitDone();
     callback();
   }
 
   /** Emit one OpenAI SSE chunk as a raw string. */
   _emitChunk(payload) {
     this.push(`data: ${JSON.stringify(payload)}\n\n`);
+  }
+
+  _emitDone() {
+    if (this._doneEmitted) return;
+    this._doneEmitted = true;
+    this.push('data: [DONE]\n\n');
   }
 
   /** Emit the OpenAI role chunk that opens a new streaming message. */
@@ -435,6 +456,7 @@ class AnthropicToOAIStream extends Transform {
             id: block.id,
             name: block.name,
             partial_json: '',
+            toolCallIndex: this._nextToolCallIndex++,
           };
           this._emitChunk({
             id: this._completionId,
@@ -447,7 +469,7 @@ class AnthropicToOAIStream extends Transform {
                 delta: {
                   tool_calls: [
                     {
-                      index,
+                      index: this._toolBlocks[index].toolCallIndex,
                       id: block.id,
                       type: 'function',
                       function: { name: block.name, arguments: '' },
@@ -485,10 +507,10 @@ class AnthropicToOAIStream extends Transform {
             ],
           });
         } else if (delta.type === 'input_json_delta') {
-          // Append to tool-call arguments
-          if (this._toolBlocks[index]) {
-            this._toolBlocks[index].partial_json += delta.partial_json || '';
-          }
+          // Append to tool-call arguments.
+          const toolBlock = this._toolBlocks[index];
+          if (!toolBlock) break;
+          toolBlock.partial_json += delta.partial_json || '';
           this._emitChunk({
             id: this._completionId,
             object: 'chat.completion.chunk',
@@ -500,7 +522,7 @@ class AnthropicToOAIStream extends Transform {
                 delta: {
                   tool_calls: [
                     {
-                      index,
+                      index: toolBlock.toolCallIndex,
                       function: { arguments: delta.partial_json || '' },
                     },
                   ],
@@ -546,7 +568,7 @@ class AnthropicToOAIStream extends Transform {
       }
 
       case 'message_stop':
-        this.push('data: [DONE]\n\n');
+        this._emitDone();
         break;
 
       case 'ping':
@@ -578,6 +600,7 @@ function oaiRoleToGemini(role) {
 function convertMessagesToGemini(messages) {
   const systemParts = [];
   const contents = [];
+  const toolNamesById = new Map();
 
   for (const msg of messages) {
     if (msg.role === 'system') {
@@ -595,9 +618,9 @@ function convertMessagesToGemini(messages) {
     }
 
     const parts = [];
-    if (typeof msg.content === 'string') {
+    if (typeof msg.content === 'string' && msg.role !== 'tool') {
       parts.push({ text: msg.content });
-    } else if (Array.isArray(msg.content)) {
+    } else if (Array.isArray(msg.content) && msg.role !== 'tool') {
       for (const part of msg.content) {
         if (part.type === 'text') {
           parts.push({ text: part.text });
@@ -615,6 +638,38 @@ function convertMessagesToGemini(messages) {
           }
         }
       }
+    }
+
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+      for (const toolCall of msg.tool_calls) {
+        const fn = toolCall.function || {};
+        let args = {};
+        try {
+          args = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments || '{}') : fn.arguments || {};
+        } catch {
+          args = {};
+        }
+        if (toolCall.id && fn.name) toolNamesById.set(toolCall.id, fn.name);
+        parts.push({ functionCall: { name: fn.name, args } });
+      }
+    }
+
+    if (msg.role === 'tool') {
+      let response;
+      try {
+        response = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;
+      } catch {
+        response = { content: msg.content == null ? '' : String(msg.content) };
+      }
+      if (response === null || typeof response !== 'object' || Array.isArray(response)) {
+        response = { content: response };
+      }
+      parts.push({
+        functionResponse: {
+          name: toolNamesById.get(msg.tool_call_id) || 'function',
+          response,
+        },
+      });
     }
 
     if (parts.length > 0) {
@@ -636,7 +691,7 @@ function convertMessagesToGemini(messages) {
  * @returns {object} Gemini-format request body
  */
 function toGoogleRequest(oaiBody) {
-  const { messages = [], max_tokens, temperature, top_p, stop, stream } = oaiBody;
+  const { messages = [], max_tokens, temperature, top_p, stop, stream, tools, tool_choice } = oaiBody;
 
   const { contents, systemInstruction } = convertMessagesToGemini(messages);
 
@@ -650,6 +705,28 @@ function toGoogleRequest(oaiBody) {
   if (top_p !== undefined) generationConfig.topP = top_p;
   if (stop) generationConfig.stopSequences = Array.isArray(stop) ? stop : [stop];
   if (Object.keys(generationConfig).length > 0) body.generationConfig = generationConfig;
+
+  const functionDeclarations = (tools || [])
+    .filter((tool) => tool?.type === 'function' && tool.function?.name)
+    .map((tool) => ({
+      name: tool.function.name,
+      ...(tool.function.description ? { description: tool.function.description } : {}),
+      parameters: tool.function.parameters || { type: 'object', properties: {} },
+    }));
+  if (functionDeclarations.length > 0) {
+    body.tools = [{ functionDeclarations }];
+  }
+
+  const functionCallingConfig = (() => {
+    if (!tool_choice || tool_choice === 'auto') return null;
+    if (tool_choice === 'none') return { mode: 'NONE' };
+    if (tool_choice === 'required') return { mode: 'ANY' };
+    if (typeof tool_choice === 'object' && tool_choice.type === 'function' && tool_choice.function?.name) {
+      return { mode: 'ANY', allowedFunctionNames: [tool_choice.function.name] };
+    }
+    return null;
+  })();
+  if (functionCallingConfig) body.toolConfig = { functionCallingConfig };
 
   // Gemini streaming uses streamGenerateContent endpoint (handled in routing);
   // the request body itself does not need a `stream` flag.
@@ -686,6 +763,18 @@ function fromGoogleResponse(gRes, requestedModel) {
     .filter((p) => typeof p.text === 'string')
     .map((p) => p.text)
     .join('');
+  const functionCalls = parts
+    .filter((p) => p.functionCall?.name)
+    .map((p, index) => ({
+      id: p.functionCall.id || `call_${index}`,
+      type: 'function',
+      function: {
+        name: p.functionCall.name,
+        arguments: JSON.stringify(p.functionCall.args || {}),
+      },
+    }));
+  const message = { role: 'assistant', content: text || null };
+  if (functionCalls.length > 0) message.tool_calls = functionCalls;
 
   const finishReason =
     GEMINI_FINISH_REASON_MAP[candidate.finishReason] || candidate.finishReason || 'stop';
@@ -706,7 +795,7 @@ function fromGoogleResponse(gRes, requestedModel) {
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content: text || null },
+        message,
         finish_reason: finishReason,
       },
     ],
@@ -734,6 +823,8 @@ class GoogleToOAIStream extends Transform {
     this._buffer = '';
     this._firstChunk = true;
     this._promptTokens = 0;
+    this._functionCallIndexes = new Map();
+    this._nextToolCallIndex = 0;
   }
 
   _transform(chunk, _encoding, callback) {
@@ -779,6 +870,7 @@ class GoogleToOAIStream extends Transform {
       .filter((p) => typeof p.text === 'string')
       .map((p) => p.text)
       .join('');
+    const functionCalls = parts.filter((p) => p.functionCall?.name);
 
     if (this._firstChunk) {
       // Emit role chunk
@@ -802,6 +894,28 @@ class GoogleToOAIStream extends Transform {
       ? GEMINI_FINISH_REASON_MAP[candidate.finishReason] || candidate.finishReason
       : null;
 
+    const delta = text ? { content: text } : {};
+    if (functionCalls.length > 0) {
+      delta.tool_calls = functionCalls.map((part, partIndex) => {
+        const call = part.functionCall;
+        const key = call.id || `${call.name}:${partIndex}`;
+        let index = this._functionCallIndexes.get(key);
+        const initial = index === undefined;
+        if (initial) {
+          index = this._nextToolCallIndex++;
+          this._functionCallIndexes.set(key, index);
+        }
+        return initial
+          ? {
+              index,
+              id: call.id || `call_${index}`,
+              type: 'function',
+              function: { name: call.name, arguments: JSON.stringify(call.args || {}) },
+            }
+          : { index, function: { arguments: JSON.stringify(call.args || {}) } };
+      });
+    }
+
     const chunk = {
       id: this._completionId,
       object: 'chat.completion.chunk',
@@ -810,7 +924,7 @@ class GoogleToOAIStream extends Transform {
       choices: [
         {
           index: 0,
-          delta: text ? { content: text } : {},
+          delta,
           finish_reason: finishReason,
         },
       ],

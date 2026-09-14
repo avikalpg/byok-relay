@@ -256,8 +256,9 @@ describe('E2E — budget endpoints + relay enforcement', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-budget-e2e-'));
     dbPath = path.join(tmpDir, 'relay.db');
 
-    // Start mock provider
-    ({ server: mock, port: mockPort } = await createMockProvider());
+    // The mock exposes start()/stop(), not a raw server lifecycle.
+    mock = createMockProvider();
+    mockPort = await mock.start();
 
     // Wait for a free port
     await new Promise((resolve) => {
@@ -313,9 +314,9 @@ describe('E2E — budget endpoints + relay enforcement', () => {
     });
   });
 
-  after(() => {
+  after(async () => {
     if (relayProc) relayProc.kill();
-    if (mock) mock.close();
+    if (mock) await mock.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 

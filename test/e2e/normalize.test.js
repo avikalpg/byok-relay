@@ -166,6 +166,23 @@ describe('toAnthropicRequest', () => {
     assert.equal(result.stream, true);
   });
 
+  it('preserves assistant content parts as individual Anthropic blocks', () => {
+    const result = toAnthropicRequest({
+      model: 'claude-3-5-haiku-20241022',
+      messages: [{
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I found this:' },
+          { type: 'image_url', image_url: { url: 'https://example.test/image.png' } },
+        ],
+      }],
+    });
+    assert.deepEqual(result.messages[0].content, [
+      { type: 'text', text: 'I found this:' },
+      { type: 'image', source: { type: 'url', url: 'https://example.test/image.png' } },
+    ]);
+  });
+
   it('does not include undefined fields in result', () => {
     const body = { model: 'claude-3-5-haiku-20241022', messages: [{ role: 'user', content: 'Hi' }] };
     const result = toAnthropicRequest(body);
@@ -211,6 +228,30 @@ describe('toGoogleRequest', () => {
     };
     const result = toGoogleRequest(body);
     assert.equal(result.stream, undefined, 'Gemini uses URL suffix for streaming, not body flag');
+  });
+
+  it('converts OpenAI function tools and tool choice to Gemini declarations', () => {
+    const result = toGoogleRequest({
+      model: 'gemini-2.0-flash',
+      messages: [{ role: 'user', content: 'What is the weather?' }],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'get_weather',
+          description: 'Gets weather by city',
+          parameters: { type: 'object', properties: { city: { type: 'string' } } },
+        },
+      }],
+      tool_choice: { type: 'function', function: { name: 'get_weather' } },
+    });
+    assert.deepEqual(result.tools, [{ functionDeclarations: [{
+      name: 'get_weather',
+      description: 'Gets weather by city',
+      parameters: { type: 'object', properties: { city: { type: 'string' } } },
+    }] }]);
+    assert.deepEqual(result.toolConfig, {
+      functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['get_weather'] },
+    });
   });
 });
 
@@ -345,6 +386,20 @@ describe('fromGoogleResponse', () => {
     const result = fromGoogleResponse(gRes, 'gemini-2.0-flash');
     assert.equal(result.choices[0].message.content, 'Hello world');
   });
+
+  it('converts Gemini function calls to OpenAI tool calls', () => {
+    const result = fromGoogleResponse({
+      candidates: [{
+        content: { parts: [{ functionCall: { id: 'gem_call_1', name: 'get_weather', args: { city: 'London' } } }] },
+        finishReason: 'STOP',
+      }],
+    }, 'gemini-2.0-flash');
+    assert.equal(result.choices[0].message.content, null);
+    assert.deepEqual(result.choices[0].message.tool_calls, [{
+      id: 'gem_call_1', type: 'function',
+      function: { name: 'get_weather', arguments: '{"city":"London"}' },
+    }]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -414,6 +469,30 @@ describe('AnthropicToOAIStream', () => {
     assert.ok(output.includes('[DONE]'), 'message_stop must trigger [DONE]');
   });
 
+  it('emits exactly one [DONE] fallback when message_stop is absent', async () => {
+    const stream = new AnthropicToOAIStream('claude-3-5-haiku-20241022');
+    const input = 'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}';
+    const output = await pipeThrough(stream, input);
+    assert.equal((output.match(/data: \[DONE\]/g) || []).length, 1);
+  });
+
+  it('uses tool-call ordinals rather than raw Anthropic block indexes', async () => {
+    const stream = new AnthropicToOAIStream('claude-3-5-haiku-20241022');
+    const input = [
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"tool_1","name":"first","input":{}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":3,"delta":{"type":"input_json_delta","partial_json":"{\\"a\\":1}"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":5,"content_block":{"type":"tool_use","id":"tool_2","name":"second","input":{}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":5,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+    ].join('');
+    const chunks = (await pipeThrough(stream, input))
+      .split('\n')
+      .filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice(6)));
+    const toolDeltas = chunks.flatMap((chunk) => chunk.choices[0].delta.tool_calls || []);
+    assert.deepEqual(toolDeltas.map((call) => call.index), [0, 0, 1, 1]);
+  });
+
   it('emits OAI chunk shape (id, object, choices) in data lines', async () => {
     const stream = new AnthropicToOAIStream('anthropic/claude-3-5-haiku-20241022');
     const input = [
@@ -468,6 +547,27 @@ describe('GoogleToOAIStream', () => {
     }
     // Either has data chunks OR just [DONE] — both are valid for a single-part response
     assert.ok(output.includes('[DONE]'), 'should always end with [DONE] when finishReason present');
+  });
+
+  it('converts Gemini streaming function calls to OpenAI tool-call deltas', async () => {
+    const stream = new GoogleToOAIStream('google/gemini-2.0-flash');
+    const input = `data: ${JSON.stringify({
+      candidates: [{
+        content: { parts: [{ functionCall: { id: 'gem_call_1', name: 'get_weather', args: { city: 'London' } } }] },
+        finishReason: 'STOP',
+      }],
+    })}\n\n`;
+    const chunks = (await pipeThrough(stream, input))
+      .split('\n')
+      .filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice(6)));
+    const toolCall = chunks.flatMap((chunk) => chunk.choices[0].delta.tool_calls || [])[0];
+    assert.deepEqual(toolCall, {
+      index: 0,
+      id: 'gem_call_1',
+      type: 'function',
+      function: { name: 'get_weather', arguments: '{"city":"London"}' },
+    });
   });
 });
 

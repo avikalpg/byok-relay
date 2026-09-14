@@ -6,6 +6,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { Transform } = require('stream');
 const { makeStore } = require('./rate-limit-store');
 const {
   createUser,
@@ -396,6 +397,52 @@ function logRelayError(req, details) {
   try {
     updateCredentialHealth({ user_id: req.user.id, provider, success: false });
   } catch (_) {}
+}
+
+/**
+ * Observe OpenAI-format SSE output without changing it, retaining the latest
+ * usage object so streamed requests can be costed once the stream finishes.
+ */
+function createStreamingUsageTracker() {
+  let buffer = '';
+  let tokenCounts = { input_tokens: null, output_tokens: null };
+
+  const inspect = (raw) => {
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.startsWith('data: ')) continue;
+      try {
+        const parsed = JSON.parse(line.slice(6));
+        const counts = extractTokenCounts(parsed);
+        if (counts.input_tokens !== null || counts.output_tokens !== null) {
+          tokenCounts = counts;
+        }
+      } catch {
+        // [DONE] and non-JSON event data do not contain usage.
+      }
+    }
+  };
+
+  const tracker = new Transform({
+    transform(chunk, _encoding, callback) {
+      buffer += chunk.toString();
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() || '';
+      for (const event of events) inspect(event);
+      callback(null, chunk);
+    },
+    flush(callback) {
+      if (buffer.trim()) inspect(buffer);
+      callback();
+    },
+  });
+  tracker.getTokenCounts = () => tokenCounts;
+  return tracker;
+}
+
+function writeSseError(res, message) {
+  if (res.writableEnded) return;
+  res.write(`data: ${JSON.stringify({ error: { message, type: 'server_error' } })}\n\n`);
+  res.end();
 }
 
 function createRelayLogger(req) {
@@ -1371,7 +1418,7 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
 
   const { provider, path: forwardPath, modelName } = route;
 
-  if (!isModelAllowed(model)) {
+  if (!isModelAllowedForProvider(modelName, provider)) {
     return res.status(403).json({
       error: `Model "${model}" is not permitted on this relay.`,
       allowed_models: ALLOWED_MODELS_RAW,
@@ -1461,31 +1508,36 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
       }
 
       const transformer = createProviderStreamTransform(provider, model);
+      const usageTracker = createStreamingUsageTracker();
+      usageTracker.on('finish', () => {
+        const latency_ms = Date.now() - relayStart;
+        const { input_tokens, output_tokens } = usageTracker.getTokenCounts();
+        const { estimated_cost_usd } = lookupCost(provider, model, input_tokens, output_tokens);
+        logRelayRequest(req, {
+          provider,
+          model,
+          status: providerResponse.status,
+          latency_ms,
+          streaming: true,
+          input_tokens,
+          output_tokens,
+          estimated_cost_usd,
+        });
+      });
       if (transformer) {
-        // Translating provider — pipe through the transform
+        // Translating provider — pipe through the transform.
         providerResponse.body.on('error', (err) => {
           req.log.warn({ err }, 'normalized stream error');
-          if (!res.writableEnded) {
-            res.write('data: {"error":"Stream interrupted"\n\n');
-            res.end();
-          }
+          writeSseError(res, 'Stream interrupted by provider');
         });
         transformer.on('error', (err) => {
           req.log.warn({ err }, 'normalize transform error');
-          if (!res.writableEnded) res.end();
+          writeSseError(res, 'Stream normalization failed');
         });
-        providerResponse.body.on('end', () => {
-          const latency_ms = Date.now() - relayStart;
-          logRelayRequest(req, { provider, model, status: providerResponse.status, latency_ms, streaming: true });
-        });
-        providerResponse.body.pipe(transformer).pipe(res);
+        providerResponse.body.pipe(transformer).pipe(usageTracker).pipe(res);
       } else {
-        // Pass-through provider — forward SSE directly
-        providerResponse.body.on('end', () => {
-          const latency_ms = Date.now() - relayStart;
-          logRelayRequest(req, { provider, model, status: providerResponse.status, latency_ms, streaming: true });
-        });
-        providerResponse.body.pipe(res);
+        // Pass-through provider — observe the native OpenAI SSE output.
+        providerResponse.body.pipe(usageTracker).pipe(res);
       }
       return;
     }
