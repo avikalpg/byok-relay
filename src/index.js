@@ -29,6 +29,10 @@ const {
   getBudget,
   checkBudget,
   deleteBudget,
+  setAppBudget,
+  getAppBudget,
+  checkAppBudget,
+  deleteAppBudget,
 } = require('./db');
 const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS, isRetryableStatus, parseFallbackCandidates } = require('./routing');
@@ -1040,6 +1044,81 @@ app.delete('/users/budget', requireToken, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── App-level budget endpoints (operator / APP_SECRET guarded) ─────────────
+
+/**
+ * GET /admin/apps/:app_id/budget
+ * Return the budget limits configured for the given app_id.
+ * Requires APP_SECRET.
+ *
+ * Response: { app_id, budget: { daily_limit_usd, weekly_limit_usd, monthly_limit_usd,
+ *                                lifetime_limit_usd, warn_threshold, updated_at } }
+ *           or { app_id, budget: null } if no budget is set.
+ */
+app.get('/admin/apps/:app_id/budget', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'App budgets require APP_SECRET to be configured.' });
+  }
+  const budget = getAppBudget(req.params.app_id);
+  res.json({ app_id: req.params.app_id, budget });
+});
+
+/**
+ * PUT /admin/apps/:app_id/budget
+ * Set cost budget limits for the given app_id.
+ * Requires APP_SECRET.
+ *
+ * Body (all optional, null clears a limit):
+ *   {
+ *     daily_limit_usd:    number | null,
+ *     weekly_limit_usd:   number | null,
+ *     monthly_limit_usd:  number | null,
+ *     lifetime_limit_usd: number | null,
+ *     warn_threshold:     number  (0–1, default 0.8)
+ *   }
+ *
+ * Response: { app_id, budget: { ...limits, warn_threshold, updated_at } }
+ */
+app.put('/admin/apps/:app_id/budget', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'App budgets require APP_SECRET to be configured.' });
+  }
+  const opts = req.body || {};
+  const allowed = ['daily_limit_usd', 'weekly_limit_usd', 'monthly_limit_usd', 'lifetime_limit_usd', 'warn_threshold'];
+  for (const key of Object.keys(opts)) {
+    if (!allowed.includes(key)) {
+      return res.status(400).json({ error: `Unknown field: ${key}. Allowed: ${allowed.join(', ')}` });
+    }
+  }
+  const limitFields = ['daily_limit_usd', 'weekly_limit_usd', 'monthly_limit_usd', 'lifetime_limit_usd'];
+  for (const f of limitFields) {
+    if (opts[f] !== undefined && opts[f] !== null && (typeof opts[f] !== 'number' || opts[f] < 0)) {
+      return res.status(400).json({ error: `${f} must be a non-negative number or null` });
+    }
+  }
+  if (opts.warn_threshold !== undefined && opts.warn_threshold !== null &&
+      (typeof opts.warn_threshold !== 'number' || opts.warn_threshold < 0 || opts.warn_threshold > 1)) {
+    return res.status(400).json({ error: 'warn_threshold must be a number between 0 and 1' });
+  }
+  const row = setAppBudget(req.params.app_id, opts);
+  res.json({ app_id: req.params.app_id, budget: row });
+});
+
+/**
+ * DELETE /admin/apps/:app_id/budget
+ * Remove all budget limits for the given app_id.
+ * Requires APP_SECRET.
+ *
+ * Response: { ok: true }
+ */
+app.delete('/admin/apps/:app_id/budget', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'App budgets require APP_SECRET to be configured.' });
+  }
+  deleteAppBudget(req.params.app_id);
+  res.json({ ok: true });
+});
+
 /**
  * GET /health/credentials
  * Return per-provider credential health for the authenticated user.
@@ -1197,6 +1276,20 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   }
   if (budgetCheck.warn) {
     res.set('X-Byok-Budget-Warning', budgetCheck.reason);
+  }
+  // App-level budget enforcement (aggregated across all users of the same app_id)
+  const appBudgetCheck = checkAppBudget(req.user.app_id);
+  if (!appBudgetCheck.ok) {
+    return res.status(402).json({
+      error: appBudgetCheck.reason,
+      limit_type: appBudgetCheck.limit_type,
+      limit_usd: appBudgetCheck.limit_usd,
+      used_usd: appBudgetCheck.used_usd,
+    });
+  }
+  if (appBudgetCheck.warn) {
+    const existing = res.getHeader('X-Byok-Budget-Warning');
+    res.set('X-Byok-Budget-Warning', existing ? `${existing}; ${appBudgetCheck.reason}` : appBudgetCheck.reason);
   }
 
   // Pass through provider-specific and relay headers (shared across all candidates)
@@ -1439,6 +1532,20 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
   if (budgetCheck.warn) {
     res.set('X-Byok-Budget-Warning', budgetCheck.reason);
   }
+  // App-level budget enforcement (aggregated across all users of the same app_id)
+  const appBudgetCheck = checkAppBudget(req.user.app_id);
+  if (!appBudgetCheck.ok) {
+    return res.status(402).json({
+      error: appBudgetCheck.reason,
+      limit_type: appBudgetCheck.limit_type,
+      limit_usd: appBudgetCheck.limit_usd,
+      used_usd: appBudgetCheck.used_usd,
+    });
+  }
+  if (appBudgetCheck.warn) {
+    const existing = res.getHeader('X-Byok-Budget-Warning');
+    res.set('X-Byok-Budget-Warning', existing ? `${existing}; ${appBudgetCheck.reason}` : appBudgetCheck.reason);
+  }
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {
@@ -1636,6 +1743,33 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   // Do not reconstruct it from Express params here: validation and use must
   // operate on the same value.
   const forwardPath = req.forwardPath;
+
+  // ── Budget enforcement (user + app) ──────────────────────────────────────
+  const budgetCheck = checkBudget(req.user.id);
+  if (!budgetCheck.ok) {
+    return res.status(402).json({
+      error: budgetCheck.reason,
+      limit_type: budgetCheck.limit_type,
+      limit_usd: budgetCheck.limit_usd,
+      used_usd: budgetCheck.used_usd,
+    });
+  }
+  if (budgetCheck.warn) {
+    res.set('X-Byok-Budget-Warning', budgetCheck.reason);
+  }
+  const appBudgetCheck = checkAppBudget(req.user.app_id);
+  if (!appBudgetCheck.ok) {
+    return res.status(402).json({
+      error: appBudgetCheck.reason,
+      limit_type: appBudgetCheck.limit_type,
+      limit_usd: appBudgetCheck.limit_usd,
+      used_usd: appBudgetCheck.used_usd,
+    });
+  }
+  if (appBudgetCheck.warn) {
+    const existing = res.getHeader('X-Byok-Budget-Warning');
+    res.set('X-Byok-Budget-Warning', existing ? `${existing}; ${appBudgetCheck.reason}` : appBudgetCheck.reason);
+  }
 
   const apiKey = getDecryptedKey(req.user.id, provider);
   if (!apiKey) {

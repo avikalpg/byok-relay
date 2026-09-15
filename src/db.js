@@ -96,6 +96,16 @@ db.exec(`
     warn_threshold REAL NOT NULL DEFAULT 0.8,
     updated_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS app_budgets (
+    app_id TEXT PRIMARY KEY,
+    daily_limit_usd REAL,
+    weekly_limit_usd REAL,
+    monthly_limit_usd REAL,
+    lifetime_limit_usd REAL,
+    warn_threshold REAL NOT NULL DEFAULT 0.8,
+    updated_at INTEGER NOT NULL
+  );
 `);
 // NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
 // On a legacy DB the users table still has 'token', not 'token_hash', so
@@ -996,6 +1006,159 @@ function deleteBudget(userId) {
   db.prepare('DELETE FROM user_budgets WHERE user_id = ?').run(userId);
 }
 
+// ── Migration: create app_budgets table on existing DBs ───────────────────────
+function _migrateAddAppBudgets() {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_budgets'").get();
+  if (!tables) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS app_budgets (
+        app_id TEXT PRIMARY KEY,
+        daily_limit_usd REAL,
+        weekly_limit_usd REAL,
+        monthly_limit_usd REAL,
+        lifetime_limit_usd REAL,
+        warn_threshold REAL NOT NULL DEFAULT 0.8,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+}
+
+_migrateAddAppBudgets();
+
+// ── App-level budget management ───────────────────────────────────────────────
+
+/**
+ * Set or update budget limits for an app_id (all users sharing that app).
+ * @param {string} appId
+ * @param {object} opts - { daily_limit_usd, weekly_limit_usd, monthly_limit_usd,
+ *                          lifetime_limit_usd, warn_threshold }
+ */
+function setAppBudget(appId, opts = {}) {
+  const now = Date.now();
+  const existing = db.prepare('SELECT * FROM app_budgets WHERE app_id = ?').get(appId);
+  if (!existing) {
+    db.prepare(
+      'INSERT INTO app_budgets (app_id, daily_limit_usd, weekly_limit_usd, monthly_limit_usd, lifetime_limit_usd, warn_threshold, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      appId,
+      opts.daily_limit_usd   != null ? opts.daily_limit_usd   : null,
+      opts.weekly_limit_usd  != null ? opts.weekly_limit_usd  : null,
+      opts.monthly_limit_usd != null ? opts.monthly_limit_usd : null,
+      opts.lifetime_limit_usd != null ? opts.lifetime_limit_usd : null,
+      opts.warn_threshold    != null ? opts.warn_threshold    : 0.8,
+      now
+    );
+  } else {
+    const setClauses = [];
+    const values = [];
+    const fields = ['daily_limit_usd', 'weekly_limit_usd', 'monthly_limit_usd', 'lifetime_limit_usd', 'warn_threshold'];
+    for (const f of fields) {
+      if (opts[f] !== undefined) {
+        setClauses.push(`${f} = ?`);
+        values.push(opts[f]);
+      }
+    }
+    if (setClauses.length > 0) {
+      setClauses.push('updated_at = ?');
+      values.push(now);
+      values.push(appId);
+      db.prepare(`UPDATE app_budgets SET ${setClauses} WHERE app_id = ?`).run(...values);
+    }
+  }
+  return db.prepare('SELECT * FROM app_budgets WHERE app_id = ?').get(appId);
+}
+
+/**
+ * Get budget limits for an app_id. Returns null if no budget is configured.
+ * @param {string} appId
+ */
+function getAppBudget(appId) {
+  const row = db.prepare('SELECT * FROM app_budgets WHERE app_id = ?').get(appId);
+  if (!row) return null;
+  return {
+    daily_limit_usd:    row.daily_limit_usd,
+    weekly_limit_usd:   row.weekly_limit_usd,
+    monthly_limit_usd:  row.monthly_limit_usd,
+    lifetime_limit_usd: row.lifetime_limit_usd,
+    warn_threshold:     row.warn_threshold,
+    updated_at:         row.updated_at,
+  };
+}
+
+/**
+ * Check whether an app_id has exceeded any configured cost budget.
+ * Aggregates estimated_cost_usd across ALL users for the given app_id.
+ * @param {string} appId
+ * @returns {{ ok: boolean, warn?: boolean, reason?: string, limit_type?: string, limit_usd?: number, used_usd?: number }}
+ */
+function checkAppBudget(appId) {
+  const budget = db.prepare('SELECT * FROM app_budgets WHERE app_id = ?').get(appId);
+  if (!budget) return { ok: true };
+
+  const now = Date.now();
+  const msDay   = 86400000;
+  const msWeek  = 7 * msDay;
+  const msMonth = 30 * msDay;
+
+  function getUsed(sinceMs) {
+    const row = db.prepare(
+      'SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM request_logs WHERE app_id = ? AND created_at >= ? AND status >= 200 AND status < 300'
+    ).get(appId, sinceMs);
+    return row ? row.total : 0;
+  }
+  function getLifetimeUsed() {
+    const row = db.prepare(
+      'SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM request_logs WHERE app_id = ? AND status >= 200 AND status < 300'
+    ).get(appId);
+    return row ? row.total : 0;
+  }
+
+  const checks = [
+    { type: 'daily',    limit: budget.daily_limit_usd,    used: () => getUsed(now - msDay) },
+    { type: 'weekly',   limit: budget.weekly_limit_usd,   used: () => getUsed(now - msWeek) },
+    { type: 'monthly',  limit: budget.monthly_limit_usd,  used: () => getUsed(now - msMonth) },
+    { type: 'lifetime', limit: budget.lifetime_limit_usd, used: () => getLifetimeUsed() },
+  ];
+
+  const threshold = budget.warn_threshold != null ? budget.warn_threshold : 0.8;
+  let warnResult = null;
+
+  for (const { type, limit, used } of checks) {
+    if (limit == null) continue;
+    const usedUsd = used();
+    if (usedUsd >= limit) {
+      return {
+        ok: false,
+        reason: `app ${type} cost budget exceeded: $${usedUsd.toFixed(6)} used of $${limit.toFixed(6)} limit`,
+        limit_type: type,
+        limit_usd: limit,
+        used_usd: usedUsd,
+      };
+    }
+    if (!warnResult && usedUsd >= limit * threshold) {
+      warnResult = {
+        warn: true,
+        reason: `app ${type} cost budget warning: $${usedUsd.toFixed(6)} used of $${limit.toFixed(6)} limit (${Math.round(threshold * 100)}% threshold)`,
+        limit_type: type,
+        limit_usd: limit,
+        used_usd: usedUsd,
+      };
+    }
+  }
+
+  if (warnResult) return { ok: true, ...warnResult };
+  return { ok: true };
+}
+
+/**
+ * Delete all budget limits for an app_id.
+ * @param {string} appId
+ */
+function deleteAppBudget(appId) {
+  db.prepare('DELETE FROM app_budgets WHERE app_id = ?').run(appId);
+}
+
 function dbHealthCheck() {
   const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
   const keyCount  = db.prepare('SELECT COUNT(*) AS n FROM keys').get().n;
@@ -1024,4 +1187,8 @@ module.exports = {
   getBudget,
   checkBudget,
   deleteBudget,
+  setAppBudget,
+  getAppBudget,
+  checkAppBudget,
+  deleteAppBudget,
 };
