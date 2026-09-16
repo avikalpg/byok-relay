@@ -1136,7 +1136,7 @@ function checkAppBudget(appId) {
         used_usd: usedUsd,
       };
     }
-    if (!warnResult && usedUsd >= limit * threshold) {
+    if (threshold > 0 && !warnResult && usedUsd >= limit * threshold) {
       warnResult = {
         warn: true,
         reason: `app ${type} cost budget warning: $${usedUsd.toFixed(6)} used of $${limit.toFixed(6)} limit (${Math.round(threshold * 100)}% threshold)`,

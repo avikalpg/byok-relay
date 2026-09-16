@@ -1096,8 +1096,8 @@ app.put('/admin/apps/:app_id/budget', requireAppSecret, (req, res) => {
       return res.status(400).json({ error: `${f} must be a non-negative number or null` });
     }
   }
-  if (opts.warn_threshold !== undefined && opts.warn_threshold !== null &&
-      (typeof opts.warn_threshold !== 'number' || opts.warn_threshold < 0 || opts.warn_threshold > 1)) {
+  if (opts.warn_threshold !== undefined &&
+      (opts.warn_threshold === null || typeof opts.warn_threshold !== 'number' || opts.warn_threshold < 0 || opts.warn_threshold > 1)) {
     return res.status(400).json({ error: 'warn_threshold must be a number between 0 and 1' });
   }
   const row = setAppBudget(req.params.app_id, opts);

@@ -200,6 +200,21 @@ describe('DB — setAppBudget / getAppBudget / checkAppBudget / deleteAppBudget'
     assert.ok(result.reason, 'warn reason should be set');
   });
 
+  it('checkAppBudget does not warn when warn_threshold is 0', () => {
+    // Regression: zero threshold previously triggered warn on every request (0 >= limit*0 is always true)
+    const result = runInDb(`
+      const { createUser, setAppBudget, logRequest, checkAppBudget } = require('./src/db');
+      const { id } = createUser('zero-threshold-app');
+      logRequest({ user_id: id, app_id: 'zero-threshold-app', provider: 'openai', model: 'gpt-4o',
+                   status: 200, latency_ms: 10, input_tokens: 1, output_tokens: 1,
+                   estimated_cost_usd: 0.00001, user_agent: 'test' });
+      setAppBudget('zero-threshold-app', { lifetime_limit_usd: 10.0, warn_threshold: 0 });
+      process.stdout.write(JSON.stringify(checkAppBudget('zero-threshold-app')));
+    `);
+    assert.equal(result.ok, true);
+    assert.ok(!result.warn, 'should not warn when warn_threshold is 0');
+  });
+
   it('checkAppBudget returns ok:false when lifetime limit exceeded', () => {
     const result = runInDb(`
       const { createUser, setAppBudget, logRequest, checkAppBudget } = require('./src/db');
@@ -358,6 +373,17 @@ describe('E2E — /admin/apps/:app_id/budget (CRUD)', () => {
       body: { warn_threshold: 1.5 },
     });
     assert.equal(res.status, 400);
+  });
+
+  it('PUT /admin/apps/:app_id/budget rejects null warn_threshold', async () => {
+    const res = await relayReq(relayPort, {
+      method: 'PUT',
+      path: `/admin/apps/${appId}/budget`,
+      headers: { Authorization: `Bearer ${appSecret}` },
+      body: { warn_threshold: null },
+    });
+    assert.equal(res.status, 400);
+    assert.ok(res.body.error && res.body.error.includes('warn_threshold'), `error should mention warn_threshold: ${JSON.stringify(res.body)}`);
   });
 
   it('DELETE /admin/apps/:app_id/budget removes the budget', async () => {
