@@ -486,9 +486,9 @@ describe('E2E — relay 402 when app budget exceeded', () => {
   it('POST /relay returns 402 when app lifetime budget is $0', async () => {
     const res = await relayReq(relayPort, {
       method: 'POST',
-      path: '/relay/openai/v1/chat/completions',
+      path: '/relay',
       headers: { 'x-relay-token': userToken },
-      body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Hello' }] },
+      body: { model: 'openai/gpt-4o-mini', messages: [{ role: 'user', content: 'Hello' }] },
     });
     assert.equal(res.status, 402);
     assert.ok(res.body.error, 'should have error field');
