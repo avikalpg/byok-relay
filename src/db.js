@@ -1018,6 +1018,7 @@ function _migrateAddAppBudgets() {
         monthly_limit_usd REAL,
         lifetime_limit_usd REAL,
         warn_threshold REAL NOT NULL DEFAULT 0.8,
+        reserved_usd REAL NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
       );
     `);
@@ -1025,6 +1026,14 @@ function _migrateAddAppBudgets() {
 }
 
 _migrateAddAppBudgets();
+
+// ── Migration: add reserved_usd column to existing app_budgets tables ─────────
+(function _migrateAppBudgetsReservedUsd() {
+  const cols = db.pragma('table_info(app_budgets)').map(c => c.name);
+  if (!cols.includes('reserved_usd')) {
+    db.exec('ALTER TABLE app_budgets ADD COLUMN reserved_usd REAL NOT NULL DEFAULT 0');
+  }
+}());
 
 // ── App-level budget management ───────────────────────────────────────────────
 
@@ -1152,6 +1161,116 @@ function checkAppBudget(appId) {
 }
 
 /**
+ * Atomically check the app budget (including in-flight reservations) and, if
+ * within limits, reserve capacity for one request.
+ *
+ * Because better-sqlite3 statements are synchronous, the check and the
+ * reservation increment execute in the same event-loop tick with no yield
+ * point between them.  Concurrent async requests therefore cannot all read
+ * the same stale usage total: each one that passes the check increments
+ * `reserved_usd` before the next one runs, so the next request sees a higher
+ * effective usage and may correctly be rejected.
+ *
+ * Call `releaseAppBudgetReservation(appId)` exactly once after the upstream
+ * response completes (or the request fails) to decrement `reserved_usd`.
+ *
+ * @param {string} appId
+ * @returns {{ ok: boolean, reserved: boolean, warn?: boolean, reason?: string,
+ *             limit_type?: string, limit_usd?: number, used_usd?: number }}
+ */
+const APP_BUDGET_RESERVATION_USD = parseFloat(process.env.APP_BUDGET_RESERVATION_USD || '0.01');
+
+function checkAndReserveAppBudget(appId) {
+  const budget = db.prepare('SELECT * FROM app_budgets WHERE app_id = ?').get(appId);
+  if (!budget) return { ok: true, reserved: false };
+
+  const now = Date.now();
+  const msDay   = 86400000;
+  const msWeek  = 7 * msDay;
+  const msMonth = 30 * msDay;
+
+  // Include already-reserved in-flight cost so concurrent requests see the
+  // most up-to-date effective usage before any of them has been logged.
+  const reservedUsd = budget.reserved_usd || 0;
+
+  function getUsed(sinceMs) {
+    const row = db.prepare(
+      'SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM request_logs WHERE app_id = ? AND created_at >= ? AND status >= 200 AND status < 300'
+    ).get(appId, sinceMs);
+    return (row ? row.total : 0) + reservedUsd;
+  }
+  function getLifetimeUsed() {
+    const row = db.prepare(
+      'SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total FROM request_logs WHERE app_id = ? AND status >= 200 AND status < 300'
+    ).get(appId);
+    return (row ? row.total : 0) + reservedUsd;
+  }
+
+  const checks = [
+    { type: 'daily',    limit: budget.daily_limit_usd,    used: () => getUsed(now - msDay) },
+    { type: 'weekly',   limit: budget.weekly_limit_usd,   used: () => getUsed(now - msWeek) },
+    { type: 'monthly',  limit: budget.monthly_limit_usd,  used: () => getUsed(now - msMonth) },
+    { type: 'lifetime', limit: budget.lifetime_limit_usd, used: () => getLifetimeUsed() },
+  ];
+
+  const threshold = budget.warn_threshold != null ? budget.warn_threshold : 0.8;
+  let warnResult = null;
+
+  for (const { type, limit, used } of checks) {
+    if (limit == null) continue;
+    const usedUsd = used();
+    if (usedUsd >= limit) {
+      return {
+        ok: false,
+        reserved: false,
+        reason: `app ${type} cost budget exceeded: $${usedUsd.toFixed(6)} used of $${limit.toFixed(6)} limit`,
+        limit_type: type,
+        limit_usd: limit,
+        used_usd: usedUsd,
+      };
+    }
+    if (threshold > 0 && !warnResult && usedUsd >= limit * threshold) {
+      warnResult = {
+        warn: true,
+        reason: `app ${type} cost budget warning: $${usedUsd.toFixed(6)} used of $${limit.toFixed(6)} limit (${Math.round(threshold * 100)}% threshold)`,
+        limit_type: type,
+        limit_usd: limit,
+        used_usd: usedUsd,
+      };
+    }
+  }
+
+  // Atomically reserve capacity.  This UPDATE executes synchronously (no
+  // event-loop yield) so no concurrent request can slip through between the
+  // check above and the increment here.
+  db.prepare('UPDATE app_budgets SET reserved_usd = reserved_usd + ? WHERE app_id = ?')
+    .run(APP_BUDGET_RESERVATION_USD, appId);
+
+  if (warnResult) return { ok: true, reserved: true, ...warnResult };
+  return { ok: true, reserved: true };
+}
+
+/**
+ * Release a reservation previously made by `checkAndReserveAppBudget`.
+ * Must be called exactly once per successful reservation, regardless of
+ * whether the upstream request succeeded or failed.
+ *
+ * @param {string} appId
+ */
+function releaseAppBudgetReservation(appId) {
+  if (!appId) return;
+  try {
+    // MAX(0, ...) guards against floating-point drift producing a negative value.
+    db.prepare(
+      'UPDATE app_budgets SET reserved_usd = MAX(0, reserved_usd - ?) WHERE app_id = ?'
+    ).run(APP_BUDGET_RESERVATION_USD, appId);
+  } catch (_err) {
+    // Non-fatal: a stale reservation self-corrects via MAX(0, ...) on the next
+    // release call, and resets to the DEFAULT 0 if the process restarts.
+  }
+}
+
+/**
  * Delete all budget limits for an app_id.
  * @param {string} appId
  */
@@ -1190,5 +1309,7 @@ module.exports = {
   setAppBudget,
   getAppBudget,
   checkAppBudget,
+  checkAndReserveAppBudget,
+  releaseAppBudgetReservation,
   deleteAppBudget,
 };

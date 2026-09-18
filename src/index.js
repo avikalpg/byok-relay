@@ -32,6 +32,8 @@ const {
   setAppBudget,
   getAppBudget,
   checkAppBudget,
+  checkAndReserveAppBudget,
+  releaseAppBudgetReservation,
   deleteAppBudget,
 } = require('./db');
 const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
@@ -1277,8 +1279,12 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   if (budgetCheck.warn) {
     res.set('X-Byok-Budget-Warning', budgetCheck.reason);
   }
-  // App-level budget enforcement (aggregated across all users of the same app_id)
-  const appBudgetCheck = checkAppBudget(req.user.app_id);
+  // App-level budget enforcement (aggregated across all users of the same app_id).
+  // checkAndReserveAppBudget atomically checks usage (including already-reserved
+  // in-flight costs) and, on success, increments reserved_usd before yielding
+  // to the event loop.  This prevents concurrent requests from all passing the
+  // same stale usage total and collectively exceeding the configured limit.
+  const appBudgetCheck = checkAndReserveAppBudget(req.user.app_id);
   if (!appBudgetCheck.ok) {
     return res.status(402).json({
       error: appBudgetCheck.reason,
@@ -1290,6 +1296,18 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   if (appBudgetCheck.warn) {
     const existing = res.getHeader('X-Byok-Budget-Warning');
     res.set('X-Byok-Budget-Warning', existing ? `${existing}; ${appBudgetCheck.reason}` : appBudgetCheck.reason);
+  }
+  // Release the reservation once the response is fully flushed or the client
+  // disconnects, whichever comes first.
+  if (appBudgetCheck.reserved) {
+    let _appBudgetReleased = false;
+    const _releaseAppBudget = () => {
+      if (_appBudgetReleased) return;
+      _appBudgetReleased = true;
+      releaseAppBudgetReservation(req.user.app_id);
+    };
+    res.on('finish', _releaseAppBudget);
+    res.on('close',  _releaseAppBudget);
   }
 
   // Pass through provider-specific and relay headers (shared across all candidates)
@@ -1532,8 +1550,8 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
   if (budgetCheck.warn) {
     res.set('X-Byok-Budget-Warning', budgetCheck.reason);
   }
-  // App-level budget enforcement (aggregated across all users of the same app_id)
-  const appBudgetCheck = checkAppBudget(req.user.app_id);
+  // App-level budget enforcement — atomic check + reserve.
+  const appBudgetCheck = checkAndReserveAppBudget(req.user.app_id);
   if (!appBudgetCheck.ok) {
     return res.status(402).json({
       error: appBudgetCheck.reason,
@@ -1545,6 +1563,16 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
   if (appBudgetCheck.warn) {
     const existing = res.getHeader('X-Byok-Budget-Warning');
     res.set('X-Byok-Budget-Warning', existing ? `${existing}; ${appBudgetCheck.reason}` : appBudgetCheck.reason);
+  }
+  if (appBudgetCheck.reserved) {
+    let _appBudgetReleased = false;
+    const _releaseAppBudget = () => {
+      if (_appBudgetReleased) return;
+      _appBudgetReleased = true;
+      releaseAppBudgetReservation(req.user.app_id);
+    };
+    res.on('finish', _releaseAppBudget);
+    res.on('close',  _releaseAppBudget);
   }
 
   const apiKey = getDecryptedKey(req.user.id, provider);
@@ -1757,7 +1785,7 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   if (budgetCheck.warn) {
     res.set('X-Byok-Budget-Warning', budgetCheck.reason);
   }
-  const appBudgetCheck = checkAppBudget(req.user.app_id);
+  const appBudgetCheck = checkAndReserveAppBudget(req.user.app_id);
   if (!appBudgetCheck.ok) {
     return res.status(402).json({
       error: appBudgetCheck.reason,
@@ -1769,6 +1797,16 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   if (appBudgetCheck.warn) {
     const existing = res.getHeader('X-Byok-Budget-Warning');
     res.set('X-Byok-Budget-Warning', existing ? `${existing}; ${appBudgetCheck.reason}` : appBudgetCheck.reason);
+  }
+  if (appBudgetCheck.reserved) {
+    let _appBudgetReleased = false;
+    const _releaseAppBudget = () => {
+      if (_appBudgetReleased) return;
+      _appBudgetReleased = true;
+      releaseAppBudgetReservation(req.user.app_id);
+    };
+    res.on('finish', _releaseAppBudget);
+    res.on('close',  _releaseAppBudget);
   }
 
   const apiKey = getDecryptedKey(req.user.id, provider);

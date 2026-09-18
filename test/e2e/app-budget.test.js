@@ -507,3 +507,124 @@ describe('E2E — relay 402 when app budget exceeded', () => {
     assert.ok(res.body.error.includes('app'), `error should mention app: ${res.body.error}`);
   });
 });
+
+// ── Unit tests: checkAndReserveAppBudget / releaseAppBudgetReservation ───────
+
+describe('DB — checkAndReserveAppBudget / releaseAppBudgetReservation (atomicity)', () => {
+  let tmpDir, dbPath;
+  const encSecret = randomTestSecret('app-budget-atomicity');
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-app-budget-atomic-'));
+    dbPath = path.join(tmpDir, 'relay.db');
+  });
+
+  after(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function runInDb(code) {
+    const result = require('child_process').spawnSync(
+      process.execPath,
+      ['-e', code],
+      {
+        cwd: path.resolve(__dirname, '../..'),
+        env: { ...process.env, DB_PATH: dbPath, ENCRYPTION_SECRET: encSecret },
+        encoding: 'utf8',
+      },
+    );
+    if (result.stderr) {
+      const err = result.stderr.trim();
+      if (err && !err.includes('ExperimentalWarning')) {
+        throw new Error(`DB script error: ${err}`);
+      }
+    }
+    return result.stdout ? JSON.parse(result.stdout) : null;
+  }
+
+  it('checkAndReserveAppBudget returns ok:true and reserved:true when under limit', () => {
+    const result = runInDb(`
+      const { setAppBudget, checkAndReserveAppBudget, releaseAppBudgetReservation } = require('./src/db');
+      setAppBudget('atomic-ok', { lifetime_limit_usd: 1.0 });
+      const r = checkAndReserveAppBudget('atomic-ok');
+      releaseAppBudgetReservation('atomic-ok');
+      process.stdout.write(JSON.stringify(r));
+    `);
+    assert.equal(result.ok, true);
+    assert.equal(result.reserved, true);
+  });
+
+  it('checkAndReserveAppBudget returns ok:false and reserved:false when at limit', () => {
+    const result = runInDb(`
+      const { setAppBudget, logRequest, checkAndReserveAppBudget } = require('./src/db');
+      const { createUser } = require('./src/db');
+      setAppBudget('atomic-exceeded', { lifetime_limit_usd: 0.001 });
+      // Log a cost that exceeds the limit
+      const user = createUser('token-atomic-exc', 'atomic-exceeded');
+      logRequest({ user_id: user.id, app_id: 'atomic-exceeded', provider: 'openai', model: 'gpt-4o', status: 200, latency_ms: 100, estimated_cost_usd: 0.002 });
+      const r = checkAndReserveAppBudget('atomic-exceeded');
+      process.stdout.write(JSON.stringify(r));
+    `);
+    assert.equal(result.ok, false);
+    assert.equal(result.reserved, false);
+  });
+
+  it('checkAndReserveAppBudget returns ok:false and reserved:false when no budget (returns ok:true)', () => {
+    const result = runInDb(`
+      const { checkAndReserveAppBudget } = require('./src/db');
+      const r = checkAndReserveAppBudget('no-budget-atomic');
+      process.stdout.write(JSON.stringify(r));
+    `);
+    // No budget configured → always ok, no reservation needed
+    assert.equal(result.ok, true);
+    assert.equal(result.reserved, false);
+  });
+
+  it('reserved_usd increments on reserve and decrements on release', () => {
+    const result = runInDb(`
+      const { setAppBudget, getAppBudget, checkAndReserveAppBudget, releaseAppBudgetReservation } = require('./src/db');
+      setAppBudget('atomic-count', { lifetime_limit_usd: 10.0 });
+      const before = getAppBudget('atomic-count');
+      checkAndReserveAppBudget('atomic-count');
+      checkAndReserveAppBudget('atomic-count');
+      const during = require('better-sqlite3')(process.env.DB_PATH).prepare('SELECT reserved_usd FROM app_budgets WHERE app_id = ?').get('atomic-count');
+      releaseAppBudgetReservation('atomic-count');
+      releaseAppBudgetReservation('atomic-count');
+      const after = require('better-sqlite3')(process.env.DB_PATH).prepare('SELECT reserved_usd FROM app_budgets WHERE app_id = ?').get('atomic-count');
+      process.stdout.write(JSON.stringify({ before_reserved: before.reserved_usd || 0, during_reserved: during.reserved_usd, after_reserved: after.reserved_usd }));
+    `);
+    assert.equal(result.before_reserved, 0, 'reserved_usd starts at 0');
+    assert.ok(result.during_reserved > 0, `reserved_usd should be > 0 during inflight; got ${result.during_reserved}`);
+    assert.equal(result.after_reserved, 0, 'reserved_usd returns to 0 after release');
+  });
+
+  it('second request sees elevated reserved_usd and is blocked near limit', () => {
+    const result = runInDb(`
+      const { setAppBudget, checkAndReserveAppBudget, releaseAppBudgetReservation } = require('./src/db');
+      // Set lifetime limit just above one reservation amount (0.01)
+      setAppBudget('atomic-race', { lifetime_limit_usd: 0.015 });
+      // First request reserves 0.01 — still within limit
+      const first = checkAndReserveAppBudget('atomic-race');
+      // Second request: effective used = 0 + 0.01 (reserved) = 0.01 < 0.015 — still passes
+      const second = checkAndReserveAppBudget('atomic-race');
+      // Third request: effective used = 0 + 0.02 (two reservations) = 0.02 >= 0.015 — blocked
+      const third = checkAndReserveAppBudget('atomic-race');
+      releaseAppBudgetReservation('atomic-race');
+      if (second.reserved) releaseAppBudgetReservation('atomic-race');
+      process.stdout.write(JSON.stringify({ first: first.ok, second: second.ok, third: third.ok }));
+    `);
+    assert.equal(result.first, true,  'first request passes');
+    assert.equal(result.second, true,  'second request passes (reserved_usd = 0.01 < 0.015 limit)');
+    assert.equal(result.third, false, 'third request blocked: effective used (0.02) >= limit (0.015)');
+  });
+
+  it('releaseAppBudgetReservation is a no-op for apps with no budget', () => {
+    // Should not throw
+    const result = runInDb(`
+      const { releaseAppBudgetReservation } = require('./src/db');
+      releaseAppBudgetReservation('no-budget-release');
+      process.stdout.write(JSON.stringify({ ok: true }));
+    `);
+    assert.equal(result.ok, true);
+  });
+});
