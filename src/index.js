@@ -1137,6 +1137,9 @@ app.delete('/admin/apps/:app_id/budget', requireAppSecret, (req, res) => {
  * Requires APP_SECRET header.
  */
 app.get('/admin/apps/:app_id/policy', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'App policies require APP_SECRET to be configured.' });
+  }
   const policy = getAppPolicy(req.params.app_id);
   res.json({ app_id: req.params.app_id, policy });
 });

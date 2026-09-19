@@ -1382,10 +1382,15 @@ function _evalPolicy(policy, provider, model) {
   if (allowedProviders && !allowedProviders.includes(prov)) {
     return { ok: false, reason: `Provider "${provider}" is not in the allowed provider list.`, reason_code: 'policy_denied_provider' };
   }
-  if (mod && deniedModels && deniedModels.some(m => mod === m || mod.endsWith('/' + m))) {
+  const modelMatches = (entry) =>
+    mod === entry ||
+    mod.endsWith('/' + entry) ||
+    `${prov}/${mod}` === entry;
+
+  if (mod && deniedModels && deniedModels.some(modelMatches)) {
     return { ok: false, reason: `Model "${model}" is denied by policy.`, reason_code: 'policy_denied_model' };
   }
-  if (mod && allowedModels && !allowedModels.some(m => mod === m || mod.endsWith('/' + m))) {
+  if (mod && allowedModels && !allowedModels.some(modelMatches)) {
     return { ok: false, reason: `Model "${model}" is not in the allowed model list.`, reason_code: 'policy_denied_model' };
   }
   return { ok: true };

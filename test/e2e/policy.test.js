@@ -252,6 +252,16 @@ describe('DB — checkAppPolicy / checkUserPolicy logic', () => {
     assert.equal(result.reason_code, 'policy_denied_model');
   });
 
+  it('denied_models set with qualified provider/model — blocked bare model request → ok:false', () => {
+    const result = runInDb(`
+      const { setAppPolicy, checkAppPolicy } = require('./src/db');
+      setAppPolicy('app-deny-qual', { denied_models: ['openai/gpt-4o'] });
+      process.stdout.write(JSON.stringify(checkAppPolicy('app-deny-qual', 'openai', 'gpt-4o')));
+    `);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason_code, 'policy_denied_model');
+  });
+
   it('allowed_models set — unlisted model → ok:false', () => {
     const result = runInDb(`
       const { setAppPolicy, checkAppPolicy } = require('./src/db');
@@ -360,7 +370,7 @@ function req(port, method, pathname, body, headers = {}) {
 
 describe('E2E — policy API + relay enforcement', () => {
   let mockProv, server, port, appSecret, encSecret, tmpDir, dbPath;
-  let userToken, userId, appId;
+  let userToken, userId, appId, e2eToken;
 
   before(async () => {
     tmpDir   = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-policy-e2e-'));
@@ -368,16 +378,19 @@ describe('E2E — policy API + relay enforcement', () => {
     appSecret = randomTestSecret('APP_SECRET');
     encSecret = randomTestSecret('ENC');
     appId     = 'test-policy-app';
+    e2eToken  = randomTestSecret('e2e-policy');
 
-    mockProv = await createMockProvider();
+    mockProv = createMockProvider();
+    const mockProvPort = await mockProv.start();
 
     const result = await startServer({
-      APP_SECRET:        appSecret,
-      ENCRYPTION_SECRET: encSecret,
-      DB_PATH:           dbPath,
-      ALLOWED_ORIGINS:   '*',
-      RELAY_OPENAI_BASE: `http://127.0.0.1:${mockProv.port}`,
-      RELAY_ANTHROPIC_BASE: `http://127.0.0.1:${mockProv.port}`,
+      NODE_ENV:                             'test',
+      APP_SECRET:                           appSecret,
+      ENCRYPTION_SECRET:                    encSecret,
+      DB_PATH:                              dbPath,
+      ALLOWED_ORIGINS:                      '*',
+      E2E_OPENAI_COMPATIBLE_BASE_URL:       `http://127.0.0.1:${mockProvPort}`,
+      E2E_OPENAI_COMPATIBLE_BASE_URL_TOKEN: e2eToken,
     });
     server = result.proc;
     port   = result.port;
@@ -438,6 +451,11 @@ describe('E2E — policy API + relay enforcement', () => {
       { Authorization: `Bearer ${appSecret}` });
     assert.equal(r.status, 400);
     assert.ok(r.body.error);
+  });
+
+  it('GET /admin/apps/:app_id/policy requires APP_SECRET', async () => {
+    const r = await req(port, 'GET', `/admin/apps/${appId}/policy`, null, { Authorization: 'Bearer wrong-secret' });
+    assert.equal(r.status, 401);
   });
 
   it('PUT /admin/apps/:app_id/policy requires APP_SECRET', async () => {
@@ -526,9 +544,8 @@ describe('E2E — policy API + relay enforcement', () => {
 
     const r = await req(port, 'POST', '/relay',
       { model: 'openai/gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
-      { 'x-relay-token': userToken });
-    // 200 or any non-policy error (mock provider responds 200)
-    assert.notEqual(r.status, 403);
+      { 'x-relay-token': userToken, 'x-relay-e2e-base-url-token': e2eToken });
+    assert.equal(r.status, 200);
 
     await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
   });
