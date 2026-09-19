@@ -106,6 +106,24 @@ db.exec(`
     warn_threshold REAL NOT NULL DEFAULT 0.8,
     updated_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS app_policies (
+    app_id TEXT PRIMARY KEY,
+    allowed_providers TEXT,
+    denied_providers  TEXT,
+    allowed_models    TEXT,
+    denied_models     TEXT,
+    updated_at        INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS user_policies (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    allowed_providers TEXT,
+    denied_providers  TEXT,
+    allowed_models    TEXT,
+    denied_models     TEXT,
+    updated_at        INTEGER NOT NULL
+  );
 `);
 // NOTE: idx_users_token_hash is created AFTER _migrateTokenColumn() runs.
 // On a legacy DB the users table still has 'token', not 'token_hash', so
@@ -1278,6 +1296,214 @@ function deleteAppBudget(appId) {
   db.prepare('DELETE FROM app_budgets WHERE app_id = ?').run(appId);
 }
 
+// ── Migration: add policy tables to existing DBs ──────────────────────────────
+(function _migrateAddPolicyTables() {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+  if (!tables.includes('app_policies')) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS app_policies (
+        app_id TEXT PRIMARY KEY,
+        allowed_providers TEXT,
+        denied_providers  TEXT,
+        allowed_models    TEXT,
+        denied_models     TEXT,
+        updated_at        INTEGER NOT NULL
+      );
+    `);
+  }
+  if (!tables.includes('user_policies')) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_policies (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        allowed_providers TEXT,
+        denied_providers  TEXT,
+        allowed_models    TEXT,
+        denied_models     TEXT,
+        updated_at        INTEGER NOT NULL
+      );
+    `);
+  }
+}());
+
+// ── Policy management ─────────────────────────────────────────────────────────
+
+/**
+ * Parse a JSON array stored as TEXT; returns null if the column is NULL.
+ * @param {string|null} raw
+ * @returns {string[]|null}
+ */
+function _parseList(raw) {
+  if (raw == null) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+/**
+ * Validate and normalise a list field from user input.
+ * Accepts null (clear) or a non-empty string array.
+ * Returns { ok, error, value } where value is JSON string or null.
+ */
+function _validateList(name, input) {
+  if (input === null || input === undefined) return { ok: true, value: null };
+  if (!Array.isArray(input)) return { ok: false, error: `${name} must be an array of strings or null` };
+  for (const item of input) {
+    if (typeof item !== 'string' || !item.trim()) {
+      return { ok: false, error: `Each entry in ${name} must be a non-empty string` };
+    }
+  }
+  return { ok: true, value: JSON.stringify(input.map(s => s.trim().toLowerCase())) };
+}
+
+/**
+ * Check whether a (provider, model) pair is permitted by a policy row.
+ * A NULL list means "no restriction on that dimension".
+ * allowed list: must be in the list (if set)
+ * denied list:  must NOT be in the list (if set)
+ * Denied takes precedence over allowed.
+ *
+ * @param {object|null} policy - DB row with allowed_providers/denied_providers/allowed_models/denied_models
+ * @param {string} provider
+ * @param {string|null} model - bare model name (no provider prefix)
+ * @returns {{ ok: boolean, reason?: string, reason_code?: string }}
+ */
+function _evalPolicy(policy, provider, model) {
+  if (!policy) return { ok: true };
+
+  const prov = (provider || '').toLowerCase();
+  const mod  = (model  || '').toLowerCase();
+
+  const deniedProviders  = _parseList(policy.denied_providers);
+  const allowedProviders = _parseList(policy.allowed_providers);
+  const deniedModels     = _parseList(policy.denied_models);
+  const allowedModels    = _parseList(policy.allowed_models);
+
+  if (deniedProviders && deniedProviders.includes(prov)) {
+    return { ok: false, reason: `Provider "${provider}" is denied by policy.`, reason_code: 'policy_denied_provider' };
+  }
+  if (allowedProviders && !allowedProviders.includes(prov)) {
+    return { ok: false, reason: `Provider "${provider}" is not in the allowed provider list.`, reason_code: 'policy_denied_provider' };
+  }
+  if (mod && deniedModels && deniedModels.some(m => mod === m || mod.endsWith('/' + m))) {
+    return { ok: false, reason: `Model "${model}" is denied by policy.`, reason_code: 'policy_denied_model' };
+  }
+  if (mod && allowedModels && !allowedModels.some(m => mod === m || mod.endsWith('/' + m))) {
+    return { ok: false, reason: `Model "${model}" is not in the allowed model list.`, reason_code: 'policy_denied_model' };
+  }
+  return { ok: true };
+}
+
+// ── App-level policy ──────────────────────────────────────────────────────────
+
+/**
+ * Set or replace the provider/model policy for an app_id.
+ * Pass null for any list field to remove that restriction.
+ * @param {string} appId
+ * @param {{ allowed_providers?, denied_providers?, allowed_models?, denied_models? }} opts
+ * @returns {{ app_id, allowed_providers, denied_providers, allowed_models, denied_models, updated_at }|Error}
+ */
+function setAppPolicy(appId, opts = {}) {
+  const fields = ['allowed_providers', 'denied_providers', 'allowed_models', 'denied_models'];
+  const values = {};
+  for (const f of fields) {
+    const v = _validateList(f, opts[f]);
+    if (!v.ok) throw new Error(v.error);
+    values[f] = v.value;
+  }
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO app_policies (app_id, allowed_providers, denied_providers, allowed_models, denied_models, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(app_id) DO UPDATE SET
+      allowed_providers = excluded.allowed_providers,
+      denied_providers  = excluded.denied_providers,
+      allowed_models    = excluded.allowed_models,
+      denied_models     = excluded.denied_models,
+      updated_at        = excluded.updated_at
+  `).run(appId, values.allowed_providers, values.denied_providers, values.allowed_models, values.denied_models, now);
+  return _formatPolicy(db.prepare('SELECT * FROM app_policies WHERE app_id = ?').get(appId));
+}
+
+function _formatPolicy(row) {
+  if (!row) return null;
+  return {
+    allowed_providers: _parseList(row.allowed_providers),
+    denied_providers:  _parseList(row.denied_providers),
+    allowed_models:    _parseList(row.allowed_models),
+    denied_models:     _parseList(row.denied_models),
+    updated_at:        row.updated_at,
+  };
+}
+
+/**
+ * Get the policy for an app_id. Returns null if none is set.
+ */
+function getAppPolicy(appId) {
+  return _formatPolicy(db.prepare('SELECT * FROM app_policies WHERE app_id = ?').get(appId));
+}
+
+/**
+ * Check whether a (provider, model) pair is permitted by the app policy.
+ */
+function checkAppPolicy(appId, provider, model) {
+  const policy = db.prepare('SELECT * FROM app_policies WHERE app_id = ?').get(appId);
+  return _evalPolicy(policy, provider, model);
+}
+
+/**
+ * Delete the policy for an app_id.
+ */
+function deleteAppPolicy(appId) {
+  db.prepare('DELETE FROM app_policies WHERE app_id = ?').run(appId);
+}
+
+// ── User-level policy ─────────────────────────────────────────────────────────
+
+/**
+ * Set or replace the provider/model policy for a user.
+ */
+function setUserPolicy(userId, opts = {}) {
+  const fields = ['allowed_providers', 'denied_providers', 'allowed_models', 'denied_models'];
+  const values = {};
+  for (const f of fields) {
+    const v = _validateList(f, opts[f]);
+    if (!v.ok) throw new Error(v.error);
+    values[f] = v.value;
+  }
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO user_policies (user_id, allowed_providers, denied_providers, allowed_models, denied_models, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      allowed_providers = excluded.allowed_providers,
+      denied_providers  = excluded.denied_providers,
+      allowed_models    = excluded.allowed_models,
+      denied_models     = excluded.denied_models,
+      updated_at        = excluded.updated_at
+  `).run(userId, values.allowed_providers, values.denied_providers, values.allowed_models, values.denied_models, now);
+  return _formatPolicy(db.prepare('SELECT * FROM user_policies WHERE user_id = ?').get(userId));
+}
+
+/**
+ * Get the policy for a user. Returns null if none is set.
+ */
+function getUserPolicy(userId) {
+  return _formatPolicy(db.prepare('SELECT * FROM user_policies WHERE user_id = ?').get(userId));
+}
+
+/**
+ * Check whether a (provider, model) pair is permitted by the user policy.
+ */
+function checkUserPolicy(userId, provider, model) {
+  const policy = db.prepare('SELECT * FROM user_policies WHERE user_id = ?').get(userId);
+  return _evalPolicy(policy, provider, model);
+}
+
+/**
+ * Delete the policy for a user.
+ */
+function deleteUserPolicy(userId) {
+  db.prepare('DELETE FROM user_policies WHERE user_id = ?').run(userId);
+}
+
 function dbHealthCheck() {
   const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
   const keyCount  = db.prepare('SELECT COUNT(*) AS n FROM keys').get().n;
@@ -1312,4 +1538,12 @@ module.exports = {
   checkAndReserveAppBudget,
   releaseAppBudgetReservation,
   deleteAppBudget,
+  setAppPolicy,
+  getAppPolicy,
+  checkAppPolicy,
+  deleteAppPolicy,
+  setUserPolicy,
+  getUserPolicy,
+  checkUserPolicy,
+  deleteUserPolicy,
 };

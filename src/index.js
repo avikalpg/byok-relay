@@ -35,6 +35,14 @@ const {
   checkAndReserveAppBudget,
   releaseAppBudgetReservation,
   deleteAppBudget,
+  setAppPolicy,
+  getAppPolicy,
+  checkAppPolicy,
+  deleteAppPolicy,
+  setUserPolicy,
+  getUserPolicy,
+  checkUserPolicy,
+  deleteUserPolicy,
 } = require('./db');
 const { forwardRequest, getProviderMeta, SUPPORTED_PROVIDERS, validateProviderKeyFormat, verifyProviderKey, pingProvider, isPathAllowed, normalizeProviderPath } = require('./providers');
 const { resolveModelRoute, MODEL_PATTERNS, PROVIDER_DEFAULT_PATHS, isRetryableStatus, parseFallbackCandidates } = require('./routing');
@@ -1121,6 +1129,93 @@ app.delete('/admin/apps/:app_id/budget', requireAppSecret, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── App-level provider/model policy ─────────────────────────────────────────
+
+/**
+ * GET /admin/apps/:app_id/policy
+ * Return the provider/model allow/deny policy for the given app_id.
+ * Requires APP_SECRET header.
+ */
+app.get('/admin/apps/:app_id/policy', requireAppSecret, (req, res) => {
+  const policy = getAppPolicy(req.params.app_id);
+  res.json({ app_id: req.params.app_id, policy });
+});
+
+/**
+ * PUT /admin/apps/:app_id/policy
+ * Set or replace the provider/model allow/deny policy for an app_id.
+ * Requires APP_SECRET header.
+ *
+ * Body (all optional; pass null to clear a restriction):
+ *   allowed_providers: string[] | null  — if set, only these providers are allowed
+ *   denied_providers:  string[] | null  — if set, these providers are blocked
+ *   allowed_models:    string[] | null  — if set, only these models are allowed
+ *   denied_models:     string[] | null  — if set, these models are blocked
+ *
+ * Denied lists take precedence over allowed lists.
+ */
+app.put('/admin/apps/:app_id/policy', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'App policies require APP_SECRET to be configured.' });
+  }
+  try {
+    const policy = setAppPolicy(req.params.app_id, req.body || {});
+    res.json({ app_id: req.params.app_id, policy });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /admin/apps/:app_id/policy
+ * Remove the policy for the given app_id (unrestricted again).
+ * Requires APP_SECRET header.
+ */
+app.delete('/admin/apps/:app_id/policy', requireAppSecret, (req, res) => {
+  if (!process.env.APP_SECRET) {
+    return res.status(503).json({ error: 'App policies require APP_SECRET to be configured.' });
+  }
+  deleteAppPolicy(req.params.app_id);
+  res.json({ ok: true });
+});
+
+// ── User-level provider/model policy ─────────────────────────────────────────
+
+/**
+ * GET /users/policy
+ * Return the provider/model allow/deny policy for the authenticated user.
+ */
+app.get('/users/policy', requireToken, (req, res) => {
+  const policy = getUserPolicy(req.user.id);
+  res.json({ user_id: req.user.id, policy });
+});
+
+/**
+ * PUT /users/policy
+ * Set or replace the provider/model allow/deny policy for the current user.
+ * Users may only restrict their own access, not expand beyond app policy.
+ *
+ * Body (all optional; pass null to clear):
+ *   allowed_providers, denied_providers, allowed_models, denied_models
+ */
+app.put('/users/policy', requireToken, (req, res) => {
+  try {
+    const policy = setUserPolicy(req.user.id, req.body || {});
+    res.json({ user_id: req.user.id, policy });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /users/policy
+ * Remove the policy for the authenticated user.
+ */
+app.delete('/users/policy', requireToken, (req, res) => {
+  deleteUserPolicy(req.user.id);
+  res.json({ ok: true });
+});
+
 /**
  * GET /health/credentials
  * Return per-provider credential health for the authenticated user.
@@ -1265,6 +1360,21 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
     });
   }
 
+  // ── Policy enforcement (app-level then user-level) ────────────────────────
+  const appPolicyCheck = checkAppPolicy(req.user.app_id, provider, modelName);
+  if (!appPolicyCheck.ok) {
+    return res.status(403).json({
+      error: appPolicyCheck.reason,
+      reason_code: appPolicyCheck.reason_code,
+    });
+  }
+  const userPolicyCheck = checkUserPolicy(req.user.id, provider, modelName);
+  if (!userPolicyCheck.ok) {
+    return res.status(403).json({
+      error: userPolicyCheck.reason,
+      reason_code: userPolicyCheck.reason_code,
+    });
+  }
 
   // ── Budget enforcement ────────────────────────────────────────────────────
   const budgetCheck = checkBudget(req.user.id);
@@ -1536,6 +1646,21 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
     });
   }
 
+  // ── Policy enforcement (app-level then user-level) ────────────────────────
+  const appPolicyCheck2 = checkAppPolicy(req.user.app_id, provider, modelName);
+  if (!appPolicyCheck2.ok) {
+    return res.status(403).json({
+      error: appPolicyCheck2.reason,
+      reason_code: appPolicyCheck2.reason_code,
+    });
+  }
+  const userPolicyCheck2 = checkUserPolicy(req.user.id, provider, modelName);
+  if (!userPolicyCheck2.ok) {
+    return res.status(403).json({
+      error: userPolicyCheck2.reason,
+      reason_code: userPolicyCheck2.reason_code,
+    });
+  }
 
   // ── Budget enforcement ────────────────────────────────────────────────────
   const budgetCheck = checkBudget(req.user.id);
@@ -1771,6 +1896,22 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   // Do not reconstruct it from Express params here: validation and use must
   // operate on the same value.
   const forwardPath = req.forwardPath;
+
+  // ── Policy enforcement (app-level then user-level) ────────────────────────
+  const appPolicyCheck3 = checkAppPolicy(req.user.app_id, provider, requestedModel);
+  if (!appPolicyCheck3.ok) {
+    return res.status(403).json({
+      error: appPolicyCheck3.reason,
+      reason_code: appPolicyCheck3.reason_code,
+    });
+  }
+  const userPolicyCheck3 = checkUserPolicy(req.user.id, provider, requestedModel);
+  if (!userPolicyCheck3.ok) {
+    return res.status(403).json({
+      error: userPolicyCheck3.reason,
+      reason_code: userPolicyCheck3.reason_code,
+    });
+  }
 
   // ── Budget enforcement (user + app) ──────────────────────────────────────
   const budgetCheck = checkBudget(req.user.id);
