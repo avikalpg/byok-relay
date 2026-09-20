@@ -342,7 +342,7 @@ function startServer(env) {
 
 function req(port, method, pathname, body, headers = {}) {
   return new Promise((resolve, reject) => {
-    const data = body != null ? JSON.stringify(body) : null;
+    const data = typeof body === 'string' ? body : (body != null ? JSON.stringify(body) : null);
     const options = {
       hostname: '127.0.0.1',
       port,
@@ -625,6 +625,75 @@ describe('E2E — policy API + relay enforcement', () => {
       { 'x-relay-token': userToken });
     assert.equal(r.status, 403);
     assert.equal(r.body.reason_code, 'policy_denied_provider');
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  // ── Relay enforcement — token & raw body limits ──────────────────────────
+
+  it('POST /relay evaluates max_completion_tokens even when max_tokens is within limit', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_completion_tokens: 100 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    const r = await req(port, 'POST', '/relay',
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }], max_tokens: 50, max_completion_tokens: 200 },
+      { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_max_tokens_exceeded');
+    assert.equal(r.body.limit, 100);
+    assert.equal(r.body.actual, 200);
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  it('POST /relay/v1/chat/completions evaluates max_completion_tokens when max_tokens is within limit', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_completion_tokens: 100 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    const r = await req(port, 'POST', '/relay/v1/chat/completions',
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }], max_tokens: 20, max_completion_tokens: 150 },
+      { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_max_tokens_exceeded');
+    assert.equal(r.body.limit, 100);
+    assert.equal(r.body.actual, 150);
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  it('POST /relay/:provider/* evaluates max_completion_tokens when max_tokens is within limit', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_completion_tokens: 100 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    const r = await req(port, 'POST', '/relay/openai/v1/chat/completions',
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }], max_tokens: 10, max_completion_tokens: 500 },
+      { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_max_tokens_exceeded');
+    assert.equal(r.body.limit, 100);
+    assert.equal(r.body.actual, 500);
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  it('POST /relay enforces max_request_bytes based on raw body buffer (including whitespace)', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_request_bytes: 120 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    // Minimal JSON that serializes to ~65 chars, padded with spaces to 150 bytes
+    const minObj = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] };
+    const paddedBody = JSON.stringify(minObj) + ' '.repeat(100);
+    assert(Buffer.byteLength(paddedBody) > 120);
+
+    const r = await req(port, 'POST', '/relay', paddedBody, { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_request_too_large');
+    assert.equal(r.body.limit, 120);
+    assert(r.body.actual > 120);
 
     await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
   });

@@ -136,6 +136,21 @@ function extractModelFromProviderPath(provider, forwardPath) {
   return match?.[1];
 }
 
+function getRequestedMaxTokens(body) {
+  if (!body || typeof body !== 'object') return null;
+  const candidates = [];
+  for (const field of ['max_tokens', 'max_completion_tokens']) {
+    const val = body[field];
+    if (typeof val === 'number' && Number.isFinite(val)) {
+      candidates.push(val);
+    } else if (typeof val === 'string' && /^\d+$/.test(val.trim())) {
+      const parsed = Number(val.trim());
+      if (Number.isFinite(parsed)) candidates.push(parsed);
+    }
+  }
+  return candidates.length > 0 ? Math.max(...candidates) : null;
+}
+
 if (ALLOWED_MODELS_RAW.length > 0) {
   logger.info({ allowedModels: ALLOWED_MODELS_RAW }, 'model allowlist active');
 } else {
@@ -188,6 +203,7 @@ app.use(cors({
 }));
 
 app.use((req, res, next) => {
+  req.rawBodyBuffer = Buffer.alloc(0);
   // Preserve raw binary bodies for direct provider relay routes that support
   // audio/image uploads. Unified /relay still expects JSON because it needs a
   // model field for routing.
@@ -211,14 +227,20 @@ app.use((req, res, next) => {
     });
     req.on('end', () => {
       if (rejected) return;
-      req.rawBodyBuffer = chunks.length ? Buffer.concat(chunks, totalBytes) : null;
+      req.rawBodyBuffer = chunks.length ? Buffer.concat(chunks, totalBytes) : Buffer.alloc(0);
+      req.isBinaryBody = true;
       next();
     });
     req.on('error', (err) => {
       if (!rejected) next(err);
     });
   } else {
-    express.json({ limit: REQUEST_BODY_LIMIT_BYTES })(req, res, next);
+    express.json({
+      limit: REQUEST_BODY_LIMIT_BYTES,
+      verify: (req, _res, buf) => {
+        req.rawBodyBuffer = buf;
+      },
+    })(req, res, next);
   }
 });
 
@@ -1368,8 +1390,8 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
 
   // ── Policy enforcement (app-level then user-level) ────────────────────────
   const _policyCtx1 = {
-    requestBytes: req.rawBodyBuffer ? req.rawBodyBuffer.length : Buffer.byteLength(JSON.stringify(req.body || {})),
-    requestedMaxTokens: (req.body || {}).max_tokens ?? (req.body || {}).max_completion_tokens ?? null,
+    requestBytes: req.rawBodyBuffer.length,
+    requestedMaxTokens: getRequestedMaxTokens(req.body),
   };
   const appPolicyCheck = checkAppPolicy(req.user.app_id, provider, modelName, _policyCtx1);
   if (!appPolicyCheck.ok) {
@@ -1660,8 +1682,8 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
 
   // ── Policy enforcement (app-level then user-level) ────────────────────────
   const _policyCtx2 = {
-    requestBytes: req.rawBodyBuffer ? req.rawBodyBuffer.length : Buffer.byteLength(JSON.stringify(req.body || {})),
-    requestedMaxTokens: body.max_tokens ?? body.max_completion_tokens ?? null,
+    requestBytes: req.rawBodyBuffer.length,
+    requestedMaxTokens: getRequestedMaxTokens(body),
   };
   const appPolicyCheck2 = checkAppPolicy(req.user.app_id, provider, modelName, _policyCtx2);
   if (!appPolicyCheck2.ok) {
@@ -1900,7 +1922,7 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   }
 
-  const relayBody = req.rawBodyBuffer || req.body;
+  const relayBody = req.isBinaryBody ? req.rawBodyBuffer : req.body;
   const pathModel = extractModelFromProviderPath(provider, req.forwardPath);
   const requestedModel = pathModel || (Buffer.isBuffer(relayBody) ? undefined : relayBody?.model);
   if (!isModelAllowedForProvider(requestedModel, provider)) {
@@ -1916,11 +1938,10 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   const forwardPath = req.forwardPath;
 
   // ── Policy enforcement (app-level then user-level) ────────────────────────
-  const _bodyForCtx = Buffer.isBuffer(relayBody) ? relayBody : null;
-  const _jsonBodyForCtx = _bodyForCtx ? null : (relayBody || {});
+  const _jsonBodyForCtx = Buffer.isBuffer(relayBody) ? null : (relayBody || {});
   const _policyCtx3 = {
-    requestBytes: _bodyForCtx ? _bodyForCtx.length : Buffer.byteLength(JSON.stringify(_jsonBodyForCtx)),
-    requestedMaxTokens: _jsonBodyForCtx ? (_jsonBodyForCtx.max_tokens ?? _jsonBodyForCtx.max_completion_tokens ?? null) : null,
+    requestBytes: req.rawBodyBuffer.length,
+    requestedMaxTokens: getRequestedMaxTokens(_jsonBodyForCtx),
   };
   const appPolicyCheck3 = checkAppPolicy(req.user.app_id, provider, requestedModel, _policyCtx3);
   if (!appPolicyCheck3.ok) {
