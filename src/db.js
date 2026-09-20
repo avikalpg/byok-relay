@@ -1307,6 +1307,8 @@ function deleteAppBudget(appId) {
         denied_providers  TEXT,
         allowed_models    TEXT,
         denied_models     TEXT,
+        max_completion_tokens INTEGER,
+        max_request_bytes     INTEGER,
         updated_at        INTEGER NOT NULL
       );
     `);
@@ -1319,9 +1321,24 @@ function deleteAppBudget(appId) {
         denied_providers  TEXT,
         allowed_models    TEXT,
         denied_models     TEXT,
+        max_completion_tokens INTEGER,
+        max_request_bytes     INTEGER,
         updated_at        INTEGER NOT NULL
       );
     `);
+  }
+}());
+
+// ── Migration: add max_completion_tokens + max_request_bytes to existing policy tables ──
+(function _migratePolicyTokenSizeLimits() {
+  for (const table of ['app_policies', 'user_policies']) {
+    const cols = db.pragma(`table_info(${table})`).map(c => c.name);
+    if (!cols.includes('max_completion_tokens')) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN max_completion_tokens INTEGER`);
+    }
+    if (!cols.includes('max_request_bytes')) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN max_request_bytes INTEGER`);
+    }
   }
 }());
 
@@ -1360,12 +1377,13 @@ function _validateList(name, input) {
  * denied list:  must NOT be in the list (if set)
  * Denied takes precedence over allowed.
  *
- * @param {object|null} policy - DB row with allowed_providers/denied_providers/allowed_models/denied_models
+ * @param {object|null} policy - DB row with provider/model lists and size/token limits
  * @param {string} provider
  * @param {string|null} model - bare model name (no provider prefix)
+ * @param {{ requestBytes?: number, requestedMaxTokens?: number }} [ctx] - optional request context
  * @returns {{ ok: boolean, reason?: string, reason_code?: string }}
  */
-function _evalPolicy(policy, provider, model) {
+function _evalPolicy(policy, provider, model, ctx = {}) {
   if (!policy) return { ok: true };
 
   const prov = (provider || '').toLowerCase();
@@ -1393,6 +1411,31 @@ function _evalPolicy(policy, provider, model) {
   if (mod && allowedModels && !allowedModels.some(modelMatches)) {
     return { ok: false, reason: `Model "${model}" is not in the allowed model list.`, reason_code: 'policy_denied_model' };
   }
+
+  // ── Size / token limits ───────────────────────────────────────────────────
+  if (policy.max_request_bytes != null && ctx.requestBytes != null) {
+    if (ctx.requestBytes > policy.max_request_bytes) {
+      return {
+        ok: false,
+        reason: `Request body (${ctx.requestBytes} bytes) exceeds the policy limit of ${policy.max_request_bytes} bytes.`,
+        reason_code: 'policy_request_too_large',
+        limit: policy.max_request_bytes,
+        actual: ctx.requestBytes,
+      };
+    }
+  }
+  if (policy.max_completion_tokens != null && ctx.requestedMaxTokens != null) {
+    if (ctx.requestedMaxTokens > policy.max_completion_tokens) {
+      return {
+        ok: false,
+        reason: `Requested max_tokens (${ctx.requestedMaxTokens}) exceeds the policy limit of ${policy.max_completion_tokens}.`,
+        reason_code: 'policy_max_tokens_exceeded',
+        limit: policy.max_completion_tokens,
+        actual: ctx.requestedMaxTokens,
+      };
+    }
+  }
+
   return { ok: true };
 }
 
@@ -1406,35 +1449,50 @@ function _evalPolicy(policy, provider, model) {
  * @returns {{ app_id, allowed_providers, denied_providers, allowed_models, denied_models, updated_at }|Error}
  */
 function setAppPolicy(appId, opts = {}) {
-  const fields = ['allowed_providers', 'denied_providers', 'allowed_models', 'denied_models'];
+  const listFields = ['allowed_providers', 'denied_providers', 'allowed_models', 'denied_models'];
   const values = {};
-  for (const f of fields) {
+  for (const f of listFields) {
     const v = _validateList(f, opts[f]);
     if (!v.ok) throw new Error(v.error);
     values[f] = v.value;
   }
+  // Validate integer limit fields.
+  for (const f of ['max_completion_tokens', 'max_request_bytes']) {
+    const val = opts[f];
+    if (val !== undefined && val !== null) {
+      if (!Number.isInteger(val) || val <= 0) throw new Error(`${f} must be a positive integer or null`);
+      values[f] = val;
+    } else {
+      values[f] = null;
+    }
+  }
   const now = Date.now();
   db.prepare(`
-    INSERT INTO app_policies (app_id, allowed_providers, denied_providers, allowed_models, denied_models, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO app_policies (app_id, allowed_providers, denied_providers, allowed_models, denied_models, max_completion_tokens, max_request_bytes, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(app_id) DO UPDATE SET
-      allowed_providers = excluded.allowed_providers,
-      denied_providers  = excluded.denied_providers,
-      allowed_models    = excluded.allowed_models,
-      denied_models     = excluded.denied_models,
-      updated_at        = excluded.updated_at
-  `).run(appId, values.allowed_providers, values.denied_providers, values.allowed_models, values.denied_models, now);
+      allowed_providers    = excluded.allowed_providers,
+      denied_providers     = excluded.denied_providers,
+      allowed_models       = excluded.allowed_models,
+      denied_models        = excluded.denied_models,
+      max_completion_tokens = excluded.max_completion_tokens,
+      max_request_bytes    = excluded.max_request_bytes,
+      updated_at           = excluded.updated_at
+  `).run(appId, values.allowed_providers, values.denied_providers, values.allowed_models, values.denied_models,
+         values.max_completion_tokens, values.max_request_bytes, now);
   return _formatPolicy(db.prepare('SELECT * FROM app_policies WHERE app_id = ?').get(appId));
 }
 
 function _formatPolicy(row) {
   if (!row) return null;
   return {
-    allowed_providers: _parseList(row.allowed_providers),
-    denied_providers:  _parseList(row.denied_providers),
-    allowed_models:    _parseList(row.allowed_models),
-    denied_models:     _parseList(row.denied_models),
-    updated_at:        row.updated_at,
+    allowed_providers:    _parseList(row.allowed_providers),
+    denied_providers:     _parseList(row.denied_providers),
+    allowed_models:       _parseList(row.allowed_models),
+    denied_models:        _parseList(row.denied_models),
+    max_completion_tokens: row.max_completion_tokens ?? null,
+    max_request_bytes:    row.max_request_bytes ?? null,
+    updated_at:           row.updated_at,
   };
 }
 
@@ -1447,10 +1505,14 @@ function getAppPolicy(appId) {
 
 /**
  * Check whether a (provider, model) pair is permitted by the app policy.
+ * @param {string} appId
+ * @param {string} provider
+ * @param {string|null} model
+ * @param {{ requestBytes?: number, requestedMaxTokens?: number }} [ctx]
  */
-function checkAppPolicy(appId, provider, model) {
+function checkAppPolicy(appId, provider, model, ctx = {}) {
   const policy = db.prepare('SELECT * FROM app_policies WHERE app_id = ?').get(appId);
-  return _evalPolicy(policy, provider, model);
+  return _evalPolicy(policy, provider, model, ctx);
 }
 
 /**
@@ -1466,24 +1528,36 @@ function deleteAppPolicy(appId) {
  * Set or replace the provider/model policy for a user.
  */
 function setUserPolicy(userId, opts = {}) {
-  const fields = ['allowed_providers', 'denied_providers', 'allowed_models', 'denied_models'];
+  const listFields = ['allowed_providers', 'denied_providers', 'allowed_models', 'denied_models'];
   const values = {};
-  for (const f of fields) {
+  for (const f of listFields) {
     const v = _validateList(f, opts[f]);
     if (!v.ok) throw new Error(v.error);
     values[f] = v.value;
   }
+  for (const f of ['max_completion_tokens', 'max_request_bytes']) {
+    const val = opts[f];
+    if (val !== undefined && val !== null) {
+      if (!Number.isInteger(val) || val <= 0) throw new Error(`${f} must be a positive integer or null`);
+      values[f] = val;
+    } else {
+      values[f] = null;
+    }
+  }
   const now = Date.now();
   db.prepare(`
-    INSERT INTO user_policies (user_id, allowed_providers, denied_providers, allowed_models, denied_models, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO user_policies (user_id, allowed_providers, denied_providers, allowed_models, denied_models, max_completion_tokens, max_request_bytes, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
-      allowed_providers = excluded.allowed_providers,
-      denied_providers  = excluded.denied_providers,
-      allowed_models    = excluded.allowed_models,
-      denied_models     = excluded.denied_models,
-      updated_at        = excluded.updated_at
-  `).run(userId, values.allowed_providers, values.denied_providers, values.allowed_models, values.denied_models, now);
+      allowed_providers    = excluded.allowed_providers,
+      denied_providers     = excluded.denied_providers,
+      allowed_models       = excluded.allowed_models,
+      denied_models        = excluded.denied_models,
+      max_completion_tokens = excluded.max_completion_tokens,
+      max_request_bytes    = excluded.max_request_bytes,
+      updated_at           = excluded.updated_at
+  `).run(userId, values.allowed_providers, values.denied_providers, values.allowed_models, values.denied_models,
+         values.max_completion_tokens, values.max_request_bytes, now);
   return _formatPolicy(db.prepare('SELECT * FROM user_policies WHERE user_id = ?').get(userId));
 }
 
@@ -1496,10 +1570,14 @@ function getUserPolicy(userId) {
 
 /**
  * Check whether a (provider, model) pair is permitted by the user policy.
+ * @param {string} userId
+ * @param {string} provider
+ * @param {string|null} model
+ * @param {{ requestBytes?: number, requestedMaxTokens?: number }} [ctx]
  */
-function checkUserPolicy(userId, provider, model) {
+function checkUserPolicy(userId, provider, model, ctx = {}) {
   const policy = db.prepare('SELECT * FROM user_policies WHERE user_id = ?').get(userId);
-  return _evalPolicy(policy, provider, model);
+  return _evalPolicy(policy, provider, model, ctx);
 }
 
 /**

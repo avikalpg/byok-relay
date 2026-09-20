@@ -342,7 +342,7 @@ function startServer(env) {
 
 function req(port, method, pathname, body, headers = {}) {
   return new Promise((resolve, reject) => {
-    const data = body != null ? JSON.stringify(body) : null;
+    const data = typeof body === 'string' ? body : (body != null ? JSON.stringify(body) : null);
     const options = {
       hostname: '127.0.0.1',
       port,
@@ -627,5 +627,224 @@ describe('E2E — policy API + relay enforcement', () => {
     assert.equal(r.body.reason_code, 'policy_denied_provider');
 
     await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  // ── Relay enforcement — token & raw body limits ──────────────────────────
+
+  it('POST /relay evaluates max_completion_tokens even when max_tokens is within limit', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_completion_tokens: 100 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    const r = await req(port, 'POST', '/relay',
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }], max_tokens: 50, max_completion_tokens: 200 },
+      { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_max_tokens_exceeded');
+    assert.equal(r.body.limit, 100);
+    assert.equal(r.body.actual, 200);
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  it('POST /relay/v1/chat/completions evaluates max_completion_tokens when max_tokens is within limit', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_completion_tokens: 100 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    const r = await req(port, 'POST', '/relay/v1/chat/completions',
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }], max_tokens: 20, max_completion_tokens: 150 },
+      { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_max_tokens_exceeded');
+    assert.equal(r.body.limit, 100);
+    assert.equal(r.body.actual, 150);
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  it('POST /relay/:provider/* evaluates max_completion_tokens when max_tokens is within limit', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_completion_tokens: 100 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    const r = await req(port, 'POST', '/relay/openai/v1/chat/completions',
+      { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }], max_tokens: 10, max_completion_tokens: 500 },
+      { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_max_tokens_exceeded');
+    assert.equal(r.body.limit, 100);
+    assert.equal(r.body.actual, 500);
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+
+  it('POST /relay enforces max_request_bytes based on raw body buffer (including whitespace)', async () => {
+    await req(port, 'PUT', `/admin/apps/${appId}/policy`,
+      { max_request_bytes: 120 },
+      { Authorization: `Bearer ${appSecret}` });
+
+    // Minimal JSON that serializes to ~65 chars, padded with spaces to 150 bytes
+    const minObj = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] };
+    const paddedBody = JSON.stringify(minObj) + ' '.repeat(100);
+    assert(Buffer.byteLength(paddedBody) > 120);
+
+    const r = await req(port, 'POST', '/relay', paddedBody, { 'x-relay-token': userToken });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.reason_code, 'policy_request_too_large');
+    assert.equal(r.body.limit, 120);
+    assert(r.body.actual > 120);
+
+    await req(port, 'DELETE', `/admin/apps/${appId}/policy`, null, { Authorization: `Bearer ${appSecret}` });
+  });
+});
+
+// ── DB unit tests: token + size limit fields ──────────────────────────────────
+
+describe('DB — policy token + size limit CRUD', () => {
+  let tmpDir, dbPath, runInDb;
+  const encSecret = require('node:crypto').randomBytes(24).toString('hex') + '-limit-unit';
+
+  before(() => {
+    const fs   = require('node:fs');
+    const os   = require('node:os');
+    const path = require('node:path');
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-relay-policy-limits-'));
+    dbPath = path.join(tmpDir, 'relay.db');
+    runInDb = makeDbRunner(dbPath, encSecret);
+  });
+
+  after(() => {
+    require('node:fs').rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('setAppPolicy stores max_completion_tokens and max_request_bytes', () => {
+    const result = runInDb(`
+      const { setAppPolicy, getAppPolicy } = require('./src/db');
+      setAppPolicy('app-limits', { max_completion_tokens: 256, max_request_bytes: 2048 });
+      process.stdout.write(JSON.stringify(getAppPolicy('app-limits')));
+    `);
+    assert.equal(result.max_completion_tokens, 256);
+    assert.equal(result.max_request_bytes, 2048);
+  });
+
+  it('setAppPolicy rejects zero max_completion_tokens', () => {
+    assert.throws(() => {
+      runInDb(`
+        const { setAppPolicy } = require('./src/db');
+        setAppPolicy('app-bad', { max_completion_tokens: 0 });
+      `);
+    });
+  });
+
+  it('setAppPolicy rejects negative max_request_bytes', () => {
+    assert.throws(() => {
+      runInDb(`
+        const { setAppPolicy } = require('./src/db');
+        setAppPolicy('app-bad2', { max_request_bytes: -1 });
+      `);
+    });
+  });
+
+  it('setAppPolicy rejects non-integer max_completion_tokens', () => {
+    assert.throws(() => {
+      runInDb(`
+        const { setAppPolicy } = require('./src/db');
+        setAppPolicy('app-bad3', { max_completion_tokens: 1.5 });
+      `);
+    });
+  });
+
+  it('null clears max_completion_tokens', () => {
+    const result = runInDb(`
+      const { setAppPolicy, getAppPolicy } = require('./src/db');
+      setAppPolicy('app-clear', { max_completion_tokens: 100 });
+      setAppPolicy('app-clear', { max_completion_tokens: null });
+      process.stdout.write(JSON.stringify(getAppPolicy('app-clear')));
+    `);
+    assert.equal(result.max_completion_tokens, null);
+  });
+
+  it('checkAppPolicy returns policy_max_tokens_exceeded when requestedMaxTokens exceeds limit', () => {
+    const result = runInDb(`
+      const { setAppPolicy, checkAppPolicy } = require('./src/db');
+      setAppPolicy('app-tok-limit', { max_completion_tokens: 100 });
+      process.stdout.write(JSON.stringify(checkAppPolicy('app-tok-limit', 'openai', 'gpt-4o', { requestedMaxTokens: 500 })));
+    `);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason_code, 'policy_max_tokens_exceeded');
+    assert.equal(result.limit, 100);
+    assert.equal(result.actual, 500);
+  });
+
+  it('checkAppPolicy ok:true when requestedMaxTokens is within limit', () => {
+    const result = runInDb(`
+      const { setAppPolicy, checkAppPolicy } = require('./src/db');
+      setAppPolicy('app-tok-ok', { max_completion_tokens: 1000 });
+      process.stdout.write(JSON.stringify(checkAppPolicy('app-tok-ok', 'openai', 'gpt-4o', { requestedMaxTokens: 500 })));
+    `);
+    assert.equal(result.ok, true);
+  });
+
+  it('checkAppPolicy ok:true when requestedMaxTokens is null (no max_tokens in request)', () => {
+    const result = runInDb(`
+      const { setAppPolicy, checkAppPolicy } = require('./src/db');
+      setAppPolicy('app-tok-null', { max_completion_tokens: 10 });
+      process.stdout.write(JSON.stringify(checkAppPolicy('app-tok-null', 'openai', 'gpt-4o', { requestedMaxTokens: null })));
+    `);
+    assert.equal(result.ok, true);
+  });
+
+  it('checkAppPolicy returns policy_request_too_large when requestBytes exceeds limit', () => {
+    const result = runInDb(`
+      const { setAppPolicy, checkAppPolicy } = require('./src/db');
+      setAppPolicy('app-bytes-limit', { max_request_bytes: 100 });
+      process.stdout.write(JSON.stringify(checkAppPolicy('app-bytes-limit', 'openai', 'gpt-4o', { requestBytes: 9999 })));
+    `);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason_code, 'policy_request_too_large');
+    assert.equal(result.limit, 100);
+    assert.equal(result.actual, 9999);
+  });
+
+  it('checkAppPolicy ok:true when requestBytes is within max_request_bytes', () => {
+    const result = runInDb(`
+      const { setAppPolicy, checkAppPolicy } = require('./src/db');
+      setAppPolicy('app-bytes-ok', { max_request_bytes: 10000 });
+      process.stdout.write(JSON.stringify(checkAppPolicy('app-bytes-ok', 'openai', 'gpt-4o', { requestBytes: 500 })));
+    `);
+    assert.equal(result.ok, true);
+  });
+
+  it('setUserPolicy stores max_completion_tokens and max_request_bytes', () => {
+    const result = runInDb(`
+      const { createUser, setUserPolicy, getUserPolicy } = require('./src/db');
+      const { id } = createUser('app1');
+      setUserPolicy(id, { max_completion_tokens: 512, max_request_bytes: 4096 });
+      process.stdout.write(JSON.stringify(getUserPolicy(id)));
+    `);
+    assert.equal(result.max_completion_tokens, 512);
+    assert.equal(result.max_request_bytes, 4096);
+  });
+
+  it('checkUserPolicy enforces max_completion_tokens', () => {
+    const result = runInDb(`
+      const { createUser, setUserPolicy, checkUserPolicy } = require('./src/db');
+      const { id } = createUser('app1');
+      setUserPolicy(id, { max_completion_tokens: 50 });
+      process.stdout.write(JSON.stringify(checkUserPolicy(id, 'openai', 'gpt-4o', { requestedMaxTokens: 200 })));
+    `);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason_code, 'policy_max_tokens_exceeded');
+  });
+
+  it('provider/model deny check runs before size check (deny wins)', () => {
+    const result = runInDb(`
+      const { setAppPolicy, checkAppPolicy } = require('./src/db');
+      setAppPolicy('app-order', { denied_providers: ['groq'], max_completion_tokens: 10 });
+      process.stdout.write(JSON.stringify(checkAppPolicy('app-order', 'groq', 'llama3', { requestedMaxTokens: 5 })));
+    `);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason_code, 'policy_denied_provider');
   });
 });
