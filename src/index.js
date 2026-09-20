@@ -1150,10 +1150,12 @@ app.get('/admin/apps/:app_id/policy', requireAppSecret, (req, res) => {
  * Requires APP_SECRET header.
  *
  * Body (all optional; pass null to clear a restriction):
- *   allowed_providers: string[] | null  — if set, only these providers are allowed
- *   denied_providers:  string[] | null  — if set, these providers are blocked
- *   allowed_models:    string[] | null  — if set, only these models are allowed
- *   denied_models:     string[] | null  — if set, these models are blocked
+ *   allowed_providers:    string[] | null  — if set, only these providers are allowed
+ *   denied_providers:     string[] | null  — if set, these providers are blocked
+ *   allowed_models:       string[] | null  — if set, only these models are allowed
+ *   denied_models:        string[] | null  — if set, these models are blocked
+ *   max_completion_tokens: number | null   — reject requests where max_tokens > this limit
+ *   max_request_bytes:    number | null   — reject requests where body size > this limit
  *
  * Denied lists take precedence over allowed lists.
  */
@@ -1199,7 +1201,8 @@ app.get('/users/policy', requireToken, (req, res) => {
  * Users may only restrict their own access, not expand beyond app policy.
  *
  * Body (all optional; pass null to clear):
- *   allowed_providers, denied_providers, allowed_models, denied_models
+ *   allowed_providers, denied_providers, allowed_models, denied_models,
+ *   max_completion_tokens, max_request_bytes
  */
 app.put('/users/policy', requireToken, (req, res) => {
   try {
@@ -1364,18 +1367,24 @@ app.post('/relay', requireToken, relayLimiter, async (req, res) => {
   }
 
   // ── Policy enforcement (app-level then user-level) ────────────────────────
-  const appPolicyCheck = checkAppPolicy(req.user.app_id, provider, modelName);
+  const _policyCtx1 = {
+    requestBytes: req.rawBodyBuffer ? req.rawBodyBuffer.length : Buffer.byteLength(JSON.stringify(req.body || {})),
+    requestedMaxTokens: (req.body || {}).max_tokens ?? (req.body || {}).max_completion_tokens ?? null,
+  };
+  const appPolicyCheck = checkAppPolicy(req.user.app_id, provider, modelName, _policyCtx1);
   if (!appPolicyCheck.ok) {
     return res.status(403).json({
       error: appPolicyCheck.reason,
       reason_code: appPolicyCheck.reason_code,
+      ...(appPolicyCheck.limit != null ? { limit: appPolicyCheck.limit, actual: appPolicyCheck.actual } : {}),
     });
   }
-  const userPolicyCheck = checkUserPolicy(req.user.id, provider, modelName);
+  const userPolicyCheck = checkUserPolicy(req.user.id, provider, modelName, _policyCtx1);
   if (!userPolicyCheck.ok) {
     return res.status(403).json({
       error: userPolicyCheck.reason,
       reason_code: userPolicyCheck.reason_code,
+      ...(userPolicyCheck.limit != null ? { limit: userPolicyCheck.limit, actual: userPolicyCheck.actual } : {}),
     });
   }
 
@@ -1650,18 +1659,24 @@ app.post('/relay/v1/chat/completions', requireToken, relayLimiter, async (req, r
   }
 
   // ── Policy enforcement (app-level then user-level) ────────────────────────
-  const appPolicyCheck2 = checkAppPolicy(req.user.app_id, provider, modelName);
+  const _policyCtx2 = {
+    requestBytes: req.rawBodyBuffer ? req.rawBodyBuffer.length : Buffer.byteLength(JSON.stringify(req.body || {})),
+    requestedMaxTokens: body.max_tokens ?? body.max_completion_tokens ?? null,
+  };
+  const appPolicyCheck2 = checkAppPolicy(req.user.app_id, provider, modelName, _policyCtx2);
   if (!appPolicyCheck2.ok) {
     return res.status(403).json({
       error: appPolicyCheck2.reason,
       reason_code: appPolicyCheck2.reason_code,
+      ...(appPolicyCheck2.limit != null ? { limit: appPolicyCheck2.limit, actual: appPolicyCheck2.actual } : {}),
     });
   }
-  const userPolicyCheck2 = checkUserPolicy(req.user.id, provider, modelName);
+  const userPolicyCheck2 = checkUserPolicy(req.user.id, provider, modelName, _policyCtx2);
   if (!userPolicyCheck2.ok) {
     return res.status(403).json({
       error: userPolicyCheck2.reason,
       reason_code: userPolicyCheck2.reason_code,
+      ...(userPolicyCheck2.limit != null ? { limit: userPolicyCheck2.limit, actual: userPolicyCheck2.actual } : {}),
     });
   }
 
@@ -1901,18 +1916,26 @@ app.post('/relay/:provider/*', requireToken, (req, res, next) => {
   const forwardPath = req.forwardPath;
 
   // ── Policy enforcement (app-level then user-level) ────────────────────────
-  const appPolicyCheck3 = checkAppPolicy(req.user.app_id, provider, requestedModel);
+  const _bodyForCtx = Buffer.isBuffer(relayBody) ? relayBody : null;
+  const _jsonBodyForCtx = _bodyForCtx ? null : (relayBody || {});
+  const _policyCtx3 = {
+    requestBytes: _bodyForCtx ? _bodyForCtx.length : Buffer.byteLength(JSON.stringify(_jsonBodyForCtx)),
+    requestedMaxTokens: _jsonBodyForCtx ? (_jsonBodyForCtx.max_tokens ?? _jsonBodyForCtx.max_completion_tokens ?? null) : null,
+  };
+  const appPolicyCheck3 = checkAppPolicy(req.user.app_id, provider, requestedModel, _policyCtx3);
   if (!appPolicyCheck3.ok) {
     return res.status(403).json({
       error: appPolicyCheck3.reason,
       reason_code: appPolicyCheck3.reason_code,
+      ...(appPolicyCheck3.limit != null ? { limit: appPolicyCheck3.limit, actual: appPolicyCheck3.actual } : {}),
     });
   }
-  const userPolicyCheck3 = checkUserPolicy(req.user.id, provider, requestedModel);
+  const userPolicyCheck3 = checkUserPolicy(req.user.id, provider, requestedModel, _policyCtx3);
   if (!userPolicyCheck3.ok) {
     return res.status(403).json({
       error: userPolicyCheck3.reason,
       reason_code: userPolicyCheck3.reason_code,
+      ...(userPolicyCheck3.limit != null ? { limit: userPolicyCheck3.limit, actual: userPolicyCheck3.actual } : {}),
     });
   }
 
